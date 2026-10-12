@@ -372,7 +372,7 @@ class TestCodexHomes(unittest.TestCase):
         before = {p.relative_to(self.state_dir): p.read_bytes()
                   for p in self.state_dir.rglob("*") if p.is_file()}
         home = CH.home_path(self.state_dir, attempt.name)
-        with mock.patch.object(S, "save_state", wraps=S.save_state) as save:
+        with mock.patch.object(S.SS, "save_state", wraps=S.save_state) as save:
             job, error = self.submit(unit, attempt, True, state)
         self.assertIsNone(error)
         save.assert_not_called()
@@ -540,7 +540,7 @@ class TestCodexHomes(unittest.TestCase):
 
         with mock.patch.object(CH, "allocate", side_effect=allocated), \
                 mock.patch.object(Path, "lstat", new=fail_unrecorded_stat), \
-                mock.patch.object(S, "save_state", side_effect=save):
+                mock.patch.object(S.SS, "save_state", side_effect=save):
             self.launch()
         self.assertEqual(len(observed), 1)
 

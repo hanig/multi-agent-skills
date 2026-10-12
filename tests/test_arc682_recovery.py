@@ -137,7 +137,7 @@ class TestARC682Recovery(unittest.TestCase):
                 (workspace / "late.bin").write_bytes(b"arrived after snapshot\x00")
                 mutated.append(True)
 
-        with mock.patch.object(S, "save_state", side_effect=mutate_after_snapshot):
+        with mock.patch.object(S.SS, "save_state", side_effect=mutate_after_snapshot):
             report = []
             S._archive_code_worktree(
                 state, unit, str(attempt), report, str(state_dir))

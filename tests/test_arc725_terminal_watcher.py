@@ -287,7 +287,7 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
 
         with mock.patch.object(S.U, "run", side_effect=run) as run_mock, \
                 mock.patch.object(S.SS, "load_state", side_effect=AssertionError("watcher loaded state")), \
-                mock.patch.object(S, "save_state", side_effect=AssertionError("watcher wrote state")), \
+                mock.patch.object(S.SS, "save_state", side_effect=AssertionError("watcher wrote state")), \
                 mock.patch.object(S.SS, "acquire_lease", side_effect=AssertionError("watcher took lease")):
             self.assertEqual(S.cmd_watch_code_terminal(self.args), S.EXIT_OK)
         self.assertEqual(run_mock.call_count, 2)
@@ -483,7 +483,7 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
     def test_status_does_not_acquire_a_writer_lease(self):
         self.seed_watch()
         with mock.patch.object(S.SS, "acquire_lease", side_effect=AssertionError("status took lease")), \
-                mock.patch.object(S, "save_state", side_effect=AssertionError("status wrote")), \
+                mock.patch.object(S.SS, "save_state", side_effect=AssertionError("status wrote")), \
                 contextlib.redirect_stdout(io.StringIO()):
             args = Namespace(plan=str(self.plan_path), state_dir=str(self.state_dir), json=True)
             self.assertEqual(S.cmd_status(args), S.EXIT_OK)
@@ -538,7 +538,7 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
             return real_save(directory, state)
 
         with mock.patch.object(S.SS, "load_state", side_effect=load), \
-                mock.patch.object(S, "save_state", side_effect=save):
+                mock.patch.object(S.SS, "save_state", side_effect=save):
             self.advance()
         self.assertEqual(calls, ["load", "save"])
         self.assertFalse(S.renew_lease(self.state_dir))

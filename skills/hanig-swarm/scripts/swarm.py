@@ -90,6 +90,19 @@ def __getattr__(name):
     if name in {
         "acquire_lease", "renew_lease", "release_lease", "load_state",
         "_LOCK_OWNER_PID",
+        "save_state",
+        "_unit_state",
+        "_set_unit_state",
+        "_normalise_state_clock",
+        "_deadline_host_evaluation",
+        "_deadline_exceeded",
+        "_mark_deadline_exceeded",
+        "_clear_deadline_breach",
+        "_deadline_attempt_is_unresolved",
+        "_occupies_live_resources",
+        "trusted_launch_facts",
+        "trusted_launch_host_anchor",
+        "LIVE_STATES",
     }:
         return getattr(SS, name)
     # Routing resolution rebinds defaults. Read through to their owner so
@@ -2268,10 +2281,6 @@ CHARGE_METRICS = ("gpu_hours", "cpu_hours", "read_bytes", "wall_seconds",
                   "items")
 RETRY_MODES = ("restart", "resume")
 
-# States in which a unit is occupying a slot on the cluster right now.
-LIVE_STATES = ("ALLOCATED", "SUBMITTED", "RUNNING")
-
-
 # Fields that cannot change what a dispatch DOES. Everything else is
 # digested. Listing the cosmetic fields rather than the meaningful ones is
 # deliberate: four reviewers broke the previous inclusion list by naming
@@ -2300,171 +2309,6 @@ def plan_digest(plan):
         content["canary"] = plan["canary"]
     payload = json.dumps(content, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
-
-
-def save_state(state_dir, state):
-    key = str(Path(state_dir).resolve())
-    epoch, err = _read_state_epoch(state_dir)
-    # A lease holder always uses its process pin, even after reloading state.
-    # Legacy direct helpers (including promotion) do not acquire a lease:
-    # their first save pins the observed epoch without bumping it or granting
-    # custody. Loaded snapshots also carry their own earlier observation.
-    owner, expected = _LOCK_EPOCHS.get(key, (os.getpid(), epoch))
-    if err or owner != os.getpid() or epoch != expected:
-        # Do not persist the halt into the successor's state.
-        reason = err or "state epoch changed or process pin was inherited"
-        sys.exit("HALTED: another coordinator has written state under us "
-                 f"({reason}); refusing to save")
-    # Re-acquisition moves the process pin, never the snapshot's load epoch.
-    # Check before changing the snapshot, pinning a helper or touching disk.
-    # Plain, caller-built dictionaries retain the legacy direct-helper API;
-    # every dictionary returned by load_state is a tagged snapshot.
-    if (isinstance(state, _StateSnapshot)
-            and getattr(state, "_snapshot_epoch", None)
-            != (key, owner, expected)):
-        sys.exit("HALTED: another coordinator has written state under us "
-                 "(snapshot belongs to a different lease epoch or state "
-                 "directory); reload state before saving")
-    _LOCK_EPOCHS.setdefault(key, (owner, expected))
-    # Retire the old inline field on a normal save, never on acquisition.
-    state.pop("epoch", None)
-    Path(state_dir).mkdir(parents=True, exist_ok=True)
-    err = U.write_json(Path(state_dir) / STATE_FILE, state)
-    if err:
-        sys.exit(f"error: cannot persist coordinator state: {err}. Refusing to "
-                 f"continue: acting on state that is not on disk is how a "
-                 f"crash becomes a double submission.")
-
-
-def _unit_state(state, uid):
-    return state["units"].setdefault(
-        uid, {"state": None, "attempt_dir": None, "attempts": [],
-              "gpu_hours": 0.0})
-
-
-def _set_unit_state(us, value, changed_at=None):
-    """Set a unit state and durably date a real transition.
-
-    The timestamp is coordinator state, not worker evidence. Historical state
-    has no trustworthy transition time, so advance marks it from first
-    observation rather than inventing an earlier event.
-    """
-    previous = us.get("state")
-    if previous != value:
-        us["state_changed_at"] = (time.time() if changed_at is None
-                                  else float(changed_at))
-        us.pop("state_changed_at_basis", None)
-        if previous == "NEEDS_HUMAN" and value != "NEEDS_HUMAN":
-            us.pop("reason", None)
-            us.pop("deadline_previous_reason", None)
-    us["state"] = value
-
-
-def _normalise_state_clock(us, observed_at):
-    """Give historical state an honest clock from its first observation."""
-    if us.get("state") is not None and us.get("state_changed_at") is None:
-        us["state_changed_at"] = float(observed_at)
-        us["state_changed_at_basis"] = "first_observed"
-
-
-def _deadline_host_evaluation(state, uid, us):
-    """Whether this coordinator may evaluate the attempt's local clock."""
-    anchor = trusted_launch_host_anchor(state, uid, us.get("attempt_dir"))
-    belongs = W.attempt_belongs_to_host(anchor)
-    if belongs is True:
-        return True, None
-    if belongs is False:
-        return False, W.launch_host_problem(anchor)
-    return None, (
-        "UNJUDGEABLE HERE: coordinator state records no launch_host for this "
-        "attempt, so its allocated_at deadline is not evaluable on this "
-        "host. No deadline escalation is emitted")
-
-
-def _deadline_exceeded(u, us, state, uid, observed_at=None):
-    """Whether this host-owned attempt crossed its allocation deadline."""
-    deadline = u.get("deadline_s")
-    allocated = us.get("allocated_at")
-    if deadline is None or allocated is None or not us.get("attempt_dir"):
-        return False
-    belongs, _problem = _deadline_host_evaluation(state, uid, us)
-    if belongs is not True:
-        return False
-    terminal = {"DONE", "FAILED", "FAILED_EVIDENCE", "READY_FOR_PR",
-                "PREFLIGHT_REFUSED", "HELD"}
-    if us.get("state") in terminal:
-        return False
-    now = time.time() if observed_at is None else float(observed_at)
-    return now - float(allocated) >= float(deadline)
-
-
-def _mark_deadline_exceeded(u, us, observed_at=None):
-    """Persist the conservative escalation; return True on first breach."""
-    now = time.time() if observed_at is None else float(observed_at)
-    active = (us.get("deadline_breach_active") is True
-              or us.get("reason") == "deadline_exceeded")
-    first_breach = not active
-    sequence = us.get("deadline_breach_seq")
-    if type(sequence) is not int or sequence < 1:
-        sequence = 0
-    if first_breach:
-        sequence += 1
-    elif sequence == 0:
-        # State written by the first deadline implementation has no sequence.
-        # Adopt its active breach as event one and retain that implementation's
-        # key until the breach ends rather than emitting a duplicate.
-        sequence = 1
-        us["deadline_breach_legacy_key"] = True
-    prior_reason = us.get("reason")
-    if first_breach and prior_reason:
-        us["deadline_previous_reason"] = prior_reason
-    us["deadline_breach_active"] = True
-    us["deadline_breach_seq"] = sequence
-    us["reason"] = "deadline_exceeded"
-    us["deadline_s"] = float(u["deadline_s"])
-    us["deadline_at"] = float(us["allocated_at"]) + float(u["deadline_s"])
-    # Marking the breach includes the operator-visible state transition. Every
-    # caller, including the post-check path, persists NEEDS_HUMAN through here.
-    _set_unit_state(us, "NEEDS_HUMAN", changed_at=now)
-    return first_breach
-
-
-def _clear_deadline_breach(us):
-    """Clear one ended breach while retaining its monotonic event counter."""
-    was_active = (us.pop("deadline_breach_active", None) is True
-                  or us.get("reason") == "deadline_exceeded")
-    if not was_active:
-        return False
-    if us.get("reason") == "deadline_exceeded":
-        us.pop("reason", None)
-        prior_reason = us.pop("deadline_previous_reason", None)
-        if prior_reason:
-            us["reason"] = prior_reason
-    else:
-        us.pop("deadline_previous_reason", None)
-    us.pop("deadline_s", None)
-    us.pop("deadline_at", None)
-    us.pop("deadline_breach_legacy_key", None)
-    return True
-
-
-def _deadline_attempt_is_unresolved(u, us):
-    """Whether a declared deadline still protects this attempt's resources."""
-    terminal = {"DONE", "FAILED", "FAILED_EVIDENCE", "READY_FOR_PR",
-                "PREFLIGHT_REFUSED", "HELD"}
-    return (u.get("deadline_s") is not None
-            and bool(us.get("attempt_dir"))
-            and us.get("state") not in terminal)
-
-
-def _occupies_live_resources(u, us):
-    """Whether an attempt may still execute and must retain its claim/slot.
-
-    Deadline protection depends on the declared attempt, never on whether a
-    later phase has already rewritten the operator-facing state/reason.
-    """
-    return (us.get("state") in LIVE_STATES
-            or _deadline_attempt_is_unresolved(u, us))
 
 
 # --- dispatch -------------------------------------------------------------
@@ -2839,9 +2683,9 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
         # before a worktree or agent can exist; crash recovery may identify an
         # existing checkout, but must never discover a replacement base from
         # a ref that could have moved in the meantime.
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
     if _requires_clean_workspace(u) and kind != "code" and not dry_run:
-        facts = trusted_launch_facts(state or {}, u["id"], unit_dir)
+        facts = SS.trusted_launch_facts(state or {}, u["id"], unit_dir)
         if not facts:
             return None, (
                 f"unit {u['id']!r}: coordinator state has no complete launch "
@@ -2862,7 +2706,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
         # Apply the lifecycle durability invariant documented by load_state:
         # this snapshot must exist on disk before the agent does.
         if state_dir is not None:
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
     if dry_run:
         return f"dry-{os.urandom(3).hex()}", None
     if state is None or state_dir is None:
@@ -2893,7 +2737,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
         # external launcher sees the wrapper; a crash may repeat submission
         # recovery, but it may never reconstruct or replace this boundary from
         # the agent-writable job script or attempt spec.
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
     if kind == "slurm":
         deps = _dep_env(u, state or {})
         script = Path(unit_dir) / "job.sbatch"
@@ -3036,7 +2880,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                         f"do not re-run this attempt until they agree with "
                         f"the recorded launch intent")
                 if state_dir is not None:
-                    save_state(state_dir, state)
+                    SS.save_state(state_dir, state)
                 return str(existing_agent), None
             candidates = _git_worktrees_on_branch(
                 source_repo, intent["branch"])
@@ -3065,7 +2909,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             # The exact-base worktree is now authenticated and durable. It is
             # safe to create the missing agent in it without recreating Git
             # resources or resolving a live ref.
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
         else:
             reuse_workspace, git_pointer_sha256, create_error = (
                 _create_code_worktree(state_dir, intent))
@@ -3075,7 +2919,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                     workspace_owner="coordinator")
                 # Registration precedes verification so even a rejected
                 # checkout remains visible to preservation and cleanup.
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
             if create_error:
                 return None, create_error
             complete_error = _complete_code_launch(
@@ -3086,10 +2930,10 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 workspace_meta["verification"] = "refused"
                 workspace_meta["cleanup_pending"] = True
                 workspace_meta["verification_problem"] = complete_error
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
                 return None, (f"coordinator-created worktree could not be "
                               f"verified: {complete_error}")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
         # U.run contains the short-lived Paseo client's environment. The
         # long-lived Paseo daemon is a separate process boundary: a live probe
         # showed its provider credentials can still reach an agent even when
@@ -3136,7 +2980,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 f"protocol ({protocol_problem}); refusing an unclosable "
                 f"agent launch")
         if codex:
-            us = _unit_state(state, u["id"])
+            us = SS._unit_state(state, u["id"])
             had_homes = "attempt_codex_homes" in us
             previous_homes = us.get("attempt_codex_homes")
             homes = dict(previous_homes) if had_homes else {}
@@ -3150,7 +2994,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                     homes[attempt] = home_meta
                     us["attempt_codex_homes"] = homes
                     # Cleanup authority is durable before links or an agent exist.
-                    save_state(state_dir, state)
+                    SS.save_state(state_dir, state)
                 except BaseException:
                     # Metadata may not exist yet. Use allocation's identity,
                     # and restore memory even if a replacement refuses cleanup.
@@ -3180,7 +3024,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             workspace_meta["verification"] = "refused"
             workspace_meta["cleanup_pending"] = True
             workspace_meta["verification_problem"] = "paseo run failed"
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             return None, f"paseo run failed: {_paseo_error(out, err)}"
         # Read the id from JSON. Scanning output tokens for "something long
         # with a dash in it" would happily return a branch name or a path.
@@ -3202,18 +3046,18 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             state if state is not None else {}, u, unit_dir, workspace,
             workspace_id=workspace_id, workspace_owner="coordinator")
         if state_dir is not None:
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
         if not agent:
             workspace_meta["verification"] = "refused"
             workspace_meta["cleanup_pending"] = True
             workspace_meta["verification_problem"] = (
                 "Paseo returned no agent id")
             if state_dir is not None:
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
             return None, (f"paseo run returned no agent id: "
                           f"{_paseo_error(out, err)}")
         if reuse_workspace:
-            facts = trusted_launch_facts(state, u["id"], unit_dir)
+            facts = SS.trusted_launch_facts(state, u["id"], unit_dir)
             identity_error = W.workspace_identity_problem(U.run, facts)
             if (reported_workspace is not None
                     and str(Path(reported_workspace).resolve())
@@ -3225,7 +3069,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 workspace_meta["verification"] = "refused"
                 workspace_meta["cleanup_pending"] = True
                 workspace_meta["verification_problem"] = identity_error
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
                 return None, (f"paseo run returned agent {agent}, but reused "
                               f"worktree verification failed: "
                               f"{identity_error}")
@@ -3238,11 +3082,11 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             workspace_meta["cleanup_pending"] = True
             workspace_meta["verification_problem"] = complete_err
             if state_dir is not None:
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
             return None, (f"paseo run returned agent {agent}, but its "
                           f"worktree could not be recorded: {complete_err}")
         if state_dir is not None:
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
         return str(agent), None
     return None, f"unknown kind {kind!r}"
 
@@ -6197,15 +6041,15 @@ def maybe_continue(state_dir, uid, u, us, report, state=None):
         # before the result is saved, Paseo offers no idempotency key, so a
         # retry can duplicate the prompt; exactly-once delivery is not
         # available across that boundary.
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
     rc, out, err = U.run(["paseo", "send", str(agent), prompt], timeout=120)
     entry["sent"] = rc == 0
     entry["status"] = "sent" if rc == 0 else "failed"
     if rc != 0:
         entry["error"] = (err or out or "").strip()[:200]
     else:
-        _set_unit_state(us, "RUNNING")
-    save_state(state_dir, state)
+        SS._set_unit_state(us, "RUNNING")
+    SS.save_state(state_dir, state)
     if rc != 0:
         report.append(f"{uid}: continuation {used + 1}/{limit} could not be "
                       f"sent: {entry['error']}")
@@ -6233,40 +6077,8 @@ def trusted_base(state, unit, attempt_dir):
     """
     if not attempt_dir:
         return None
-    facts = trusted_launch_facts(state, unit, attempt_dir)
+    facts = SS.trusted_launch_facts(state, unit, attempt_dir)
     return facts.get("base_commit") if facts else None
-
-
-def trusted_launch_facts(state, unit, attempt_dir):
-    """Complete per-attempt launch authority, from coordinator state only."""
-    if not attempt_dir:
-        return None
-    attempt = Path(attempt_dir).name
-    us = (state.get("units") or {}).get(unit) or {}
-    facts = (us.get("attempt_launch_facts") or {}).get(attempt)
-    if W.launch_facts_problem(facts, attempt_dir,
-                              {"id": unit, "task_id": unit}):
-        return None
-    return facts
-
-
-def trusted_launch_host_anchor(state, unit, attempt_dir):
-    """Coordinator-state host anchor, including an interrupted code launch.
-
-    Completed launch facts are the normal authority. A code launch can crash
-    after its pre-agent intent is durable but before Paseo's cwd completes the
-    facts; that intent already contains the coordinator-observed launch host.
-    Returning neither is unknown, never permission to act on host-local state.
-    """
-    facts = trusted_launch_facts(state, unit, attempt_dir)
-    if facts is not None:
-        return facts
-    if not attempt_dir:
-        return None
-    attempt = Path(attempt_dir).name
-    us = (state.get("units") or {}).get(unit) or {}
-    intent = (us.get("attempt_launch_intents") or {}).get(attempt)
-    return intent if isinstance(intent, dict) else None
 
 
 def trusted_produced_head(state, unit, attempt_dir):
@@ -6956,7 +6768,7 @@ def _cleanup_codex_home(state, u, attempt, report, state_dir):
     A missing workspace record needs no preservation; a recorded workspace
     must have passed preserve-then-archive before its home can be discarded.
     """
-    us = _unit_state(state, u["id"])
+    us = SS._unit_state(state, u["id"])
     workspaces = us.get("attempt_workspaces") or {}
     if u.get("kind") == "code" and attempt in workspaces:
         workspace = workspaces[attempt]
@@ -6971,7 +6783,7 @@ def _cleanup_codex_home(state, u, attempt, report, state_dir):
         meta["cleanup_problem"] = "Codex home cleanup requires coordinator state_dir"
         report.append(f"{u['id']}: {meta['cleanup_problem']}")
         return
-    save_state(state_dir, state)
+    SS.save_state(state_dir, state)
     try:
         CH.remove(state_dir, attempt, meta.get("path"), meta.get("identity"))
     except Exception as exc:
@@ -6986,7 +6798,7 @@ def _cleanup_codex_home(state, u, attempt, report, state_dir):
         meta.pop("cleanup_pending", None)
         meta.pop("cleanup_problem", None)
         report.append(f"{u['id']}: removed Codex home for attempt {attempt}")
-    save_state(state_dir, state)
+    SS.save_state(state_dir, state)
 
 
 def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
@@ -7015,7 +6827,7 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
     if u.get("kind") != "code" or not unit_dir:
         return
     attempt = Path(unit_dir).name
-    us = _unit_state(state, u["id"])
+    us = SS._unit_state(state, u["id"])
     meta = (us.get("attempt_workspaces") or {}).get(attempt)
     if (not isinstance(meta, dict) or meta.get("archived")
             or meta.get("cleanup_gave_up")):
@@ -7025,14 +6837,14 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
         _worktree_cleanup_failed(
             state, u, meta, report, "previous worktree archive attempts failed")
         if state_dir is not None:
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
         return
     meta["cleanup_pending"] = True
     meta["cleanup_attempts"] = tries + 1
     # Charge and persist this attempt before the destructive external call.
     # A crash may consume one retry, but can never reset the bound to zero.
     if state_dir is not None:
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
     if state_dir is None:
         _worktree_cleanup_failed(
             state, u, meta, report,
@@ -7045,7 +6857,7 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
         _worktree_cleanup_failed(
             state, u, meta, report,
             f"cannot bind recovery snapshot: {intent_problem}")
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
         return
     recovery_records = us.setdefault("attempt_recovery_snapshots", {})
     workspace_path = meta.get("path")
@@ -7064,13 +6876,13 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
                 state, u, meta, report,
                 f"worktree preservation failed; checkout retained: "
                 f"{recovery_error}")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             return
         recovery_records[attempt] = recovery_record
         meta["recovery_snapshot"] = "restore-checked"
         # The completed record is durable before either destructive cleanup
         # call. A crash may retry cleanup but cannot lose this prerequisite.
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
         current_digest, current_error = R.tree_digest(
             workspace_path, expected_git_dir,
             expected_git_pointer_sha256)
@@ -7081,7 +6893,7 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
                 "worktree changed after its recovery snapshot was saved; "
                 "checkout retained: "
                 + (current_error or "content digest differs"))
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             return
     else:
         recovery_record = recovery_records.get(attempt)
@@ -7107,7 +6919,7 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
                 meta["cleanup_problem"] = (
                     "legacy checkout was already absent before preservation "
                     "enforcement; no recovery bytes exist")
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
                 report.append(
                     f"{u['id']}: legacy worktree {workspace_path} was already "
                     "absent before preservation enforcement; recorded the "
@@ -7117,13 +6929,13 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
                 state, u, meta, report,
                 "worktree disappeared without a valid recovery snapshot: "
                 + recovery_error)
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             return
         meta["recovery_snapshot"] = "restore-checked"
         meta["archived"] = True
         meta.pop("cleanup_pending", None)
         meta["archived_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
         return
 
     if meta.get("workspace_owner") == "coordinator":
@@ -7135,12 +6947,12 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
                 state, u, meta, report,
                 f"could not remove coordinator-owned worktree "
                 f"{workspace_path}: {(err or out).strip()[:200]}")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             return
         meta["archived"] = True
         meta.pop("cleanup_pending", None)
         meta["archived_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
         report.append(
             f"{u['id']}: preserved and removed finished worktree "
             f"{workspace_path}; branch {meta.get('branch')} remains")
@@ -7153,14 +6965,14 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
             meta["workspace_id"] = workspace_id
             # Persist newly-discovered cleanup authority before using it.
             if state_dir is not None:
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
     if not workspace_id:
         _worktree_cleanup_failed(
             state, u, meta, report,
             f"could not identify cleanup owner for preserved attempt "
             f"{attempt}")
         if state_dir is not None:
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
         return
     rc, out, err = U.run(
         ["paseo", "workspace", "archive", str(workspace_id), "--json"],
@@ -7170,13 +6982,13 @@ def _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir=No
             state, u, meta, report, f"could not archive worktree workspace "
             f"{workspace_id}: {_paseo_error(out, err)}")
         if state_dir is not None:
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
         return
     meta["archived"] = True
     meta.pop("cleanup_pending", None)
     meta["archived_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     if state_dir is not None:
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
     report.append(f"{u['id']}: preserved and archived legacy worktree "
                   f"{meta.get('path')}; branch {meta.get('branch')} remains")
 
@@ -7264,12 +7076,12 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # refusing because a DONE unit still records the job id that finished
         # it would block every dry run for the rest of a project's life.
         real = sorted(uid for uid in units
-                      if (_unit_state(state, uid).get("attempt_dir")
+                      if (SS._unit_state(state, uid).get("attempt_dir")
                           and not str(
-                              _unit_state(state, uid).get("job_id") or "")
+                              SS._unit_state(state, uid).get("job_id") or "")
                           .startswith("dry-")
-                          and _occupies_live_resources(
-                              units[uid], _unit_state(state, uid))))
+                          and SS._occupies_live_resources(
+                              units[uid], SS._unit_state(state, uid))))
         if real:
             return ([f"REFUSING to dry-run against a state directory that "
                      f"holds REAL attempts ({', '.join(real)}).",
@@ -7279,7 +7091,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                      f"Use a throwaway state directory instead:",
                      f"    swarm.py run <plan> --dry-run --state-dir "
                      f"$(mktemp -d)/state --root $(mktemp -d)/runs"], 0, None)
-    before_states = {uid: (_unit_state(state, uid) or {}).get("state")
+    before_states = {uid: (SS._unit_state(state, uid) or {}).get("state")
                      for uid in units}
 
     # Persist a state clock for snapshots created before state_changed_at
@@ -7289,7 +7101,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     clock_observed_at = advance_observed_at
     if not dry_run:
         for uid in units:
-            _normalise_state_clock(_unit_state(state, uid), clock_observed_at)
+            SS._normalise_state_clock(SS._unit_state(state, uid), clock_observed_at)
 
     # NORMALISE PERSISTED STATE FIRST. Converting DONE to READY_FOR_PR only in
     # the fresh-check path left every ALREADY-persisted DONE untouched: a
@@ -7300,15 +7112,15 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # is the third time in a row I have fixed a forward path and left the
     # stored state alone.
     for uid, u in sorted(units.items()):
-        us = _unit_state(state, uid)
+        us = SS._unit_state(state, uid)
         if (us.get("state") == "DONE"
                 and closing_evidence_for(u.get("kind")) != "predicate_receipt"):
-            _set_unit_state(us, "READY_FOR_PR")
+            SS._set_unit_state(us, "READY_FOR_PR")
             report.append(
                 f"{uid}: recorded DONE, but a {u.get('kind')} unit is closed "
                 f"by a merged pull request, not by its own receipt. Corrected "
                 f"to READY_FOR_PR; anything depending on it waits.")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
 
     # Worktrees are needed while an agent can still be continued. Once an
     # attempt has a terminal judgment (including READY_FOR_PR), its committed
@@ -7316,7 +7128,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # Retry failed cleanups on every advance; this bounds managed worktrees to
     # live/interactive attempts plus cleanup failures that remain visible.
     for uid, u in sorted(units.items()):
-        us = _unit_state(state, uid)
+        us = SS._unit_state(state, uid)
         current_attempt = (Path(us["attempt_dir"]).name
                            if us.get("attempt_dir") else None)
         current_meta = ((us.get("attempt_workspaces") or {}).get(
@@ -7348,7 +7160,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 _cleanup_codex_home(state, u, attempt, report, state_dir)
     _report_retained_worktrees(state, report, dry_run=dry_run)
     if not dry_run:
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
 
     # The plan must not change under a live run. A mid-flight edit silently
     # redefines what the recorded attempts were for.
@@ -7364,7 +7176,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
              "by": os.environ.get("USER", "?")})
         report.append(f"plan change RATIFIED: {prior[:12]} -> {digest[:12]}. "
                       f"Recorded attempts are kept.")
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
     elif state["plan_digest"] != digest:
         # The old remedy here was "start a new state directory", which
         # re-dispatches DONE units and duplicates live jobs: a refusal whose
@@ -7388,31 +7200,31 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # ends the active breach and lets a later crossing become a distinct event.
     deadline_observed_at = advance_observed_at
     for uid, u in sorted(units.items()):
-        us = _unit_state(state, uid)
-        host_local, host_problem = _deadline_host_evaluation(state, uid, us)
+        us = SS._unit_state(state, uid)
+        host_local, host_problem = SS._deadline_host_evaluation(state, uid, us)
         if (u.get("deadline_s") is not None and us.get("attempt_dir")
                 and host_local is not True):
             report.append(
                 f"{uid}: DEADLINE_NOT_EVALUABLE_HERE -- {host_problem}")
             continue
         if (not dry_run
-                and not _deadline_exceeded(
+                and not SS._deadline_exceeded(
                     u, us, state, uid, deadline_observed_at)):
-            _clear_deadline_breach(us)
+            SS._clear_deadline_breach(us)
     if not dry_run:
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
 
     # An attempt allocated but never bound may still have reached the
     # scheduler. Ask before dispatching anything else.
     for uid, u in sorted(units.items()):
-        us = _unit_state(state, uid)
+        us = SS._unit_state(state, uid)
         if dry_run or not us["attempt_dir"]:
             continue
         if (u.get("kind") == "code" and us.get("job_id")
-                and not trusted_launch_facts(
+                and not SS.trusted_launch_facts(
                     state, uid, us["attempt_dir"])):
             host_problem = W.launch_host_problem(
-                trusted_launch_host_anchor(
+                SS.trusted_launch_host_anchor(
                     state, uid, us["attempt_dir"]))
             if host_problem:
                 us["launch_recovery_pending"] = True
@@ -7421,18 +7233,18 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 report.append(f"{uid}: UNJUDGEABLE_HERE -- {host_problem}. "
                               f"The agent is retained for a coordinator on "
                               f"its launch host.")
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
                 continue
             recovery_error = _recover_code_launch(
                 state, u, us["attempt_dir"], us["job_id"])
             if recovery_error:
                 us["launch_recovery_problem"] = recovery_error
-                _set_unit_state(us, "NEEDS_HUMAN")
+                SS._set_unit_state(us, "NEEDS_HUMAN")
                 # No trusted launch facts means the checker cannot run. A
                 # deadline crossed during that failed recovery may still
                 # supersede the recovery reason without inventing a verdict.
-                if _deadline_exceeded(u, us, state, uid):
-                    first_breach = _mark_deadline_exceeded(u, us)
+                if SS._deadline_exceeded(u, us, state, uid):
+                    first_breach = SS._mark_deadline_exceeded(u, us)
                     if first_breach:
                         report.append(
                             f"{uid}: NEEDS_HUMAN -- deadline_exceeded during "
@@ -7443,20 +7255,20 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                               f"agent remains bound and no launch facts were "
                               f"admitted; repair or abandon this exact "
                               f"attempt before it can be judged.")
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
                 continue
             us.pop("launch_recovery_problem", None)
-            _set_unit_state(us, "SUBMITTED")
+            SS._set_unit_state(us, "SUBMITTED")
             report.append(f"{uid}: recovered the agent's attempt worktree and "
                           f"completed its trusted launch snapshot")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
         if us.get("bind_pending") and us.get("job_id"):
             if not _bind(us["attempt_dir"], us["job_id"]):
                 us.pop("bind_pending", None)
-                _set_unit_state(us, "SUBMITTED")
+                SS._set_unit_state(us, "SUBMITTED")
                 report.append(f"{uid}: binding to job {us['job_id']} succeeded "
                               f"on retry; the unit can now be judged.")
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
             continue
         if str(us.get("job_id") or "").startswith("dry-"):
             # A placeholder from an earlier dry run. Nothing was ever
@@ -7468,8 +7280,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                           f"it, so the unit will dispatch normally.")
             us["job_id"] = None
             us["attempt_dir"] = None
-            _set_unit_state(us, None)
-            save_state(state_dir, state)
+            SS._set_unit_state(us, None)
+            SS.save_state(state_dir, state)
             continue
         if us.get("job_id"):
             continue
@@ -7478,7 +7290,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         if job:
             if u.get("kind") == "code":
                 host_problem = W.launch_host_problem(
-                    trusted_launch_host_anchor(
+                    SS.trusted_launch_host_anchor(
                         state, uid, us["attempt_dir"]))
                 if host_problem:
                     # The discovered agent remains bound in coordinator state
@@ -7491,7 +7303,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     report.append(f"{uid}: {note}; UNJUDGEABLE_HERE -- "
                                   f"{host_problem}. The agent is retained for "
                                   f"a coordinator on its launch host.")
-                    save_state(state_dir, state)
+                    SS.save_state(state_dir, state)
                     continue
                 recovery_error = _recover_code_launch(
                     state, u, us["attempt_dir"], job)
@@ -7501,9 +7313,9 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     us["job_id"] = job
                     us["launch_recovery_pending"] = True
                     us["launch_recovery_problem"] = recovery_error
-                    _set_unit_state(us, "NEEDS_HUMAN")
-                    if _deadline_exceeded(u, us, state, uid):
-                        first_breach = _mark_deadline_exceeded(u, us)
+                    SS._set_unit_state(us, "NEEDS_HUMAN")
+                    if SS._deadline_exceeded(u, us, state, uid):
+                        first_breach = SS._mark_deadline_exceeded(u, us)
                         if first_breach:
                             report.append(
                                 f"{uid}: NEEDS_HUMAN -- deadline_exceeded "
@@ -7513,7 +7325,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     report.append(f"{uid}: {note}; NEEDS_HUMAN -- "
                                   f"{recovery_error}. The agent is retained, "
                                   f"but no launch facts were admitted.")
-                    save_state(state_dir, state)
+                    SS.save_state(state_dir, state)
                     continue
                 us.pop("launch_recovery_pending", None)
                 us.pop("launch_recovery_problem", None)
@@ -7522,8 +7334,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # an idempotent bind instead of leaving unauthorised evidence.
             us["job_id"] = job
             us["bind_pending"] = True
-            _set_unit_state(us, "SUBMITTED")
-            save_state(state_dir, state)
+            SS._set_unit_state(us, "SUBMITTED")
+            SS.save_state(state_dir, state)
             bind_error = _bind(us["attempt_dir"], job)
             if bind_error:
                 report.append(f"{uid}: recovered {job} but {bind_error}; "
@@ -7531,14 +7343,14 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             else:
                 us.pop("bind_pending", None)
             report.append(f"{uid}: {note}")
-            save_state(state_dir, state)
-        elif _deadline_exceeded(u, us, state, uid):
-            _mark_deadline_exceeded(u, us)
+            SS.save_state(state_dir, state)
+        elif SS._deadline_exceeded(u, us, state, uid):
+            SS._mark_deadline_exceeded(u, us)
             report.append(
                 f"{uid}: NEEDS_HUMAN -- deadline_exceeded while recovering "
                 f"the unbound attempt. It remains allocated; no submission, "
                 f"release, or retry was performed.")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
         elif note == "UNKNOWN":
             report.append(f"{uid}: allocated at {us['attempt_dir']} with no "
                           f"binding, and the scheduler could not be asked "
@@ -7570,15 +7382,15 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                                 u, us["attempt_dir"], False, state, state_dir,
                                 dispatch_source=source)
                         if problem:
-                            _set_unit_state(us, "NEEDS_HUMAN")
+                            SS._set_unit_state(us, "NEEDS_HUMAN")
                             us["launch_recovery_problem"] = problem
                             report.append(f"{uid}: NEEDS_HUMAN -- {problem}")
-                            save_state(state_dir, state)
+                            SS.save_state(state_dir, state)
                             continue
                         us["job_id"] = str(recovered_job)
-                        _set_unit_state(us, "SUBMITTED")
+                        SS._set_unit_state(us, "SUBMITTED")
                         us["bind_pending"] = True
-                        save_state(state_dir, state)
+                        SS.save_state(state_dir, state)
                         bind_error = _bind(us["attempt_dir"], recovered_job)
                         if bind_error:
                             report.append(
@@ -7590,7 +7402,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         report.append(
                             f"{uid}: recovered exact-base worktree and "
                             f"created missing agent {recovered_job}")
-                        save_state(state_dir, state)
+                        SS.save_state(state_dir, state)
                         continue
             # Allocated, then the coordinator died before `sbatch`. The
             # scheduler has never heard of it, so nothing is running and the
@@ -7603,7 +7415,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                           f"into a new directory. The stale one is left on disk "
                           f"rather than deleted.")
             us["attempt_dir"] = None
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
 
     # 1. Re-check anything with a live attempt. The coordinator does not judge;
     #    unit.py does, and its exit code is the whole input.
@@ -7627,21 +7439,21 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                           "submitted keeps running and will be judged by "
                           "whoever holds the lease.")
             state["halted"] = "lease lost mid-advance"
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             return report, dispatched, state["halted"]
-        us = _unit_state(state, uid)
+        us = SS._unit_state(state, uid)
         if not us["attempt_dir"]:
             continue
         attempt = us["attempt_dir"]
-        launch_facts = trusted_launch_facts(state, uid, attempt)
+        launch_facts = SS.trusted_launch_facts(state, uid, attempt)
         host_problem = W.launch_host_problem(
-            trusted_launch_host_anchor(state, uid, attempt))
+            SS.trusted_launch_host_anchor(state, uid, attempt))
         if host_problem:
             us["host_judgment"] = "UNJUDGEABLE_HERE"
             us.pop("incomplete_since", None)
             us.pop("launch_recovery_problem", None)
             report.append(f"{uid}: UNJUDGEABLE_HERE -- {host_problem}")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             continue
         if us.get("launch_recovery_problem"):
             report.append(f"{uid}: NEEDS_HUMAN -- "
@@ -7730,25 +7542,25 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         terminal = {"DONE", "FAILED", "FAILED_EVIDENCE", "READY_FOR_PR",
                     "PREFLIGHT_REFUSED", "HELD"}
         if (checked_state not in terminal
-                and _deadline_exceeded(u, us, state, uid)):
+                and SS._deadline_exceeded(u, us, state, uid)):
             if dry_run:
                 report.append(
                     f"{uid}: DRY RUN -- deadline_exceeded after check; would "
                     f"become NEEDS_HUMAN without cancellation, claim "
                     f"release, or retry")
                 continue
-            first_breach = _mark_deadline_exceeded(u, us)
+            first_breach = SS._mark_deadline_exceeded(u, us)
             if first_breach:
                 report.append(
                     f"{uid}: NEEDS_HUMAN -- deadline_exceeded while the "
                     f"attempt was being checked. It remains bound and its "
                     f"output claim is retained; no cancellation or retry "
                     f"was requested.")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             continue
-        _set_unit_state(us, checked_state)
+        SS._set_unit_state(us, checked_state)
         if checked_state in terminal:
-            _clear_deadline_breach(us)
+            SS._clear_deadline_breach(us)
 
         # A DECLARED convergence criterion gates DONE. Undeclared, nothing
         # changes. This is the whole reason converge.py exists: the scheduler
@@ -7767,7 +7579,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             us["converge_verdict"] = verdict
             us["converge_reasons"] = list(why)
             if verdict != "CONVERGED":
-                _set_unit_state(us, "NEEDS_HUMAN")
+                SS._set_unit_state(us, "NEEDS_HUMAN")
             report.append(f"{uid}: convergence {verdict} -- " +
                           " ".join(str(w) for w in why))
 
@@ -7802,7 +7614,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             # check available to a coordinator with no network.
             attempt = us.get("attempt_dir") or ""
             produced = trusted_produced_head(state, uid, attempt)
-            launch_facts = trusted_launch_facts(state, uid, attempt)
+            launch_facts = SS.trusted_launch_facts(state, uid, attempt)
             immutable_problem = W.validate_pinned_head(
                 U.run, launch_facts, produced) if produced else (
                     "coordinator state records no produced commit for this "
@@ -7866,7 +7678,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             receipt, refusal = ((None, vrefusal) if vrefusal else
                                 (merge_receipt, merge_refusal))
             if receipt:
-                _set_unit_state(us, "DONE")
+                SS._set_unit_state(us, "DONE")
                 us["merged_as"] = receipt.get("merged_as")
                 us["merge_pr"] = receipt.get("pr")
                 # Persist the exact admitted receipt. The outbox is emitted
@@ -7880,7 +7692,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     f"is attested, not verified; the head it pins was "
                     f"produced by this attempt.")
             else:
-                _set_unit_state(us, "READY_FOR_PR")
+                SS._set_unit_state(us, "READY_FOR_PR")
                 us["merge_refusal"] = refusal
                 report.append(f"{uid}: READY_FOR_PR. {refusal}")
         report.append(f"{uid}: {us['state']}")
@@ -7911,7 +7723,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 if (reason == U.REASON_NO_OUTPUTS
                         and maybe_continue(state_dir, uid, u, us, report,
                                            state)):
-                    save_state(state_dir, state)
+                    SS.save_state(state_dir, state)
                     continue
                 if reason == U.REASON_NO_OUTPUTS:
                     used = len(us.get("continuations") or [])
@@ -7921,7 +7733,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                             f"produced nothing. The bound is the point: this "
                             f"fails for missing production evidence rather "
                             f"than being prodded again.")
-                    _set_unit_state(us, "FAILED")
+                    SS._set_unit_state(us, "FAILED")
                     report.append(
                         f"{uid}: the job finished cleanly and its declared "
                         f"outputs never appeared, {waited}s on. This is a "
@@ -7931,7 +7743,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 elif reason == U.REASON_NO_PRODUCED_CHANGE:
                     # A refused repository transition is not a planning-only
                     # turn: do not turn continuation into a correction loop.
-                    _set_unit_state(us, "FAILED")
+                    SS._set_unit_state(us, "FAILED")
                     receipt, why = attested_receipt(
                         state, uid, us["attempt_dir"])
                     details = " ".join(
@@ -7944,7 +7756,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"This is a FAILED unit. "
                         f"{details or why or 'See the check receipt.'}")
                 else:
-                    _set_unit_state(us, "FAILED_EVIDENCE")
+                    SS._set_unit_state(us, "FAILED_EVIDENCE")
                     report.append(
                         f"{uid}: no verdict {waited}s after the first "
                         f"INCOMPLETE, past the {SETTLE_S}s accounting settle "
@@ -7970,7 +7782,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 report.append(f"{uid}: preempted, will re-attempt "
                               f"({len(real_attempts)}/{policy})")
             else:
-                _set_unit_state(us, "FAILED")
+                SS._set_unit_state(us, "FAILED")
                 if policy == 1 and "max_attempts" not in u:
                     # The default is now 1, so a SINGLE preemption ends the
                     # unit. "preempted 1 times, giving up" reads like a bug
@@ -8011,13 +7823,13 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     if watch is not None:
                         watch["status"] = "checked"
                         watch["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-                save_state(state_dir, state)
+                SS.save_state(state_dir, state)
                 _archive_code_worktree(
                     state, u, attempt, report, state_dir)
             else:
                 _report_would_archive_code_worktree(
                     state, u, attempt, report)
-    save_state(state_dir, state)
+    SS.save_state(state_dir, state)
 
     # 1b. Release the output claims of units that are no longer live (B6).
     #     Recomputed from the plan and released only when the claim names
@@ -8028,17 +7840,17 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     #     and `acquire_lease` already serialises access to it.
     if not dry_run:
         for uid, u in sorted(units.items()):
-            if not _occupies_live_resources(u, _unit_state(state, uid)):
+            if not SS._occupies_live_resources(u, SS._unit_state(state, uid)):
                 _release_output_claims(u, root, state_dir)
 
     # 2. Budget. Charged on DISPATCH, not on completion: a budget that only
     #    counts finished work cannot stop a runaway.
     budget = (plan.get("budget") or {}).get("gpu_hours")
-    spent = sum(_unit_state(state, uid)["gpu_hours"] for uid in units)
+    spent = sum(SS._unit_state(state, uid)["gpu_hours"] for uid in units)
 
     # 3. Dispatch every unit whose dependencies are DONE.
     for uid, u in sorted(units.items()):
-        us = _unit_state(state, uid)
+        us = SS._unit_state(state, uid)
         if us["attempt_dir"] or us["state"] in ("DONE", "FAILED",
                                                 "FAILED_EVIDENCE"):
             continue
@@ -8053,16 +7865,16 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # actions from whoever reads the status.
         needs = u.get("needs") or []
         failed_upstream = [d for d in needs
-                           if _unit_state(state, d)["state"] in
+                           if SS._unit_state(state, d)["state"] in
                            ("FAILED", "HELD", "FAILED_EVIDENCE")]
         if failed_upstream:
-            _set_unit_state(us, "HELD")
+            SS._set_unit_state(us, "HELD")
             report.append(f"{uid}: held, upstream "
                           f"{', '.join(failed_upstream)} will not complete")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             continue
         unmet = [d for d in needs
-                 if _unit_state(state, d)["state"] != "DONE"]
+                 if SS._unit_state(state, d)["state"] != "DONE"]
         if unmet:
             if plan.get("canary") in unmet:
                 report.append(f"{uid}: waiting on canary {plan['canary']}")
@@ -8085,7 +7897,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # recoverable are also sixteen simultaneous readers of a filesystem
         # shared by everyone else.
         live = [x for x in units
-                if _occupies_live_resources(units[x], _unit_state(state, x))]
+                if SS._occupies_live_resources(units[x], SS._unit_state(state, x))]
         cap_all = (plan.get("limits") or {}).get("max_running")
         if cap_all is not None and len(live) >= cap_all:
             report.append(f"{uid}: waiting, {len(live)} of {cap_all} slots in "
@@ -8112,9 +7924,9 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
 
         unit_dir, err = _allocate(plan, u, root)
         if err:
-            _set_unit_state(us, "FAILED")
+            SS._set_unit_state(us, "FAILED")
             report.append(f"{uid}: {err}")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             continue
         # Persist the allocation BEFORE submitting: a crash between the two
         # must leave an orphaned directory, never an unrecorded job.
@@ -8125,7 +7937,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                               else unit_dir)
         allocated_at = time.time()
         us["allocated_at"] = allocated_at
-        _set_unit_state(us, "ALLOCATED", allocated_at)
+        SS._set_unit_state(us, "ALLOCATED", allocated_at)
         # ACCUMULATE. Overwriting meant a unit preempted twice was charged
         # once, so retries could walk straight through a ceiling: budget 8,
         # three 4-hour attempts, 12 committed.
@@ -8137,7 +7949,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # the run's own output.
         _capture_artifact_basis(state, uid, unit_dir, u,
                                 enable_slurm_exit=u.get("kind") == "slurm")
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
 
         # B6, and the reason it sits HERE. The lease excludes a second
         # controller over this state directory; it says nothing about a
@@ -8196,7 +8008,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     if last in (str(unit_dir), f"{DRY_PREFIX}{unit_dir}"):
                         us["attempts"].pop()
                 us["attempt_dir"] = None
-                _set_unit_state(us, "PREFLIGHT_REFUSED")
+                SS._set_unit_state(us, "PREFLIGHT_REFUSED")
                 us.pop("allocated_at", None)
                 us["gpu_hours"] = max(
                     0.0, float(us.get("gpu_hours") or 0) - want)
@@ -8205,9 +8017,9 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 report.append(f"{uid}: {err}" +
                               (f"\n  receipt: {cited}" if cited else ""))
             else:
-                _set_unit_state(us, "FAILED")
+                SS._set_unit_state(us, "FAILED")
                 report.append(f"{uid}: {err}")
-            save_state(state_dir, state)
+            SS.save_state(state_dir, state)
             continue
         # Bind EVERY kind that has an id. The old guard bound only numeric
         # ids, so a code unit's agent id never reached unit.json and its
@@ -8216,11 +8028,11 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         needs_bind = bool(
             job_id and not str(job_id).startswith(("dry-", "engine-")))
         us["job_id"] = str(job_id)
-        _set_unit_state(us, "SUBMITTED")
+        SS._set_unit_state(us, "SUBMITTED")
         if needs_bind:
             us["bind_pending"] = True
         # Persist the binding authority before unit.py writes its marker.
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
         # Now the claim can name the job as well as the attempt. Best effort
         # and non-authoritative: the attempt id already names the scheduler
         # job (`swarm-<attempt>`), so a claim that never gets this update is
@@ -8242,10 +8054,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             us.pop("bind_pending", None)
         dispatched += 1
         report.append(f"{uid}: submitted {job_id} -> {unit_dir}")
-        save_state(state_dir, state)
+        SS.save_state(state_dir, state)
 
     state["halted"] = halted
-    save_state(state_dir, state)
+    SS.save_state(state_dir, state)
 
     # Emit tracker intents from the FINAL state of the advance, not at each
     # place a state happens to be set. Three sites used to emit, and they
@@ -8261,7 +8073,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         rec.get("key") for rec in read_outbox(state_dir)
         if isinstance(rec, dict)} if dry_run else set()
     for uid in sorted(units):
-        us = _unit_state(state, uid)
+        us = SS._unit_state(state, uid)
         now = us.get("state")
         # Re-emit every durable current event. emit_intent's deterministic key
         # makes this idempotent, and closes the crash window between saving a
@@ -8285,7 +8097,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         uid, us, {"receipt": rp} if rp else None) and not dry_run:
                     produced = trusted_produced_head(
                         state, uid, us["attempt_dir"])
-                    facts = trusted_launch_facts(
+                    facts = SS.trusted_launch_facts(
                         state, uid, us["attempt_dir"])
                     try:
                         recover_args = {
@@ -8307,7 +8119,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                                 "merged_as")
                             and recovered.get("pr") == us.get("merge_pr")):
                         us["merge_receipt"] = dict(recovered)
-                        save_state(state_dir, state)
+                        SS.save_state(state_dir, state)
                         rp = recovered
             else:
                 rp, _why = attested_receipt(
@@ -8551,10 +8363,10 @@ def _start_code_terminal_watchers(plan, state, args, report):
     for uid, u in sorted(units.items()):
         if u.get("kind") != "code":
             continue
-        us = _unit_state(state, uid)
+        us = SS._unit_state(state, uid)
         attempt_dir = us.get("attempt_dir")
         job_id = us.get("job_id")
-        if (not attempt_dir or not job_id or us.get("state") not in LIVE_STATES
+        if (not attempt_dir or not job_id or us.get("state") not in SS.LIVE_STATES
                 or trusted_produced_head(state, uid, attempt_dir)):
             continue
         attempt = Path(attempt_dir).name
@@ -8574,13 +8386,13 @@ def _start_code_terminal_watchers(plan, state, args, report):
             "status": "starting",
         }
         watches[attempt] = watch
-        save_state(args.state_dir, state)
+        SS.save_state(args.state_dir, state)
         try:
             log = open(log_path, "ab")
         except OSError as exc:
             watch.update({"status": "start_failed", "reason": str(exc),
                           "observed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
-            save_state(args.state_dir, state)
+            SS.save_state(args.state_dir, state)
             report.append(f"{uid}: could not open terminal-watch log: {exc}. "
                           "Scheduled advance remains the fallback.")
             continue
@@ -8602,14 +8414,14 @@ def _start_code_terminal_watchers(plan, state, args, report):
             log.close()
             watch.update({"status": "start_failed", "reason": str(exc),
                           "observed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
-            save_state(args.state_dir, state)
+            SS.save_state(args.state_dir, state)
             report.append(f"{uid}: could not start terminal watcher: {exc}. "
                           "Scheduled advance remains the fallback.")
             continue
         log.close()
         watch["pid"] = proc.pid
         watch["status"] = "waiting"
-        save_state(args.state_dir, state)
+        SS.save_state(args.state_dir, state)
         report.append(f"{uid}: watching agent {job_id} for an immediate "
                       "terminal judgment")
         started = True
@@ -8814,7 +8626,7 @@ def cmd_run(args):
         watch_report = []
         if (not args.dry_run
                 and _refresh_code_terminal_watches(state, args.state_dir, watch_report)):
-            save_state(args.state_dir, state)
+            SS.save_state(args.state_dir, state)
         report, dispatched, halted = advance(
             plan, state, args.state_dir, args.root, args.dry_run,
             args.max_new_dispatches,
@@ -8822,7 +8634,7 @@ def cmd_run(args):
         report[:0] = watch_report
         if (not args.dry_run
                 and _start_code_terminal_watchers(plan, state, args, report)):
-            save_state(args.state_dir, state)
+            SS.save_state(args.state_dir, state)
     finally:
         SS.release_lease(args.state_dir)
     for line in report:
@@ -9093,7 +8905,7 @@ def promote(plan, state, state_dir, uid, approver, approve,
     # promotion act that cannot be rolled back by coordinator state. Persist
     # the exact approved destination first; a crash can then resume the same
     # idempotent version rather than leaving an unexplained publication.
-    save_state(state_dir, state)
+    SS.save_state(state_dir, state)
 
     try:
         missing_directories = []
@@ -9183,7 +8995,7 @@ def promote(plan, state, state_dir, uid, approver, approve,
         return lines, False
     promotion_intent["status"] = "complete"
     promotion_intent["completed_at"] = record["at"]
-    save_state(state_dir, state)
+    SS.save_state(state_dir, state)
     lines += ["", f"PROMOTED {uid} -> {version}", f"approved by {approver}"]
     return lines, True
 
@@ -9584,7 +9396,7 @@ def cmd_verify(args):
             sys.stderr.write(f"error: {problem}\n")
             return EXIT_CONFLICT
     state = SS.load_state(args.state_dir) or {}
-    launch_facts = trusted_launch_facts(
+    launch_facts = SS.trusted_launch_facts(
         state, args.unit, args.attempt)
     if not launch_facts:
         sys.stderr.write(
@@ -9943,7 +9755,7 @@ def _status_rows(plan, state, state_dir, observed_at=None):
         deadline_evaluation = None
         if u.get("deadline_s") is not None and us.get("attempt_dir"):
             deadline_host_local, deadline_problem = \
-                _deadline_host_evaluation(state, uid, us)
+                SS._deadline_host_evaluation(state, uid, us)
             deadline_evaluation = (
                 "evaluable_here" if deadline_host_local is True
                 else "not_evaluable_here")
@@ -10299,6 +10111,10 @@ __all__ = [name for name in globals() if not name.startswith("_")] + [
     "AGENTS_FILE", "DEFAULT_AGENT_PROVIDER", "DEFAULT_AGENT_THINKING",
     "THINKING_BY_MODEL", "PINNED_AGENT_PROVIDER", "PINNED_THINKING_BY_MODEL",
     "acquire_lease", "renew_lease", "release_lease", "load_state",
+    "save_state",
+    "trusted_launch_facts",
+    "trusted_launch_host_anchor",
+    "LIVE_STATES",
 ]
 
 
