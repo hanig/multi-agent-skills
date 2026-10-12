@@ -204,6 +204,7 @@ def format_usage(usage):
     return f"{shown_in}in/{shown_out}out"
 
 
+@R.redact_provider_result
 def ask_member(member, history, prompt, timeout, *, system=None,
                require_complete=False):
     """One turn. Returns (reply_text, error, usage). History is the full prior

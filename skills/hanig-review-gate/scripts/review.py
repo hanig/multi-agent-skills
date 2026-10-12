@@ -68,6 +68,7 @@ import concurrent.futures
 import datetime
 import errno
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -1186,6 +1187,19 @@ def _post(url, payload, headers, timeout, retries=3, deadline=None):
     return None, redact(f"{last} (after {retries} attempts)")
 
 
+def redact_provider_result(call):
+    """Scrub every returned string, including metadata, errors and usage.
+
+    All provider and committee transports share this return boundary. Keep
+    response classification inside the call, before redacting its values.
+    """
+    @functools.wraps(call)
+    def scrubbed(*args, **kwargs):
+        return tuple(deep_redact(value) for value in call(*args, **kwargs))
+    return scrubbed
+
+
+@redact_provider_result
 def call_openai(rev, prompt, timeout, deadline=None):
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -1240,6 +1254,7 @@ def call_openai(rev, prompt, timeout, deadline=None):
             "response_id": data.get("id")}, None
 
 
+@redact_provider_result
 def call_openrouter(rev, prompt, timeout, deadline=None):
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
@@ -1288,6 +1303,7 @@ def anthropic_headers(key):
             "content-type": "application/json"}
 
 
+@redact_provider_result
 def anthropic_messages(rev, messages, system, timeout, deadline=None):
     """Shared native transport for reviews and stateful committee turns."""
     key = os.environ.get("ANTHROPIC_API_KEY")
@@ -2267,6 +2283,11 @@ def load_reviewers():
             if not isinstance(val, str) or not val.strip():
                 config_error(f"reviewer '{field}' must be a non-empty string, "
                              f"got {val!r}")
+        if (r["provider"] == "anthropic" and r.get("effort") is not None
+                and r["effort"] not in ("low", "medium", "high", "max")):
+            config_error(f"anthropic reviewer {r['name']!r} has unsupported "
+                         f"effort {r['effort']!r}; use low, medium, high, max "
+                         f"or omit effort")
         if r.get("effort") is not None and not isinstance(r["effort"], str):
             config_error(f"reviewer 'effort' must be a string or null, got "
                          f"{r['effort']!r}")

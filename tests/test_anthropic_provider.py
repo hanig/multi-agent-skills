@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -250,7 +250,7 @@ class TestSuccessfulReplyRedaction(unittest.TestCase):
         self.urlopen = transport.start()
         self.addCleanup(transport.stop)
 
-    def fake_reply(self, provider, text):
+    def fake_reply(self, provider, text, reflect_metadata=False):
         if provider == "anthropic":
             data = {"content": [{"type": "text", "text": text}],
                     "stop_reason": "end_turn"}
@@ -259,6 +259,19 @@ class TestSuccessfulReplyRedaction(unittest.TestCase):
                 {"type": "output_text", "text": text}]}], "status": "completed"}
         else:
             data = {"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
+        if reflect_metadata:
+            data.update(id=text, model=text)
+            if provider == "anthropic":
+                data["stop_reason"] = text
+            elif provider == "openai":
+                data["status"] = text
+            else:
+                data["choices"][0]["finish_reason"] = text
+            data["usage"] = {field: text for field in (
+                "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens",
+                "reasoning_tokens")}
+            for field in ("output_tokens_details", "completion_tokens_details"):
+                data["usage"][field] = {"reasoning_tokens": text}
         self.urlopen.side_effect = lambda *a, **k: io.BytesIO(json.dumps(data).encode())
 
     def reflected_reply(self):
@@ -279,6 +292,35 @@ class TestSuccessfulReplyRedaction(unittest.TestCase):
                 self.assertIsNone(error)
                 self.assertEqual(result["text"], expected)
                 self.assertEqual(result["status"], "completed")
+
+    def test_every_provider_scrubs_all_returned_fields(self):
+        reflected, expected = self.reflected_reply()
+        for provider in ("anthropic", "openai", "openrouter"):
+            with self.subTest(provider=provider):
+                self.fake_reply(provider, reflected, reflect_metadata=True)
+                seat = {"name": "fixture", "provider": provider, "model": "fixture-model"}
+                result, error = R.PROVIDERS[provider](seat, "prompt", 1)
+                self.assertIsNone(error)
+                self.assertEqual(result, {field: expected for field in (
+                    "text", "in_tokens", "out_tokens", "reasoning_tokens",
+                    "served_model", "status", "response_id")})
+
+    def test_committee_scrubs_usage_on_success_and_incomplete_replies(self):
+        reflected, expected = self.reflected_reply()
+        for provider in ("anthropic", "openai", "openrouter"):
+            for complete in (False, True):
+                with self.subTest(provider=provider, require_complete=complete):
+                    self.fake_reply(provider, reflected, reflect_metadata=True)
+                    seat = {"name": "fixture", "provider": provider, "model": "fixture-model"}
+                    text, error, usage = C.ask_member(
+                        seat, [], "prompt", 1, require_complete=complete)
+                    self.assertEqual(usage, {"in_tokens": expected, "out_tokens": expected})
+                    if complete:
+                        self.assertIsNone(text)
+                        self.assertIn("incomplete/truncated", error)
+                    else:
+                        self.assertIsNone(error)
+                        self.assertEqual(text, expected)
 
     def test_committee_display_and_saved_session_scrub_successful_text(self):
         reflected, expected = self.reflected_reply()
@@ -301,6 +343,51 @@ class TestSuccessfulReplyRedaction(unittest.TestCase):
                 for key in self.KEYS.values():
                     self.assertNotIn(key, output.getvalue())
                     self.assertNotIn(key, json.dumps(persisted))
+
+
+class TestAnthropicCatalogEffort(unittest.TestCase):
+    def catalog(self, provider, **extra):
+        seat = {"name": "effort-fixture", "provider": provider,
+                "model": "fixture-model", "profiles": ["standard"]}
+        seat.update(extra)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        config = Path(tmp.name) / "reviewers.json"
+        config.write_text(json.dumps({"reviewers": [seat]}))
+        return config, seat
+
+    def test_supported_efforts_and_absent_effort_load(self):
+        for extra in ({}, {"effort": None}, *({"effort": value} for value in (
+                "low", "medium", "high", "max"))):
+            with self.subTest(extra=extra):
+                config, seat = self.catalog("anthropic", **extra)
+                with mock.patch.object(R, "CONFIG", config):
+                    self.assertEqual(R.load_reviewers(), [seat])
+
+    def test_unsupported_anthropic_effort_refuses_before_provider_call(self):
+        for effort in ("xhigh", "", "HIGH", " high", "minimal", 1, [], {}):
+            with self.subTest(effort=effort):
+                config, seat = self.catalog("anthropic", effort=effort)
+                error = io.StringIO()
+                with mock.patch.object(R, "CONFIG", config), \
+                        mock.patch.object(sys, "argv", ["review.py", "--list"]), \
+                        mock.patch.object(R, "_post") as post, \
+                        mock.patch.object(R.urllib.request, "urlopen") as urlopen, \
+                        redirect_stderr(error), redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        R.main()
+                    self.assertEqual(raised.exception.code, 4)
+                self.assertIn(seat["name"], error.getvalue())
+                self.assertIn(repr(effort), error.getvalue())
+                post.assert_not_called()
+                urlopen.assert_not_called()
+
+    def test_openai_and_openrouter_efforts_are_unchanged(self):
+        for provider in ("openai", "openrouter"):
+            with self.subTest(provider=provider):
+                config, seat = self.catalog(provider, effort="xhigh")
+                with mock.patch.object(R, "CONFIG", config):
+                    self.assertEqual(R.load_reviewers(), [seat])
 
 
 if __name__ == "__main__":
