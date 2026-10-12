@@ -644,7 +644,7 @@ class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
 
     def test_verify_reads_the_base_from_state(self):
         src = (SCRIPTS / "swarm.py").read_text()
-        self.assertIn("launch_facts = trusted_launch_facts(",
+        self.assertIn("launch_facts = SS.trusted_launch_facts(",
                       " ".join(src.split()))
 
     def test_verify_never_reads_the_launch_record(self):

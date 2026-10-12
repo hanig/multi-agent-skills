@@ -337,12 +337,22 @@ class TestNothingClosesOnASelfReport(unittest.TestCase):
         # Every literal assigned through the one transition helper counts as
         # produced. AST keeps comments and test prose from satisfying this.
         import ast
-        src = SWARM.read_text()
+        paths = sorted(SWARM.parent.glob("swarm*.py"))
+        self.assertIn("swarm_state.py", {path.name for path in paths})
+        tree = ast.parse("\n".join(path.read_text() for path in paths))
+        definitions = {n.name for n in tree.body
+                       if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+        self.assertTrue({"advance", "_set_unit_state", "_mark_deadline_exceeded"}
+                        <= definitions)
         produced = set(S.NAME.values())
-        for node in ast.walk(ast.parse(src)):
+        for node in ast.walk(tree):
             if (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == "_set_unit_state"
+                    and ((isinstance(node.func, ast.Name)
+                          and node.func.id == "_set_unit_state")
+                         or (isinstance(node.func, ast.Attribute)
+                             and isinstance(node.func.value, ast.Name)
+                             and node.func.value.id == "SS"
+                             and node.func.attr == "_set_unit_state"))
                     and len(node.args) >= 2
                     and isinstance(node.args[1], ast.Constant)
                     and isinstance(node.args[1].value, str)):
@@ -562,7 +572,7 @@ class TestTheWedges(unittest.TestCase):
         """Never destroy evidence to tidy up. A new attempt gets a NEW root."""
         src = SWARM.read_text()
         seg = src[src.index('elif us["state"] == "ALLOCATED":'):]
-        seg = seg[:seg.index("save_state")]
+        seg = seg[:seg.index("SS.save_state")]
         for destructive in ("rmtree", "unlink", "rmdir"):
             self.assertNotIn(destructive, seg,
                              f"releasing an attempt must not {destructive} it")
@@ -1507,9 +1517,10 @@ class TestTheTwoWaysAUnitCanBeUnjudgeable(unittest.TestCase):
         """Verified live on lambda: a job that exited 0 and wrote nothing."""
         import ast
         tree = ast.parse(SWARM.read_text())
-        advance = next(node for node in tree.body
-                       if isinstance(node, ast.FunctionDef)
-                       and node.name == "advance")
+        functions = {node.name: node for node in tree.body
+                     if isinstance(node, ast.FunctionDef)}
+        self.assertIn("advance", functions)
+        advance = functions["advance"]
         branch = next(node for node in ast.walk(advance)
                       if isinstance(node, ast.If)
                       and "REASON_NO_OUTPUTS" in ast.dump(node.test)
@@ -1519,8 +1530,10 @@ class TestTheTwoWaysAUnitCanBeUnjudgeable(unittest.TestCase):
             return {call.args[1].value for parent in nodes
                     for call in ast.walk(parent)
                     if isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Name)
-                    and call.func.id == "_set_unit_state"
+                    and isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "SS"
+                    and call.func.attr == "_set_unit_state"
                     and len(call.args) >= 2
                     and isinstance(call.args[1], ast.Constant)}
 
@@ -1551,7 +1564,7 @@ class TestNoStateChangeEscapesTheOutbox(unittest.TestCase):
                              "whichever path is added next; emit once from the "
                              "final state")
         i = src.index("before_states = {")
-        j = src.index("for uid in sorted(units):\n        us = _unit_state")
+        j = src.index("for uid in sorted(units):\n        us = SS._unit_state")
         self.assertLess(i, j, "the before-snapshot must precede the diff")
 
     def test_a_terminal_state_reached_late_in_an_advance_still_emits(self):
@@ -2574,7 +2587,7 @@ class TestPreemptionUnderTheNewDefault(unittest.TestCase):
         import ast
         src = SWARM.read_text()
         i = src.index("if rc in RETRYABLE:")
-        seg = src[i:src.index("save_state(state_dir, state)", i)]
+        seg = src[i:src.index("SS.save_state(state_dir, state)", i)]
         self.assertIn("max_attempts defaults to 1", seg)
         self.assertIn("opt-in", seg)
         self.assertNotIn('preempted {policy} times, giving up"\n'
