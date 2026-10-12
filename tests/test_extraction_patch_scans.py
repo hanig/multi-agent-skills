@@ -16,10 +16,10 @@ from tests.patch_scan import patch_targets
 
 
 class TestPatchScanClassification(unittest.TestCase):
-    def check_sources(self, sources):
+    def check_sources(self, sources, line=None):
         guards = (
             (outbox, outbox.TestOutboxExtraction,
-             "test_tests_patch_outbox_owner_not_facade", "normalize_intent",
+             "test_tests_patch_outbox_owner_not_facade", "validate_intent",
              "swarm_outbox"),
             (evidence, evidence.TestEvidenceExtraction,
              "test_tests_patch_evidence_owner_not_facade", "load_merge_receipts",
@@ -43,8 +43,11 @@ class TestPatchScanClassification(unittest.TestCase):
                             if rejection:
                                 with self.assertRaisesRegex(
                                         AssertionError,
-                                        rejection + ".*test_patch_scan_fixture.py"):
+                                        rejection + ".*test_patch_scan_fixture.py") as caught:
                                     guard()
+                                if line is not None:
+                                    self.assertIn("'test_patch_scan_fixture.py', %d," % line,
+                                                  str(caught.exception))
                             else:
                                 guard()
 
@@ -73,6 +76,29 @@ class TestPatchScanClassification(unittest.TestCase):
         self.check_sources((
             ('mock.patch.object(unbound, "{name}")\n', "unresolved"),
         ))
+
+    def test_keyword_facade_patch_fails_as_unresolved(self):
+        self.check_sources((
+            ('import swarm as S\n'
+             'mock.patch.object(target=S, attribute="{name}", return_value=[])\n',
+             "unresolved"),
+        ), line=2)
+
+    def test_unsupported_patch_object_forms_fail_as_unresolved(self):
+        for module in ("swarm", "{owner}"):
+            self.check_sources(tuple(
+                ('import ' + module + ' as S\nmock.patch.object(' + args + ')\n',
+                 "unresolved")
+                for args in (
+                    'target=S, attribute="{name}", return_value=[]',
+                    'S, attribute="{name}", return_value=[]',
+                    'S, member, return_value=[]',
+                    'S, 42, return_value=[]',
+                    'S, "unrelated" + "_member", return_value=[]',
+                    '*arguments',
+                    '**keywords',
+                )
+            ), line=2)
 
     def test_all_four_import_forms_at_module_and_function_scope(self):
         forms = (
