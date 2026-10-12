@@ -68,7 +68,6 @@ import concurrent.futures
 import datetime
 import errno
 import fcntl
-import functools
 import hashlib
 import json
 import os
@@ -1193,7 +1192,6 @@ def redact_provider_result(call):
     All provider and committee transports share this return boundary. Keep
     response classification inside the call, before redacting its values.
     """
-    @functools.wraps(call)
     def scrubbed(*args, **kwargs):
         return tuple(deep_redact(value) for value in call(*args, **kwargs))
     return scrubbed
@@ -2286,7 +2284,7 @@ def load_reviewers():
         if (r["provider"] == "anthropic" and r.get("effort") is not None
                 and r["effort"] not in ("low", "medium", "high", "max")):
             config_error(f"anthropic reviewer {r['name']!r} has unsupported "
-                         f"effort {r['effort']!r}; use low, medium, high, max "
+                         f"effort {r['effort']!r}; Pass low, medium, high, max "
                          f"or omit effort")
         if r.get("effort") is not None and not isinstance(r["effort"], str):
             config_error(f"reviewer 'effort' must be a string or null, got "
