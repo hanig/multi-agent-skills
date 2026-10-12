@@ -391,6 +391,9 @@ to restart the bound. Plan reviews and offline size/list/adjudication commands
 do not reserve implementation rounds. The separate audit journal remains
 non-gating and is never read or written by the reservation operation.
 
+The ledger serializes processes sharing one state home only; it does not coordinate separate state homes or hosts.
+It cannot recover deleted history or prove hand-edited bytes authentic. It proves the ledger's present shape, not the order in which anyone wrote it.
+
 This is local enforcing state, not protection against a caller who deletes
 it, changes its location or deliberately changes the identity inputs. Existing
 audit history is not migrated into it. With no ledger history, round 1 accepts
