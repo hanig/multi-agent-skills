@@ -681,8 +681,9 @@ class TestReceiptProvenanceIsActuallyRecorded(unittest.TestCase):
                                     _json.dumps(result, sort_keys=True,
                                                 separators=(",", ":")))
 
-        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
-        m.SE._check = check
+        import swarm_evidence as SE
+        self.addCleanup(setattr, SE, "_check", SE._check)
+        SE._check = check
         ok, why = m.acquire_lease(str(st))
         self.assertTrue(ok, why)
         self.addCleanup(m.release_lease, str(st))
@@ -730,8 +731,9 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
         plan = {"name": "p", "units": [
             {"id": "h", "kind": "slurm", "runtime": "none", "command": "true",
              "outputs": ["o"], "write_scopes": ["h/"]}]}
-        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
-        m.SE._check = check_impl
+        import swarm_evidence as SE
+        self.addCleanup(setattr, SE, "_check", SE._check)
+        SE._check = check_impl
         ok, why = m.acquire_lease(str(st))
         self.assertTrue(ok, why)
         self.addCleanup(m.release_lease, str(st))

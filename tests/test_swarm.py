@@ -28,6 +28,7 @@ SCRIPTS = REPO / "skills" / "hanig-swarm" / "scripts"
 # and `python3 tests/test_swarm.py` died in collection on "No module named
 # paseo_io", so the cheap way to iterate on it was seven minutes of everything.
 sys.path.insert(0, str(SCRIPTS))
+import swarm_evidence as SE
 UNIT, SWARM = SCRIPTS / "unit.py", SCRIPTS / "swarm.py"
 CONVERGE = SCRIPTS / "converge.py"
 _cv = importlib.util.spec_from_file_location('_cv', CONVERGE)
@@ -802,8 +803,8 @@ class TestTheConvergenceGateIsWiredIn(Base):
             return 0, "diagnostic", "", ("SWARM_CHECK_RESULT " + json.dumps(
                 result, sort_keys=True, separators=(",", ":")))
 
-        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
-        m.SE._check = forced_check
+        self.addCleanup(setattr, SE, "_check", SE._check)
+        SE._check = forced_check
         rep, disp, _ = m.advance(plan, m.load_state(str(st)), str(st),
                                  str(self.tmp / "cvruns"), False,
                                  max_new=max_new)

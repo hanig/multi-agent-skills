@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from tests.patch_scan import patch_targets
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills/hanig-swarm/scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -76,51 +78,34 @@ class TestEvidenceExtraction(unittest.TestCase):
         self.assertEqual(len(run.call_args.kwargs["pass_fds"]), 2)
 
     def test_tests_patch_evidence_owner_not_facade(self):
-        # Pin the spellings used by this suite; this is not general alias analysis.
-        offenders, owner_patches = [], set()
+        """Classify the enumerated import forms documented by patch_targets."""
+        offenders, unresolved, owner_patches = [], [], set()
         child_programs = 0
         for path in sorted((ROOT / "tests").glob("test_*.py")):
             tree = ast.parse(path.read_text())
-            trees = [tree]
+            trees = [(tree, 0)]
             # The closed-stdio harness patches inside a child Python program.
             for node in ast.walk(tree):
                 if (path.name == "test_attempt_authority.py"
                         and isinstance(node, ast.Constant) and isinstance(node.value, str)
                         and "\nimport swarm as S\n" in node.value):
-                    trees.append(ast.parse(node.value))
+                    trees.append((ast.parse(node.value), node.lineno - 1))
                     child_programs += 1
-            for node in (node for tree in trees for node in ast.walk(tree)):
-                target, name = None, None
-                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "object" and len(node.args) >= 2
-                        and isinstance(node.args[1], ast.Constant)):
-                    target, name = ast.unparse(node.args[0]), node.args[1].value
-                elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                      and node.func.id == "setattr" and len(node.args) >= 2
-                      and isinstance(node.args[1], ast.Constant)):
-                    target, name = ast.unparse(node.args[0]), node.args[1].value
-                elif (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)):
-                    target, name = ast.unparse(node.value), node.attr
-                elif (isinstance(node, ast.Call) and node.args
-                      and ((isinstance(node.func, ast.Attribute)
-                            and node.func.attr == "patch")
-                           or (isinstance(node.func, ast.Name)
-                               and node.func.id == "patch"))
-                      and isinstance(node.args[0], ast.Constant)
-                      and isinstance(node.args[0].value, str)
-                      and node.args[0].value.startswith("swarm.")):
-                    target, _, name = node.args[0].value.rpartition(".")
-                if name in DEFINITIONS:
-                    if target in {"S", "swarm", "m", "self.S"}:
-                        offenders.append((path.name, node.lineno, target, name))
-                    if target in {"SE", "S.SE", "m.SE", "self.S.SE"}:
+            for source, offset in trees:
+                for line, target, name, module in patch_targets(source, DEFINITIONS):
+                    if module is None:
+                        unresolved.append((path.name, line + offset, target, name))
+                    elif module == "swarm":
+                        offenders.append((path.name, line + offset, target, name))
+                    elif module == "swarm_evidence":
                         owner_patches.add(name)
+        self.assertEqual(unresolved, [], "unresolved patch targets: %r" % unresolved)
         self.assertTrue({"_receipt_reason", "load_verifications", "attested_receipt",
                          "_check", "_authority_result_sink", "admit_merge",
                          "_reported_check_result"}
                         <= owner_patches)
         self.assertEqual(child_programs, 1)
-        self.assertEqual(offenders, [])
+        self.assertEqual(offenders, [], "facade patch targets: %r" % offenders)
 
     def test_coordinator_consumers_read_evidence_from_owner(self):
         tree = ast.parse(Path(S.__file__).read_text())

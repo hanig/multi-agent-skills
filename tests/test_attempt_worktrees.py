@@ -14,6 +14,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+import swarm_evidence as SE
 import swarm as S  # noqa: E402
 import worktree as W  # noqa: E402
 import swarm_routing as SR  # noqa: E402
@@ -1021,7 +1022,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         result_line = S.CHECK_RESULT_PREFIX + " " + json.dumps({
             "produced_head": produced, "receipt_sha256": "f" * 64,
         }, sort_keys=True, separators=(",", ":"))
-        real_check = S.SE._check
+        real_check = SE._check
         real_archive = S._archive_code_worktree
 
         def check(*_args, **_kwargs):
@@ -1037,9 +1038,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             git(self.repo, "worktree", "remove", "--force", str(workspace))
             raise Crash()
 
-        S.SE._check = check
+        SE._check = check
         S._archive_code_worktree = archive_then_crash
-        self.addCleanup(setattr, S.SE, "_check", real_check)
+        self.addCleanup(setattr, SE, "_check", real_check)
         self.addCleanup(setattr, S, "_archive_code_worktree", real_archive)
         ok, why = S.acquire_lease(str(state_dir))
         self.assertTrue(ok, why)

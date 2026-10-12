@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
 sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
+import swarm_evidence as SE
 import swarm_journal as SJ  # noqa: E402
 PROJECT_SCRIPTS = ROOT / "skills" / "hanig-project" / "scripts"
 sys.path.insert(0, str(PROJECT_SCRIPTS))
@@ -2630,8 +2631,8 @@ class TestRetryBudgetBehaviour(unittest.TestCase):
                 "h": {"state": "SUBMITTED", "job_id": "2868624",
                       "attempt_dir": str(att), "attempts": attempts,
                       "gpu_hours": 0}}}))
-        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
-        m.SE._check = lambda d, *_a, **_k: (verdict, "forced")
+        self.addCleanup(setattr, SE, "_check", SE._check)
+        SE._check = lambda d, *_a, **_k: (verdict, "forced")
         # A real advance renews the lease between units, so the harness has to
         # hold it exactly as a controller would. Without this it stopped at
         # "no longer holds the lease" and measured nothing.
@@ -2899,8 +2900,8 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
                                                 json.dumps(
                                                     result, sort_keys=True,
                                                     separators=(",", ":")))
-        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
-        m.SE._check = forced_check
+        self.addCleanup(setattr, SE, "_check", SE._check)
+        SE._check = forced_check
         real_validate = m.W.validate_pinned_head
         m.W.validate_pinned_head = lambda *a, **k: None
         try:

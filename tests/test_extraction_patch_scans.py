@@ -1,5 +1,6 @@
 """Exercise extraction patch guards through their real test-suite consumers."""
 
+import ast
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,25 +8,20 @@ from unittest import mock
 
 from tests import test_swarm_evidence as evidence
 from tests import test_swarm_outbox as outbox
+from tests.patch_scan import patch_targets
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestPatchScanClassification(unittest.TestCase):
-    def test_readonly_lookups_pass_but_facade_mutations_fail(self):
+    def check_sources(self, sources):
         guards = (
             (outbox, outbox.TestOutboxExtraction,
-             "test_tests_patch_outbox_owner_not_facade", "normalize_intent"),
+             "test_tests_patch_outbox_owner_not_facade", "normalize_intent",
+             "swarm_outbox"),
             (evidence, evidence.TestEvidenceExtraction,
-             "test_tests_patch_evidence_owner_not_facade", "load_merge_receipts"),
-        )
-        sources = (
-            ('import pydoc\npydoc.locate("swarm.{name}")\n', False),
-            ('mock.patch("swarm.{name}")\n', True),
-            ('patch("swarm.{name}")\n', True),
-            ('mock.patch.object(S, "{name}")\n', True),
-            ('setattr(S, "{name}", replacement)\n', True),
-            ('S.{name} = replacement\n', True),
+             "test_tests_patch_evidence_owner_not_facade", "load_merge_receipts",
+             "swarm_evidence"),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -36,18 +32,88 @@ class TestPatchScanClassification(unittest.TestCase):
             for path in (ROOT / "tests").glob("test_*.py"):
                 (tests / path.name).symlink_to(path)
             fixture = tests / "test_patch_scan_fixture.py"
-            for module, case, method, name in guards:
-                for source, rejected in sources:
+            for module, case, method, name, owner in guards:
+                for source, rejection in sources:
                     with self.subTest(guard=method, source=source):
-                        fixture.write_text(source.format(name=name))
+                        fixture.write_text(source.format(name=name, owner=owner))
                         with mock.patch.object(module, "ROOT", root):
                             guard = getattr(case(method), method)
-                            if rejected:
+                            if rejection:
                                 with self.assertRaisesRegex(
-                                        AssertionError, "test_patch_scan_fixture.py"):
+                                        AssertionError,
+                                        rejection + ".*test_patch_scan_fixture.py"):
                                     guard()
                             else:
                                 guard()
+
+    def test_readonly_lookups_pass_but_facade_mutations_fail(self):
+        self.check_sources((
+            ('import pydoc\npydoc.locate("swarm.{name}")\n', None),
+            ('mock.patch("swarm.{name}")\n', "facade"),
+            ('patch("swarm.{name}")\n', "facade"),
+            ('import swarm as S\nmock.patch.object(S, "{name}")\n', "facade"),
+            ('import swarm as S\nsetattr(S, "{name}", replacement)\n', "facade"),
+            ('import swarm as S\nS.{name} = replacement\n', "facade"),
+        ))
+
+    def test_owner_alias_binding_passes(self):
+        self.check_sources((
+            ('import {owner} as swarm\n'
+             'mock.patch.object(swarm, "{name}", return_value=[])\n', None),
+        ))
+
+    def test_facade_alias_binding_fails(self):
+        self.check_sources((
+            ('import swarm as S\nmock.patch.object(S, "{name}")\n', "facade"),
+        ))
+
+    def test_unbound_name_fails_as_unresolved(self):
+        self.check_sources((
+            ('mock.patch.object(unbound, "{name}")\n', "unresolved"),
+        ))
+
+    def test_all_four_import_forms_at_module_and_function_scope(self):
+        forms = (
+            ("import swarm_outbox", "swarm_outbox", "swarm_outbox"),
+            ("import swarm_outbox as swarm", "swarm", "swarm_outbox"),
+            ("from package import swarm_outbox", "swarm_outbox", "package.swarm_outbox"),
+            ("from package import swarm_outbox as swarm", "swarm", "package.swarm_outbox"),
+        )
+        for statement, target, expected in forms:
+            source = statement + '\nmock.patch.object(' + target + ', "member")\n'
+            for function in (False, True):
+                with self.subTest(statement=statement, function=function):
+                    text = ("def test_case():\n" + "".join(
+                        "    " + line for line in source.splitlines(keepends=True))
+                            if function else source)
+                    records = list(patch_targets(ast.parse(text), {"member"}))
+                    self.assertEqual(len(records), 1)
+                    self.assertEqual(records[0], (3 if function else 2,
+                                                  target, "member", expected))
+
+    def test_function_bindings_are_local_and_override_outer_imports(self):
+        source = '''import swarm as target
+def owner_case():
+    import swarm_outbox as target
+    mock.patch.object(target, "member")
+def facade_case():
+    mock.patch.object(target, "member")
+def other_local():
+    import swarm_outbox as local_only
+def unresolved_case():
+    mock.patch.object(local_only, "member")
+'''
+        records = list(patch_targets(ast.parse(source), {"member"}))
+        self.assertEqual(records, [
+            (4, "target", "member", "swarm_outbox"),
+            (6, "target", "member", "swarm"),
+            (10, "local_only", "member", None),
+        ])
+
+    def test_patch_strings_keep_module_identity_despite_local_alias(self):
+        source = 'import swarm_outbox as swarm\nmock.patch("swarm.member")\n'
+        self.assertEqual(list(patch_targets(ast.parse(source), {"member"})),
+                         [(2, "swarm", "member", "swarm")])
 
 
 if __name__ == "__main__":
