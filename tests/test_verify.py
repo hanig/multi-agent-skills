@@ -848,9 +848,12 @@ class TestOneWayToGetTheBase(unittest.TestCase):
 
     def test_nothing_else_reads_a_base_out_of_a_launch_record(self):
         import ast
-        src = (SCRIPTS / "swarm.py").read_text()
+        trees = [ast.parse((SCRIPTS / name).read_text())
+                 for name in ("swarm.py", "swarm_evidence.py")]
+        self.assertTrue({"trusted_base", "_write_launch_record"} <= {
+            n.name for tree in trees for n in tree.body if isinstance(n, ast.FunctionDef)})
         offenders = []
-        for node in ast.walk(ast.parse(src)):
+        for node in (n for tree in trees for n in ast.walk(tree)):
             if not isinstance(node, ast.FunctionDef):
                 continue
             if node.name in ("trusted_base", "_write_launch_record"):
@@ -868,9 +871,12 @@ class TestOneWayToGetTheBase(unittest.TestCase):
 
     def test_every_caller_goes_through_it(self):
         import ast
-        src = (SCRIPTS / "swarm.py").read_text()
+        trees = [ast.parse((SCRIPTS / name).read_text())
+                 for name in ("swarm.py", "swarm_evidence.py")]
+        self.assertTrue({"trusted_base", "_submit"} <= {
+            n.name for tree in trees for n in tree.body if isinstance(n, ast.FunctionDef)})
         readers = []
-        for node in ast.walk(ast.parse(src)):
+        for node in (n for tree in trees for n in ast.walk(tree)):
             if not isinstance(node, ast.FunctionDef):
                 continue
             # _submit is the WRITER; it must index directly to write.

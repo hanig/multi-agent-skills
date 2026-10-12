@@ -148,11 +148,11 @@ ALLOWED = {
         "compares the checkout to the coordinator-resolved target",
     ("swarm.py", "_capture_code_launch"):
         "pins the coordinator-created source observation before launch",
-    ("swarm.py", "admit_merge"):
+    ("swarm_evidence.py", "admit_merge"):
         "compares the merge attestation's repository to trusted state",
     ("swarm.py", "advance"):
         "uses repository identity from the coordinator-state snapshot",
-    ("swarm.py", "trusted_base"):
+    ("swarm_evidence.py", "trusted_base"):
         "reads the base only from the coordinator-state snapshot",
     ("swarm.py", "cmd_verify"):
         "uses repository and base only from the coordinator-state snapshot",
@@ -681,7 +681,8 @@ class TestReceiptProvenanceIsActuallyRecorded(unittest.TestCase):
                                     _json.dumps(result, sort_keys=True,
                                                 separators=(",", ":")))
 
-        m._check = check
+        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
+        m.SE._check = check
         ok, why = m.acquire_lease(str(st))
         self.assertTrue(ok, why)
         self.addCleanup(m.release_lease, str(st))
@@ -729,7 +730,8 @@ class TestOnlyAReceiptTheCheckReportedWritingIsAttested(unittest.TestCase):
         plan = {"name": "p", "units": [
             {"id": "h", "kind": "slurm", "runtime": "none", "command": "true",
              "outputs": ["o"], "write_scopes": ["h/"]}]}
-        m._check = check_impl
+        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
+        m.SE._check = check_impl
         ok, why = m.acquire_lease(str(st))
         self.assertTrue(ok, why)
         self.addCleanup(m.release_lease, str(st))

@@ -2630,7 +2630,8 @@ class TestRetryBudgetBehaviour(unittest.TestCase):
                 "h": {"state": "SUBMITTED", "job_id": "2868624",
                       "attempt_dir": str(att), "attempts": attempts,
                       "gpu_hours": 0}}}))
-        m._check = lambda d, *_a, **_k: (verdict, "forced")
+        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
+        m.SE._check = lambda d, *_a, **_k: (verdict, "forced")
         # A real advance renews the lease between units, so the harness has to
         # hold it exactly as a controller would. Without this it stopped at
         # "no longer holds the lease" and measured nothing.
@@ -2897,7 +2898,8 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
                                                 json.dumps(
                                                     result, sort_keys=True,
                                                     separators=(",", ":")))
-        m._check = forced_check
+        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
+        m.SE._check = forced_check
         real_validate = m.W.validate_pinned_head
         m.W.validate_pinned_head = lambda *a, **k: None
         try:

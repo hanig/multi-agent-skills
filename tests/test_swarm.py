@@ -789,7 +789,8 @@ class TestTheConvergenceGateIsWiredIn(Base):
             return 0, "diagnostic", "", ("SWARM_CHECK_RESULT " + json.dumps(
                 result, sort_keys=True, separators=(",", ":")))
 
-        m._check = forced_check
+        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
+        m.SE._check = forced_check
         rep, disp, _ = m.advance(plan, m.load_state(str(st)), str(st),
                                  str(self.tmp / "cvruns"), False,
                                  max_new=max_new)

@@ -368,12 +368,12 @@ def observed_run(*args, **kwargs):
     return real_run(*args, **kwargs)
 S.U.run = observed_run
 if data["expose_authority_on_stdin"]:
-    real_authority_sink = S._authority_result_sink
+    real_authority_sink = S.SE._authority_result_sink
     def exposed_authority_sink():
         handle = real_authority_sink()
         os.dup2(handle.fileno(), 0)
         return handle
-    S._authority_result_sink = exposed_authority_sink
+    S.SE._authority_result_sink = exposed_authority_sink
 payload = {}
 try:
     report, _dispatched, _halted = S.advance(
@@ -476,8 +476,8 @@ Path(data["result"]).write_text(json.dumps(payload))
                                          separators=(",", ":")))
             return 0, "DONE\ndiagnostic", "", result_channel
 
-        real = S._check
-        S._check = check
+        real = S.SE._check
+        S.SE._check = check
         try:
             ok, why = S.acquire_lease(str(state_dir))
             self.assertTrue(ok, why)
@@ -485,7 +485,7 @@ Path(data["result"]).write_text(json.dumps(payload))
             S.advance(plan, state, str(state_dir), str(self.tmp / "runs"),
                       False, max_new=0)
         finally:
-            S._check = real
+            S.SE._check = real
         self.assertEqual(
             state["units"]["u1"]["attempt_produced_heads"]["att2"],
             produced)
@@ -533,8 +533,8 @@ Path(data["result"]).write_text(json.dumps(payload))
             return ({"merged_as": produced, "pr": "PR-1",
                      "method": "merge"}, None)
 
-        real_check, real_admit = S._check, S.admit_merge
-        S._check, S.admit_merge = check, admit_merge
+        real_check, real_admit = S.SE._check, S.SE.admit_merge
+        S.SE._check, S.SE.admit_merge = check, admit_merge
         try:
             ok, why = S.acquire_lease(str(state_dir))
             self.assertTrue(ok, why)
@@ -542,7 +542,7 @@ Path(data["result"]).write_text(json.dumps(payload))
             S.advance(plan, state, str(state_dir), str(self.tmp / "runs"),
                       False, max_new=0)
         finally:
-            S._check, S.admit_merge = real_check, real_admit
+            S.SE._check, S.SE.admit_merge = real_check, real_admit
 
         self.assertFalse((attempt / U.RECEIPT).exists())
         self.assertEqual(
@@ -570,8 +570,8 @@ Path(data["result"]).write_text(json.dumps(payload))
             "produced_head": forged, "receipt_sha256": "f" * 64,
         }, sort_keys=True, separators=(",", ":"))
 
-        real = S._check
-        S._check = lambda *_a, **_k: (
+        real = S.SE._check
+        S.SE._check = lambda *_a, **_k: (
             0, "agent-value\n" + injected, "receipt write failed", "")
         try:
             ok, why = S.acquire_lease(str(state_dir))
@@ -580,7 +580,7 @@ Path(data["result"]).write_text(json.dumps(payload))
             S.advance(plan, state, str(state_dir), str(self.tmp / "runs"),
                       False, max_new=0)
         finally:
-            S._check = real
+            S.SE._check = real
 
         unit_state = state["units"]["u1"]
         self.assertEqual(unit_state["state"], "FAILED_EVIDENCE")

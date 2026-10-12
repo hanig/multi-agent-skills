@@ -201,7 +201,7 @@ class TestClosureAuthorityIsUnchanged(unittest.TestCase):
     def test_the_merge_path_is_never_consulted_for_slurm(self):
         """A merge receipt must not become a way to close a Slurm unit."""
         import ast
-        src = (SCRIPTS / "swarm.py").read_text()
+        src = (SCRIPTS / "swarm_evidence.py").read_text()
         fn = next(n for n in ast.walk(ast.parse(src))
                   if isinstance(n, ast.FunctionDef) and n.name == "admit_merge")
         self.assertNotIn("slurm", ast.unparse(fn))
@@ -478,7 +478,7 @@ class TestTheJudgedHeadIsInTheReceipt(unittest.TestCase):
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef) and n.name == "advance")
         body = ast.unparse(fn)
-        self.assertIn("produced = trusted_produced_head", body)
+        self.assertIn("produced = SE.trusted_produced_head", body)
         self.assertNotIn("produced = ((rec", body)
 
     def _att(self, d, receipt):

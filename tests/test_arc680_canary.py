@@ -42,8 +42,9 @@ class CanaryTests(unittest.TestCase):
         self.submitted = []
         self.verdicts = {}
         self.checked = []
-        for name, fake in (('_submit', self.submit), ('_check', self.check)):
-            patcher = mock.patch.object(S, name, side_effect=fake)
+        for owner, name, fake in ((S, '_submit', self.submit),
+                                  (S.SE, '_check', self.check)):
+            patcher = mock.patch.object(owner, name, side_effect=fake)
             patcher.start()
             self.addCleanup(patcher.stop)
 

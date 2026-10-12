@@ -212,13 +212,13 @@ class TestLaunchHostIdentity(unittest.TestCase):
             "id": "code", "kind": "code", "repo": "/declared",
             "outputs": [], "write_scopes": ["code/"],
         }]}
-        real_check = S._check
+        real_check = S.SE._check
 
         def no_check(*_args, **_kwargs):
             self.fail("the checker must not run for a foreign-host attempt")
 
-        S._check = no_check
-        self.addCleanup(setattr, S, "_check", real_check)
+        S.SE._check = no_check
+        self.addCleanup(setattr, S.SE, "_check", real_check)
         ok, why = S.acquire_lease(str(state_dir))
         self.assertTrue(ok, why)
         self.addCleanup(S.release_lease, str(state_dir))
