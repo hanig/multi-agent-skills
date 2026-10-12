@@ -5,14 +5,20 @@ Python 3.8+, standard library only.
 
 import hashlib
 import json
+import os
 import re
 import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 
 import coordinator_paths as CP
 import swarm_journal as SJ
+import swarm_state as SS
 import unit as U
 import verify as V
+import worktree as W
 from swarm_types import OutboxError
 
 
@@ -464,3 +470,428 @@ def attested_receipt(state, unit, attempt_dir):
                       f"{rec.get('attempt_id')!r}, not unit {unit!r}, "
                       f"attempt {attempt!r}; cross-wired evidence is refused")
     return rec, None
+
+
+# Shared with submission validation through the swarm facade.
+ISOLATION_MARKER_NAME = ".swarm-isolation-applied-v1"
+
+_HERE = Path(__file__).resolve().parent
+
+
+def trusted_base(state, unit, attempt_dir):
+    """THE ONLY way to obtain the base commit an attempt was anchored to.
+
+    Three rounds of review found the same defect in three places, each time
+    because some caller reached for the base wherever it was handy. The launch
+    record is the handiest place and the wrong one: it sits on a filesystem
+    the agent's Unix user can write, so reading it and then treating the value
+    as trusted launders exactly what the trust was for.
+
+    So there is one function, it reads ONLY coordinator state, and it has no
+    fallback. Returning None means "this attempt cannot be verified", which is
+    an honest answer; inventing a base from a file the agent can edit is not.
+    A test asserts nothing else reads base_commit out of a launch record.
+    """
+    if not attempt_dir:
+        return None
+    facts = SS.trusted_launch_facts(state, unit, attempt_dir)
+    return facts.get("base_commit") if facts else None
+
+
+def trusted_produced_head(state, unit, attempt_dir):
+    """The one judgment basis pinned for this exact attempt; no fallback."""
+    if not attempt_dir:
+        return None
+    us = (state.get("units") or {}).get(unit) or {}
+    return (us.get("attempt_produced_heads") or {}).get(
+        Path(attempt_dir).name)
+
+
+def _capture_artifact_basis(state, unit, unit_dir, u, enable_slurm_exit=False):
+    """Digest every declared artifact BEFORE anything is dispatched.
+
+    B1, and the strongest thing this function does is happen EARLY. The done
+    predicate concludes "the write root is exclusive, so an artifact found
+    there was produced here", and that inference needs the write root to have
+    been empty of that artifact when the attempt started. Nothing checked it,
+    so a unit that declared its input path as its output recorded a file it
+    never wrote as produced evidence and read DONE.
+
+    PINNED ONCE PER ATTEMPT, and the `if attempt in bases` guard is the whole
+    of it. `_submit` is re-entered on the code-launch recovery path and a
+    continuation re-runs the agent inside the SAME write root; either one, if
+    it re-digested, would adopt whatever the previous turn left behind as the
+    baseline it is about to be judged against. That is `produced_head`'s bug
+    -- a value that was never cleared and so was inherited -- and this is
+    where it would have been reproduced a third time.
+
+    The outputs come from the PLAN, never from the attempt's `unit.json`: the
+    party being judged can write that file, and a baseline over a list it
+    chose is a baseline it chose.
+    """
+    us = state.setdefault("units", {}).setdefault(unit, {})
+    attempt = Path(unit_dir).name
+    bases = us.setdefault("attempt_artifact_bases", {})
+    if attempt in bases:
+        return bases[attempt]
+    declared = [str(o) for o in (u.get("outputs") or [])]
+    present, missing, escaped = W.outputs_present(
+        unit_dir, {"declared_outputs": declared})
+    bases[attempt] = {
+        "schema_version": W.ARTIFACT_BASIS_SCHEMA,
+        # Both identities, so a basis lifted from another attempt or another
+        # unit is useless rather than merely unlikely to be lifted.
+        "attempt_id": attempt,
+        "unit_id": unit,
+        "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "declared": declared,
+        # Absent is the ordinary case and the strongest one: nothing was
+        # there, so anything there afterwards can only be new.
+        "absent": sorted(missing),
+        "escaped": sorted(escaped),
+        "present": U.fingerprint_outputs(unit_dir, present),
+    }
+    if enable_slurm_exit and u.get("kind") == "slurm":
+        bases[attempt]["slurm_exit_record"] = {"version": 1, "path": U.SLURM_EXIT_RECORD}
+    return bases[attempt]
+
+
+def raw_artifact_basis(state, unit, attempt_dir):
+    """Transport coordinator state without turning invalid capability into absence."""
+    if not attempt_dir:
+        return None
+    return ((((state.get("units") or {}).get(unit) or {})
+             .get("attempt_artifact_bases") or {}).get(Path(attempt_dir).name))
+
+
+def trusted_artifact_basis(state, unit, attempt_dir):
+    """The pre-dispatch artifact digest pinned for THIS attempt; no fallback.
+
+    Never derived, never defaulted, and never read from the attempt directory
+    or the launch record. Returning None means "this attempt cannot be judged
+    for production", which the checker turns into a refusal.
+    """
+    if not attempt_dir:
+        return None
+    basis = ((((state.get("units") or {}).get(unit) or {})
+              .get("attempt_artifact_bases") or {}).get(Path(attempt_dir).name))
+    if W.artifact_basis_problem(basis, attempt_dir,
+                                {"id": unit, "task_id": unit}):
+        return None
+    return basis
+
+
+def trusted_isolation_facts(state, u, attempt_dir):
+    """Applied submission boundary for this attempt, from state only.
+
+    The job script and unit.json live in the attempt namespace and are
+    audit-only.  A declaration removed or changed after dispatch cannot reuse
+    stale facts: the canonical profile digest must still match the plan.
+    """
+    if not attempt_dir or not isinstance(u, dict) or not u.get("isolation"):
+        return None
+    attempt = Path(attempt_dir).name
+    us = (state.get("units") or {}).get(u.get("id")) or {}
+    facts = (us.get("attempt_isolation_facts") or {}).get(attempt)
+    if not isinstance(facts, dict):
+        return None
+    canonical = json.dumps(
+        u["isolation"], sort_keys=True, separators=(",", ":"))
+    expected_digest = hashlib.sha256(canonical.encode()).hexdigest()
+    expected_root = str(Path(attempt_dir).resolve())
+    expected_marker = str(Path(expected_root) / ISOLATION_MARKER_NAME)
+    token = facts.get("application_token_sha256")
+    if not (
+            facts.get("schema_version") == 1
+            and facts.get("unit_id") == u.get("id")
+            and facts.get("attempt_id") == attempt
+            and facts.get("applied_to_submission") is True
+            and facts.get("mechanism") == "container-host-bind-write-scope"
+            and facts.get("backend") == u["isolation"].get("backend")
+            and facts.get("image") == u["isolation"].get("image")
+            and facts.get("profile_sha256") == expected_digest
+            and facts.get("writable_host_binds") == [expected_root]
+            and facts.get("application_marker") == expected_marker
+            and isinstance(token, str)
+            and re.fullmatch(r"[0-9a-f]{64}", token) is not None
+            and facts.get("read_only_host_binds") == [
+                os.path.normpath(str(p))
+                for p in (u["isolation"].get("read_only") or [])]):
+        return None
+    return facts
+
+
+CHECK_RESULT_PREFIX = "SWARM_CHECK_RESULT"
+
+
+def _reported_check_result(result_channel):
+    """Parse the sole exact authority result from its dedicated channel.
+
+    The coordinator owns the underlying anonymous file and gives only its fd
+    to the checker. stdout and stderr are diagnostics, never inputs here.
+
+    Returns ``(result, problem)``. Exactly one line is accepted; extra text is
+    malformed and more than one line is ambiguous even when values agree.
+    """
+    lines = (result_channel or "").splitlines()
+    if not lines:
+        return None, None
+    if len(lines) != 1:
+        return None, (f"checker result channel contained {len(lines)} lines; "
+                      "exactly one is required")
+    prefix = CHECK_RESULT_PREFIX + " "
+    line = lines[0]
+    if not line.startswith(prefix):
+        return None, (f"malformed checker result {line!r}; expected "
+                      f"'{CHECK_RESULT_PREFIX} ' followed by canonical JSON")
+    payload = line[len(prefix):]
+    try:
+        result = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        return None, f"malformed checker result {line!r}: {exc}"
+    required = {"produced_head", "receipt_sha256"}
+    if not isinstance(result, dict) or set(result) != required:
+        return None, ("checker result must be an object with exactly "
+                      "produced_head and receipt_sha256")
+    canonical = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    if payload != canonical:
+        return None, "checker result JSON is not in canonical form"
+    digest = result.get("receipt_sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return None, ("checker result receipt_sha256 must be exactly 64 "
+                      "lowercase hexadecimal characters")
+    produced = result.get("produced_head")
+    if produced is not None and (
+            not isinstance(produced, str)
+            or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", produced) is None):
+        return None, ("checker result produced_head must be null or a 40/64 "
+                      "character lowercase hexadecimal object id")
+    return result, None
+
+
+RECEIPT_PROVENANCE_LIMIT = (
+    "The coordinator has no portable process-group or cgroup handle that "
+    "proves every same-UID descendant of a Paseo agent or scheduler job is "
+    "dead. The digest binds the trusted checker's receipt bytes, but does "
+    "not prove that an escaped background process stopped mutating other "
+    "artifacts during or after the check. OS-enforced isolation requires a "
+    "different principal, container, or scheduler-exposed cgroup barrier."
+)
+
+
+def _record_receipt_provenance(state, unit, attempt_dir, digest):
+    """Record that the COORDINATOR caused the receipt now on disk.
+
+    An agent can write `receipt.json` into its own attempt directory, and the
+    report deliberately lets a receipt outrank coordinator state because a
+    receipt judged artifacts. Both are reasonable and together they are a
+    hole: the agent's self-report wins.
+
+    A seal cannot close it, because a seal handed in as an argument can be
+    computed by whoever hands it in. What cannot be forged is a fact the
+    coordinator wrote to its OWN state, which the threat model trusts and the
+    agent is never given the path to. So after a check the coordinator has
+    caused, it digests the receipt that check produced and records that here.
+    A receipt with no matching entry was not produced by a check this
+    coordinator ran, and the report says so instead of trusting it.
+    """
+    if not attempt_dir:
+        return
+    us = state.setdefault("units", {}).setdefault(unit, {})
+    if not digest:
+        # The check wrote no receipt, so the coordinator vouches for NOTHING
+        # here any more. Leaving an earlier seal in place let a favourable
+        # receipt from a previous check keep validating: restore that file and
+        # it still matches the stale seal, outranking the newer FAILED state.
+        # Withdrawing the seal is the whole point of holding it.
+        (us.get("attempt_receipt_seals") or {}).pop(Path(attempt_dir).name,
+                                                    None)
+        (us.get("attempt_receipt_provenance_limits") or {}).pop(
+            Path(attempt_dir).name, None)
+        return
+    us.setdefault("attempt_receipt_seals", {})[Path(attempt_dir).name] = digest
+    # DECLARED LIMIT AT THE ACCEPTANCE POINT. Slurm terminal accounting and a
+    # terminal/idle Paseo lifecycle do not expose one portable handle with
+    # which this coordinator can prove every escaped same-UID descendant is
+    # gone. Do not silently upgrade this byte binding into process isolation.
+    us.setdefault("attempt_receipt_provenance_limits", {})[
+        Path(attempt_dir).name] = RECEIPT_PROVENANCE_LIMIT
+
+
+def trusted_record_seal(state, unit, attempt_dir):
+    """THE ONLY way to obtain an attempt's launch-record seal.
+
+    Same shape and same reason as `trusted_base`: coordinator state, no
+    fallback. None means "this attempt cannot be judged against its anchor",
+    which callers must treat as a refusal rather than as permission to read
+    the record unsealed.
+    """
+    if not attempt_dir:
+        return None
+    us = (state.get("units") or {}).get(unit) or {}
+    return (us.get("attempt_record_seals") or {}).get(Path(attempt_dir).name)
+
+
+def admit_merge(state_dir, unit, produced, expect_repo=None, repo=None,
+                require_target_binding=False, expect_target=None):
+    """(receipt, refusal). A merged-PR attestation, admitted or refused.
+
+    `produced` is the commit this coordinator judged the attempt to have
+    produced. An attestation that pins a different head is refused: that is
+    the whole binding, and without it any attester closes any unit.
+    """
+    if not produced:
+        return None, ("this attempt has no produced commit, so there is "
+                      "nothing a merge could be bound to. A unit reaches "
+                      "READY_FOR_PR only after producing one.")
+    recs, _problems = load_merge_receipts(state_dir)
+    mine = [r for r in recs if r.get("unit") == unit
+            and r.get("merged") is True]
+    if not mine:
+        return None, (f"no merge receipt for {unit!r}. Record one from a "
+                      f"machine that can see the PR:\n  swarm.py merge "
+                      f"--unit {unit} --pr URL --head {produced[:12]} "
+                      f"--target BRANCH --merged-as SHA --method merge")
+    wrong_repo, wrong_target, target_refusals = [], [], []
+    for r in mine:
+        if str(r.get("head")) != str(produced):
+            continue
+        if expect_repo and not _same_repo(r.get("repo"), expect_repo):
+            # Collect and keep looking. Returning on the first mismatch let a
+            # single wrong-repository receipt mask every correct one appended
+            # after it, so one attester slip parked the unit forever.
+            wrong_repo.append(str(r.get("repo")))
+            continue
+        if expect_target and r.get("target") != expect_target:
+            wrong_target.append(str(r.get("target")))
+            continue
+        claimed_target = r.get("target_commit")
+        if require_target_binding:
+            if not claimed_target:
+                target_refusals.append(
+                    "the integration-tests unit has no recorded pre-merge "
+                    "target commit")
+                continue
+            if not repo:
+                target_refusals.append(
+                    "the receipt names a pre-merge target commit, but no "
+                    "coordinator-held repository was supplied to check it")
+                continue
+            actual_target, target_error = V.target_before_merge(
+                U.run, repo, produced, r.get("merged_as"), r.get("method"),
+                claimed_target)
+            if target_error:
+                target_refusals.append(target_error)
+                continue
+            if actual_target != claimed_target:
+                target_refusals.append(
+                    f"the merge object establishes pre-merge target "
+                    f"{actual_target[:12]}, not claimed target "
+                    f"{str(claimed_target)[:12]}; the target moved after the "
+                    f"integration check")
+                continue
+        return r, None
+    if wrong_repo:
+        return None, (
+            f"{len(wrong_repo)} merge receipt(s) for {unit!r} pin the right "
+            f"head but name repositor(y/ies) {', '.join(sorted(set(wrong_repo)))}, "
+            f"and this attempt was anchored to {expect_repo!r}. The attester "
+            f"is trusted to report what it saw, not to decide which "
+            f"repository this unit belongs to. Record a corrected receipt; "
+            f"the wrong one does not block it.")
+    if wrong_target:
+        return None, (
+            f"merge receipt(s) for {unit!r} target "
+            f"{', '.join(sorted(set(wrong_target)))}, not the plan's target "
+            f"{expect_target!r}. Record a corrected receipt; a wrong target "
+            f"does not block a later correct one.")
+    if target_refusals:
+        return None, (
+            f"no merge receipt for {unit!r} has an admissible pre-merge "
+            f"target: {target_refusals[0]}. A connected session must supply "
+            f"the merge Git objects locally; the coordinator never contacts "
+            f"a forge.")
+    heads = ", ".join(sorted({str(r.get("head"))[:12] for r in mine}))
+    return None, (
+        f"{len(mine)} merge receipt(s) for {unit!r} pin head(s) {heads}, but "
+        f"this attempt produced {produced[:12]}. A merge of something else "
+        f"does not close this unit, and re-pointing the receipt would defeat "
+        f"the only check the coordinator can make without a network.")
+
+
+
+def _authority_result_sink():
+    """Anonymous result file with no live handle on fd 0, 1, or 2.
+
+    The complete containment property is split deliberately across two
+    chokepoints: this function removes every standard-fd alias before launch;
+    U.run replaces stdin, captures stdout/stderr, closes every other fd except
+    the explicit >=3 result fd, and contains timeout cleanup to the new process
+    group. Thus an agent-controlled git/paseo descendant neither inherits nor
+    keeps alive a handle to this file.
+    """
+    sink = tempfile.TemporaryFile(mode="w+b")
+    if sink.fileno() >= 3:
+        return sink
+    duplicates = []
+    try:
+        promoted_fd = sink.fileno()
+        while promoted_fd < 3:
+            promoted_fd = os.dup(sink.fileno())
+            duplicates.append(promoted_fd)
+        # Do NOT pop before fdopen succeeds. fdopen takes ownership of the
+        # descriptor only on success; popping first means an exception leaves
+        # that one fd owned by nobody and closed by no one.
+        promoted = os.fdopen(duplicates[-1], "w+b")
+        duplicates.pop()
+    except BaseException:
+        for duplicate in duplicates:
+            os.close(duplicate)
+        sink.close()
+        raise
+    sink.close()
+    for duplicate in duplicates:
+        os.close(duplicate)
+    return promoted
+
+
+def _check(unit_dir, launch_facts=None, artifact_basis=None,
+           isolation_facts=None, isolation_required=False):
+    argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
+    if U.SACCT_UNAVAILABLE:
+        argv.append("--skip-sacct")
+    # The separate judge receives the complete authority snapshot directly
+    # from coordinator state. It never opens the launch audit record.
+    if launch_facts:
+        argv += ["--launch-facts", json.dumps(
+            launch_facts, sort_keys=True, separators=(",", ":"))]
+    # Same channel, same provenance, for the same reason: the pre-dispatch
+    # artifact digest decides admission, so it travels BY VALUE from
+    # coordinator state. Passing a path to it, or letting the checker find it
+    # beside the attempt, would put the baseline where the judged party can
+    # write. What an onlooker could read off this argv is a digest of files it
+    # can already read; what it cannot do is change the baseline.
+    if artifact_basis:
+        argv += ["--artifact-basis", json.dumps(
+            artifact_basis, sort_keys=True, separators=(",", ":"))]
+    if isolation_facts:
+        argv += ["--isolation-facts", json.dumps(
+            isolation_facts, sort_keys=True, separators=(",", ":"))]
+    if isolation_required:
+        argv.append("--isolation-required")
+    # Anonymous coordinator-owned storage is the authority channel. stdout
+    # contains diagnostics derived from agent-writable artifacts and cannot
+    # become authority merely by printing a reserved-looking prefix.
+    with _authority_result_sink() as result_sink, _authority_result_sink() as scheduler_sink:
+        result_fd = result_sink.fileno()
+        scheduler_fd = scheduler_sink.fileno()
+        argv += ["--result-fd", str(result_fd)]
+        argv += ["--sacct-status-fd", str(scheduler_fd)]
+        rc, out, err = U.run(
+            argv, timeout=300, pass_fds=(result_fd, scheduler_fd))
+        result_sink.seek(0)
+        result_channel = result_sink.read(4097).decode("ascii", "replace")
+        scheduler_sink.seek(0)
+        if scheduler_sink.read(2) == b"1":
+            U.SACCT_UNAVAILABLE = True
+    return rc, out or "", err or "", result_channel

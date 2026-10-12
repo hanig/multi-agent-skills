@@ -1021,7 +1021,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         result_line = S.CHECK_RESULT_PREFIX + " " + json.dumps({
             "produced_head": produced, "receipt_sha256": "f" * 64,
         }, sort_keys=True, separators=(",", ":"))
-        real_check = S._check
+        real_check = S.SE._check
         real_archive = S._archive_code_worktree
 
         def check(*_args, **_kwargs):
@@ -1037,9 +1037,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             git(self.repo, "worktree", "remove", "--force", str(workspace))
             raise Crash()
 
-        S._check = check
+        S.SE._check = check
         S._archive_code_worktree = archive_then_crash
-        self.addCleanup(setattr, S, "_check", real_check)
+        self.addCleanup(setattr, S.SE, "_check", real_check)
         self.addCleanup(setattr, S, "_archive_code_worktree", real_archive)
         ok, why = S.acquire_lease(str(state_dir))
         self.assertTrue(ok, why)

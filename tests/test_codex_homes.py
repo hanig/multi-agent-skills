@@ -861,7 +861,7 @@ class TestCodexHomes(unittest.TestCase):
         us = state["units"]["code"]
         us.update(state="SUBMITTED", attempt_dir=str(attempt), attempts=[str(attempt)],
                   job_id="fixture-agent", gpu_hours=0)
-        with mock.patch.object(S, "_check", return_value=(S.RUNNING, "", "")):
+        with mock.patch.object(S.SE, "_check", return_value=(S.RUNNING, "", "")):
             S.advance({"units": [unit]}, state, str(self.state_dir), str(self.tmp / "runs"), False, max_new=0)
         self.assertTrue(home.exists())
         self.assertNotIn("cleanup_attempts", us["attempt_codex_homes"][attempt.name])
@@ -949,7 +949,7 @@ class TestCodexHomes(unittest.TestCase):
                       "attempts": [str(attempt)], "job_id": "fixture-job", "gpu_hours": 0,
                       "attempt_codex_homes": {attempt.name: self.home_record(home)}}
                 state = {"units": {kind: us}}
-                with mock.patch.object(S, "_check", return_value=(result, "", "")):
+                with mock.patch.object(S.SE, "_check", return_value=(result, "", "")):
                     with mock.patch.object(CH, "remove", side_effect=CH.HomeError("fixture failure")):
                         S.advance({"units": [unit]}, state, str(self.state_dir), str(self.tmp / "runs"), False, max_new=0)
                     self.assertTrue(home.exists())

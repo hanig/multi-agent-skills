@@ -19,10 +19,15 @@ DEFINITIONS = (
     "_same_repo", "_verify_shape_problem", "_read_verify_raw",
     "load_verifications", "admit_verification", "_receipt_reason",
     "attested_receipt",
+    "trusted_base", "trusted_produced_head", "_capture_artifact_basis",
+    "raw_artifact_basis", "trusted_artifact_basis", "trusted_isolation_facts",
+    "_reported_check_result", "_record_receipt_provenance",
+    "trusted_record_seal", "admit_merge", "_authority_result_sink", "_check",
 )
 CONSTANTS = (
     "MERGE_RECEIPTS", "MERGE_METHODS", "_MERGE_REQUIRED",
     "VERIFY_RECEIPTS", "_VERIFY_REQUIRED",
+    "CHECK_RESULT_PREFIX", "RECEIPT_PROVENANCE_LIMIT", "ISOLATION_MARKER_NAME",
 )
 
 
@@ -53,15 +58,46 @@ class TestEvidenceExtraction(unittest.TestCase):
             self.assertEqual(S._receipt_reason({}, "unit", "attempt"), "fixture-reason")
         read.assert_called_once_with({}, "unit", "attempt")
 
+    def test_owner_merge_reader_patch_reaches_admission_through_facade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(SE, "load_merge_receipts", return_value=([], [])) as read:
+                receipt, refusal = S.admit_merge(directory, "unit", "a" * 40)
+            read.assert_called_once_with(directory)
+            self.assertIsNone(receipt)
+            self.assertIn("no merge receipt", refusal)
+
+    def test_owner_sink_patch_reaches_checker_through_facade(self):
+        with mock.patch.object(SE, "_authority_result_sink",
+                               wraps=SE._authority_result_sink) as sink, \
+                mock.patch.object(SE.U, "run", return_value=(0, "diagnostic", "")) as run:
+            self.assertEqual(S._check("/attempt"), (0, "diagnostic", "", ""))
+        self.assertEqual(sink.call_count, 2)
+        run.assert_called_once()
+        self.assertEqual(len(run.call_args.kwargs["pass_fds"]), 2)
+
     def test_tests_patch_evidence_owner_not_facade(self):
         # Pin the spellings used by this suite; this is not general alias analysis.
         offenders, owner_patches = [], set()
+        child_programs = 0
         for path in sorted((ROOT / "tests").glob("test_*.py")):
-            for node in ast.walk(ast.parse(path.read_text())):
+            tree = ast.parse(path.read_text())
+            trees = [tree]
+            # The closed-stdio harness patches inside a child Python program.
+            for node in ast.walk(tree):
+                if (path.name == "test_attempt_authority.py"
+                        and isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and "\nimport swarm as S\n" in node.value):
+                    trees.append(ast.parse(node.value))
+                    child_programs += 1
+            for node in (node for tree in trees for node in ast.walk(tree)):
                 target, name = None, None
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                         and node.func.attr == "object" and len(node.args) >= 2
                         and isinstance(node.args[1], ast.Constant)):
+                    target, name = ast.unparse(node.args[0]), node.args[1].value
+                elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                      and node.func.id == "setattr" and len(node.args) >= 2
+                      and isinstance(node.args[1], ast.Constant)):
                     target, name = ast.unparse(node.args[0]), node.args[1].value
                 elif (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)):
                     target, name = ast.unparse(node.value), node.attr
@@ -71,12 +107,15 @@ class TestEvidenceExtraction(unittest.TestCase):
                       and node.args[0].value.startswith("swarm.")):
                     target, _, name = node.args[0].value.rpartition(".")
                 if name in DEFINITIONS:
-                    if target in {"S", "swarm"}:
+                    if target in {"S", "swarm", "m", "self.S"}:
                         offenders.append((path.name, node.lineno, target, name))
-                    if target == "SE":
+                    if target in {"SE", "S.SE", "m.SE", "self.S.SE"}:
                         owner_patches.add(name)
-        self.assertTrue({"_receipt_reason", "load_verifications", "attested_receipt"}
+        self.assertTrue({"_receipt_reason", "load_verifications", "attested_receipt",
+                         "_check", "_authority_result_sink", "admit_merge",
+                         "_reported_check_result"}
                         <= owner_patches)
+        self.assertEqual(child_programs, 1)
         self.assertEqual(offenders, [])
 
     def test_coordinator_consumers_read_evidence_from_owner(self):
@@ -87,10 +126,14 @@ class TestEvidenceExtraction(unittest.TestCase):
         consumers = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
                      and isinstance(n.value, ast.Name) and n.value.id == "SE"}
         self.assertEqual(consumers, {
-            "_merge_shape_problem", "load_merge_receipts", "_same_repo",
+            "_merge_shape_problem", "load_merge_receipts",
             "_verify_shape_problem", "load_verifications", "admit_verification",
             "_receipt_reason", "attested_receipt", "VERIFY_RECEIPTS",
             "MERGE_RECEIPTS", "MERGE_METHODS",
+            "ISOLATION_MARKER_NAME", "trusted_base", "trusted_produced_head",
+            "_capture_artifact_basis", "raw_artifact_basis",
+            "trusted_isolation_facts", "_reported_check_result",
+            "_record_receipt_provenance", "trusted_record_seal", "admit_merge", "_check",
         })
         self.assertEqual(bare, [], "a cached facade read bypasses owner patches")
 

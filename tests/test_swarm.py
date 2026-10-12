@@ -455,7 +455,8 @@ class TestTheLiftIsClosed(unittest.TestCase):
     reported 90 false positives out of docstring prose; the second missed that
     `A, B = 0, 1` has a Tuple target, not a Name."""
 
-    FILES = (SCRIPTS / "unit.py", SCRIPTS / "swarm.py")
+    FILES = (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
+             SCRIPTS / "swarm_evidence.py")
 
     def _assigned(self, tree):
         import ast
@@ -486,6 +487,9 @@ class TestTheLiftIsClosed(unittest.TestCase):
         import ast
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_evidence.py":
+                self.assertTrue({"trusted_base", "admit_merge", "_check"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             loads = {n.id for n in ast.walk(tree)
                      if isinstance(n, ast.Name)
                      and isinstance(n.ctx, ast.Load)
@@ -504,6 +508,9 @@ class TestTheLiftIsClosed(unittest.TestCase):
                   "tempfile", "fnmatch", "pathlib"}
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_evidence.py":
+                self.assertTrue({"trusted_base", "admit_merge", "_check"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             used = {n.value.id for n in ast.walk(tree)
                     if isinstance(n, ast.Attribute)
                     and isinstance(n.value, ast.Name)}
@@ -789,7 +796,8 @@ class TestTheConvergenceGateIsWiredIn(Base):
             return 0, "diagnostic", "", ("SWARM_CHECK_RESULT " + json.dumps(
                 result, sort_keys=True, separators=(",", ":")))
 
-        m._check = forced_check
+        self.addCleanup(setattr, m.SE, "_check", m.SE._check)
+        m.SE._check = forced_check
         rep, disp, _ = m.advance(plan, m.load_state(str(st)), str(st),
                                  str(self.tmp / "cvruns"), False,
                                  max_new=max_new)
@@ -902,8 +910,11 @@ class TestClosureByExclusion(unittest.TestCase):
     def test_no_module_loads_an_undefined_name(self):
         import ast, builtins
         for f in (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
-                  SCRIPTS / "converge.py"):
+                  SCRIPTS / "swarm_evidence.py", SCRIPTS / "converge.py"):
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_evidence.py":
+                self.assertTrue({"trusted_base", "admit_merge", "_check"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             bound = set(dir(builtins)) | {"__file__", "__name__", "__doc__"}
             for n in ast.walk(tree):
                 if isinstance(n, ast.Import):
