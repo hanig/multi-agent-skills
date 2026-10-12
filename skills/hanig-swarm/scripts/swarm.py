@@ -62,6 +62,10 @@ KINDS = U.KINDS
 
 import swarm_routing as SR
 import swarm_state as SS
+import swarm_journal as SJ
+from swarm_journal import (
+    _heal_jsonl_tail, _fsync_append, _RawJournal, fatal_problems, _fsync_directory,
+)
 from swarm_state import (
     _holds_the_path,
     _StateSnapshot,
@@ -5069,7 +5073,7 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     intent["envelope"] = _intent_envelope(
         project, uid, us.get("attempt_dir"), key, verb, evidence)
     try:
-        _fsync_append(path, intent)
+        SJ._fsync_append(path, intent)
     except (OSError, OutboxError) as e:
         print(f"WARNING: could not append a tracker intent: {e}",
               file=sys.stderr)
@@ -5116,7 +5120,7 @@ def backfill_tracker_intents(state_dir, project, units):
             os.fsync(handle.fileno())
         os.replace(temporary, path)
         temporary = None
-        _fsync_directory(path.parent)
+        SJ._fsync_directory(path.parent)
     except (OSError, ValueError, OutboxError) as exc:
         print(f"WARNING: could not backfill tracker labels: {exc}", file=sys.stderr)
     finally:
@@ -5168,99 +5172,6 @@ ACKNOWLEDGED = ATTESTED_CONFIRMED   # compatibility name, stronger grade
 CONFLICT = "conflict"
 
 
-def _heal_jsonl_tail(fh):
-    """Under an exclusive lock, preserve complete JSON and drop only a tear."""
-    fh.seek(0, os.SEEK_END)
-    if not fh.tell():
-        return
-    fh.seek(-1, os.SEEK_END)
-    if fh.read(1) == b"\n":
-        return
-    fh.seek(0)
-    data = fh.read()
-    cut = data.rfind(b"\n")
-    tail = data[cut + 1:]
-    try:
-        json.loads(tail.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        fh.truncate(0 if cut < 0 else cut + 1)
-    else:
-        fh.seek(0, os.SEEK_END)
-        fh.write(b"\n")
-
-
-def _fsync_append(path, record):
-    """Append one JSON line durably, serialised against other writers.
-
-    Everything happens under ONE lock on ONE handle. Healing the tail used to
-    run before the lock was taken, so two writers could interleave: A reads a
-    partial tail, B truncates it and appends its receipt, then A truncates
-    using its stale view and deletes B's record before appending its own. The
-    repair for one crash silently ate a good receipt.
-
-    The lock is advisory and process-scoped: the kernel drops it when this
-    process exits, including when it is killed, so a crash cannot wedge the
-    journal.
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = (json.dumps(record, sort_keys=True) + "\n").encode()
-
-    # r+b keeps existing content and allows truncate; a+b cannot truncate
-    # portably. Create it first if absent.
-    if not path.exists():
-        path.touch()
-    with open(path, "r+b") as fh:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        except OSError as exc:
-            raise OutboxError(
-                f"cannot take an exclusive lock on {path}: {exc}. Receipt "
-                f"journal writes must be serialised, and this filesystem "
-                f"will not "
-                f"serialise them, so two drainers could interleave and "
-                f"corrupt the journal. Record state on a filesystem "
-                f"that supports flock.")
-
-        # HEAL, now that nobody else can be writing. A crash can leave the
-        # journal ending mid-record with no newline; appending onto that fuses
-        # the new receipt to the broken one, turning a recoverable interrupted
-        # write into corruption that takes the next record with it. An
-        # incomplete record has no meaning, so dropping it loses nothing.
-        _heal_jsonl_tail(fh)
-
-        fh.seek(0, os.SEEK_END)
-        fh.write(line)
-        fh.flush()
-        os.fsync(fh.fileno())
-
-
-class _RawJournal:
-    """What the raw reader returns: records you cannot reach by accident.
-
-    Six review findings chased name-level bypasses of a static test (nested
-    functions, lambdas, aliases, same-named methods). That arms race is not
-    winnable: no static check over a shared module namespace can stop
-    deliberate indirection, and a test claiming otherwise is the overclaim
-    this repo keeps catching.
-
-    So the barrier moved from the NAME to the DATA. The raw reader hands back
-    this box. The records sit behind a private attribute that only
-    `load_acknowledgments` opens, and it opens it only after refusing a bad
-    journal. A caller who wants them without the check must reach into
-    `_records` deliberately, in a line that says exactly what it is doing.
-
-    The threat model is an honest maintainer in a hurry, not an adversary.
-    Against a slip this is airtight; against smuggling, nothing here would be.
-    """
-
-    __slots__ = ("_records", "problems")
-
-    def __init__(self, records, problems):
-        self._records = records
-        self.problems = problems
-
-
 def _parse_receipt_text(raw_text):
     """Parse already-read receipt bytes into the guarded journal result."""
     lines = raw_text.splitlines()
@@ -5294,7 +5205,7 @@ def _parse_receipt_text(raw_text):
                                        (idx + 1, bad)})
             continue
         out.append(rec)
-    return _RawJournal(out, problems)
+    return SJ._RawJournal(out, problems)
 
 
 def _read_receipts_raw(state_dir):
@@ -5331,12 +5242,12 @@ def _read_receipts_raw(state_dir):
         with open(p) as fh:
             raw_text = fh.read()
     except FileNotFoundError:
-        return _RawJournal([], [])
+        return SJ._RawJournal([], [])
     except IsADirectoryError as exc:
-        return _RawJournal(
+        return SJ._RawJournal(
             [], [{"kind": "unreadable", "detail": f"{p} is not a file: {exc}"}])
     except OSError as exc:
-        return _RawJournal(
+        return SJ._RawJournal(
             [], [{"kind": "unreadable", "detail": f"cannot read {p}: {exc}"}])
 
     return _parse_receipt_text(raw_text)
@@ -5384,11 +5295,6 @@ def _receipt_shape_problem(rec):
     return None
 
 
-def fatal_problems(problems):
-    """Everything except an interrupted tail. Structured, never grepped."""
-    return [p for p in problems if p.get("kind") != "truncated_tail"]
-
-
 def load_acknowledgments(state_dir):
     """THE ONLY WAY to read the receipt journal. Raises OutboxError.
 
@@ -5407,7 +5313,7 @@ def load_acknowledgments(state_dir):
     """
     journal = _read_receipts_raw(state_dir)
     problems = journal.problems
-    fatal = fatal_problems(problems)
+    fatal = SJ.fatal_problems(problems)
     if fatal:
         raise OutboxError(
             "the receipt journal cannot be read in full, so no acknowledgment "
@@ -5444,14 +5350,14 @@ def _append_receipt_atomic(state_dir, rec):
                 "cannot serialise receipt admission on %s: %s. The existing "
                 "records must be read under the same lock as the append, or "
                 "two drainers can admit different references." % (path, exc))
-        _heal_jsonl_tail(fh)
+        SJ._heal_jsonl_tail(fh)
         fh.seek(0)
         try:
             raw = fh.read().decode("utf-8")
         except UnicodeDecodeError as exc:
             raise OutboxError("receipt journal is not UTF-8: %s" % exc)
         journal = _parse_receipt_text(raw)
-        fatal = fatal_problems(journal.problems)
+        fatal = SJ.fatal_problems(journal.problems)
         if fatal:
             raise OutboxError(
                 "the receipt journal cannot be read in full, so no receipt "
@@ -5660,7 +5566,7 @@ def load_merge_receipts(state_dir):
     is how one bug appeared in four places.
     """
     recs, problems = _read_merge_raw(state_dir)
-    fatal = fatal_problems(problems)
+    fatal = SJ.fatal_problems(problems)
     if fatal:
         raise OutboxError(
             "the merge receipt journal cannot be read in full, so no closure "
@@ -5779,7 +5685,7 @@ def _read_verify_raw(state_dir):
 def load_verifications(state_dir):
     """THE ONLY way to read verification receipts. Raises OutboxError."""
     recs, problems = _read_verify_raw(state_dir)
-    fatal = fatal_problems(problems)
+    fatal = SJ.fatal_problems(problems)
     if fatal:
         raise OutboxError(
             "the verification journal cannot be read in full, so no claim "
@@ -8661,16 +8567,6 @@ def cmd_advance(args):
 PROMOTIONS = "promotions.jsonl"
 
 
-def _fsync_directory(path):
-    """Persist directory-entry changes before recording their conclusion."""
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    fd = os.open(str(path), flags)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def _append_promotion_receipt(state_dir, record):
     """Durably append one idempotent promotion receipt; return an error."""
     path = Path(state_dir) / PROMOTIONS
@@ -8686,7 +8582,7 @@ def _append_promotion_receipt(state_dir, record):
                     # This may be recovery from a crash after the file fsync
                     # but before its directory fsync. Anchor the visible entry
                     # before allowing the pending intent to complete.
-                    _fsync_directory(path.parent)
+                    SJ._fsync_directory(path.parent)
                     return None
         created = not path.exists()
         with path.open("a") as fh:
@@ -8696,7 +8592,7 @@ def _append_promotion_receipt(state_dir, record):
         if created:
             # fsync(contents) does not make a newly-created filename durable.
             # Completion may be saved only after the parent records the entry.
-            _fsync_directory(path.parent)
+            SJ._fsync_directory(path.parent)
         return None
     except OSError as exc:
         return str(exc)
@@ -8918,7 +8814,7 @@ def promote(plan, state, state_dir, uid, approver, approve,
         # directory. Persist every new directory entry from the first created
         # ancestor down; fsyncing only the leaf does not anchor its own name.
         for created in reversed(missing_directories):
-            _fsync_directory(created.parent)
+            SJ._fsync_directory(created.parent)
         if version.exists():
             # ALREADY PUBLISHED. The earlier version of this deleted it and
             # recopied, which destroys data other people may already be
@@ -8963,13 +8859,13 @@ def promote(plan, state, state_dir, uid, approver, approve,
             os.replace(staging, version)      # same directory: atomic
         # Persist either the new version rename or a version recovered from a
         # crash after rename but before this fsync.
-        _fsync_directory(version.parent)
+        SJ._fsync_directory(version.parent)
         tmp_link = dest / f".current-{os.getpid()}"
         if tmp_link.is_symlink() or tmp_link.exists():
             tmp_link.unlink()
         os.symlink(Path(attempt).name, tmp_link)
         os.replace(tmp_link, current)         # atomic pointer swap
-        _fsync_directory(current.parent)
+        SJ._fsync_directory(current.parent)
     except OSError as e:
         return lines + ["", f"REFUSING: promotion failed or could not be "
                             f"made durable ({e}). No completion was recorded; "
@@ -9373,7 +9269,7 @@ def _integration_verification_fence(state_dir, unit, receipt=None):
                 return "integration verification refused: merge intent exists for unit " + unit
         if receipt is not None:
             load_verifications(state_dir)
-            _fsync_append(Path(state_dir) / VERIFY_RECEIPTS, receipt)
+            SJ._fsync_append(Path(state_dir) / VERIFY_RECEIPTS, receipt)
     except (OSError, OutboxError) as exc:
         return "integration verification publication refused: " + str(exc)
     finally:
@@ -9530,7 +9426,7 @@ def cmd_verify(args):
             sys.stderr.write(f"error: {problem}\n")
             return EXIT_CONFLICT
     else:
-        _fsync_append(Path(args.state_dir) / VERIFY_RECEIPTS, rec)
+        SJ._fsync_append(Path(args.state_dir) / VERIFY_RECEIPTS, rec)
     print(f"  {args.claim}: {rec['result'].upper()} (exit "
           f"{outcome['exit_code']}) for {produced[:12]}")
     print(f"  verifier {args.verifier} {digest[:12]}, policy "
@@ -9571,7 +9467,7 @@ def cmd_merge(args):
     if bad:
         sys.stderr.write(f"error: this would not be admissible: {bad}\n")
         return EXIT_USAGE
-    _fsync_append(Path(args.state_dir) / MERGE_RECEIPTS, rec)
+    SJ._fsync_append(Path(args.state_dir) / MERGE_RECEIPTS, rec)
     print(f"  recorded: {args.unit} merged as {args.merged_as[:12]} "
           f"(head {args.head[:12]}, {args.method})")
     print("  This is the attester's word. The coordinator will admit it only "

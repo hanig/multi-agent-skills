@@ -1731,7 +1731,7 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
     def test_no_archive_call_escapes_a_dry_run_guard(self):
         import ast
         paths = sorted(SCRIPTS.glob("swarm*.py"))
-        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py"}
+        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py"}
                         <= {path.name for path in paths})
         unguarded, calls = [], []
         definitions = set()
@@ -1759,6 +1759,7 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
         self.assertIn("_archive_code_worktree", definitions)
         self.assertIn("apply_agent_resolution", definitions)
         self.assertIn("acquire_lease", definitions)
+        self.assertIn("_fsync_append", definitions)
         self.assertTrue(calls, "archive-site sweep must find its call sites")
 
         self.assertEqual(

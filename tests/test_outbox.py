@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
 sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
+import swarm_journal as SJ  # noqa: E402
 PROJECT_SCRIPTS = ROOT / "skills" / "hanig-project" / "scripts"
 sys.path.insert(0, str(PROJECT_SCRIPTS))
 import drain_contract as D  # noqa: E402
@@ -387,7 +388,9 @@ class TestTheTrackerIsNeverAuthoritative(unittest.TestCase):
         tree = ast.parse("\n".join(path.read_text() for path in paths))
         definitions = {n.name for n in tree.body
                        if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
-        self.assertTrue({"advance", "acquire_lease", "load_agent_routing", "PlanError"}
+        self.assertIn("swarm_journal.py", {path.name for path in paths})
+        self.assertTrue({"advance", "acquire_lease", "load_agent_routing", "PlanError",
+                         "_fsync_append", "_RawJournal", "fatal_problems"}
                         <= definitions)
         mods = set()
         for n in ast.walk(tree):
@@ -1135,7 +1138,7 @@ class TestGatedPromotion(unittest.TestCase):
             plan, st, sd, _, shared = self._project(t)
             destination = shared / "w"
             observations = []
-            real_fsync_directory = S._fsync_directory
+            real_fsync_directory = SJ._fsync_directory
 
             def observe(path):
                 # Resolved on BOTH sides: promote fsyncs the real path, and on
@@ -1150,11 +1153,11 @@ class TestGatedPromotion(unittest.TestCase):
                                          (destination / "current").is_symlink()))
                 return real_fsync_directory(path)
 
-            S._fsync_directory = observe
+            SJ._fsync_directory = observe
             try:
                 lines, ok = S.promote(plan, st, sd, "w", "hani", True)
             finally:
-                S._fsync_directory = real_fsync_directory
+                SJ._fsync_directory = real_fsync_directory
             self.assertTrue(ok, "\n".join(lines))
             self.assertIn((True, False), observations)
             self.assertIn((True, True), observations)
@@ -1164,7 +1167,7 @@ class TestGatedPromotion(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             plan, st, sd, _, _ = self._project(t)
             observed = []
-            real_fsync_directory = S._fsync_directory
+            real_fsync_directory = SJ._fsync_directory
 
             def observe(path):
                 if Path(path) == Path(sd):
@@ -1175,11 +1178,11 @@ class TestGatedPromotion(unittest.TestCase):
                     observed.append(True)
                 return real_fsync_directory(path)
 
-            S._fsync_directory = observe
+            SJ._fsync_directory = observe
             try:
                 lines, ok = S.promote(plan, st, sd, "w", "hani", True)
             finally:
-                S._fsync_directory = real_fsync_directory
+                SJ._fsync_directory = real_fsync_directory
             self.assertTrue(ok, "\n".join(lines))
             self.assertTrue(observed)
 
