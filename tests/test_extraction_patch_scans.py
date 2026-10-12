@@ -96,6 +96,13 @@ class TestPatchScanClassification(unittest.TestCase):
             ('target = object()\nmock.patch.object(target, name, replacement)\n', None),
         ))
 
+    def test_ignored_outer_call_still_scans_nested_patch(self):
+        self.check_sources((
+            ('import swarm as S\n'
+             'mock.patch.object(local, name, mock.patch.object(S, "{name}"))\n',
+             "facade"),
+        ), line=2)
+
     def test_unsupported_patch_object_forms_fail_as_unresolved(self):
         for module in ("swarm", "{owner}"):
             self.check_sources(tuple(

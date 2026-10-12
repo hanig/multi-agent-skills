@@ -84,7 +84,7 @@ def patch_targets(tree, names):
                           if isinstance(node.args[0], ast.Name) else None)
                 if module and (module == "swarm" or module.startswith("swarm_")):
                     yield node.lineno, ast.unparse(node), None, None
-                return
+                    return
         if (isinstance(node, ast.Call) and len(node.args) >= 2
                 and ((isinstance(node.func, ast.Attribute)
                       and node.func.attr == "object")
