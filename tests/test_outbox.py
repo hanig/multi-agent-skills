@@ -2779,10 +2779,11 @@ class TestClosureAuthorityIsFixedByKind(unittest.TestCase):
     def test_the_matrix_has_no_plan_level_override(self):
         """Configurable means configurable wrong, and the failure is silent."""
         import ast
-        src = SWARM.read_text()
-        fn = next(n for n in ast.parse(src).body
-                  if isinstance(n, ast.FunctionDef)
-                  and n.name == "closing_evidence_for")
+        src = (SWARM.parent / "swarm_outbox.py").read_text()
+        functions = {n.name: n for n in ast.parse(src).body
+                     if isinstance(n, ast.FunctionDef)}
+        self.assertIn("closing_evidence_for", functions)
+        fn = functions["closing_evidence_for"]
         code = "\n".join(ast.unparse(x) for x in fn.body)
         for override in ("plan", "u.get", "retry", "limits"):
             self.assertNotIn(override, code,

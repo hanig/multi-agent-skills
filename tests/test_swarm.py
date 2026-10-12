@@ -456,7 +456,7 @@ class TestTheLiftIsClosed(unittest.TestCase):
     `A, B = 0, 1` has a Tuple target, not a Name."""
 
     FILES = (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
-             SCRIPTS / "swarm_evidence.py")
+             SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_outbox.py")
 
     def _assigned(self, tree):
         import ast
@@ -487,6 +487,9 @@ class TestTheLiftIsClosed(unittest.TestCase):
         import ast
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_outbox.py":
+                self.assertTrue({"closing_evidence_for", "_intent_key"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_evidence.py":
                 self.assertTrue({"trusted_base", "admit_merge", "_check"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
@@ -508,6 +511,9 @@ class TestTheLiftIsClosed(unittest.TestCase):
                   "tempfile", "fnmatch", "pathlib"}
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_outbox.py":
+                self.assertTrue({"closing_evidence_for", "_intent_key"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_evidence.py":
                 self.assertTrue({"trusted_base", "admit_merge", "_check"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
@@ -910,8 +916,12 @@ class TestClosureByExclusion(unittest.TestCase):
     def test_no_module_loads_an_undefined_name(self):
         import ast, builtins
         for f in (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
-                  SCRIPTS / "swarm_evidence.py", SCRIPTS / "converge.py"):
+                  SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_outbox.py",
+                  SCRIPTS / "converge.py"):
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_outbox.py":
+                self.assertTrue({"closing_evidence_for", "_intent_key"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_evidence.py":
                 self.assertTrue({"trusted_base", "admit_merge", "_check"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
