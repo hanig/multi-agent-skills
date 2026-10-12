@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -493,6 +494,7 @@ class TestClosedRoundGrammar(unittest.TestCase):
         env = dict(os.environ, XDG_STATE_HOME=str(self.state),
                    OPENAI_API_KEY="fixture-key", OPENROUTER_API_KEY="fixture-key",
                    HANIG_ROUTING_SNAPSHOTS="off", ROUND_CLI_CALLS=str(calls))
+        env["ROUND_CLI_LOCK_READY"] = str(self.root / "lock-ready")
         # A mutation runner can supply an isolated source copy without changing
         # the checkout. The production CLI and reservation path remain intact.
         script = os.environ.get("ROUND_CLI_SOURCE", str(SCRIPT))
@@ -640,22 +642,26 @@ class TestClosedRoundGrammar(unittest.TestCase):
 
     def test_brief_lock_contention_delays_valid_cli(self):
         with self.held_lock() as holder:
-            # Start the consumer while the lock is held, and verify it has not
-            # returned before releasing it. This catches a one-shot refusal.
+            # The harness records a real BlockingIOError from flock. Waiting
+            # for that event distinguishes contention from slow CLI startup.
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 pending = pool.submit(self.invoke, 2)
-                import time
-                time.sleep(1)
+                deadline = time.monotonic() + 10
+                ready = self.root / "lock-ready"
+                while not ready.exists() and not pending.done() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                contended = ready.exists()
+                time.sleep(0.2)
                 still_waiting = not pending.done()
                 holder.stdin.write("release\n")
                 holder.stdin.flush()
                 result = pending.result(timeout=25)
+        self.assertTrue(contended, result.stderr)
         self.assertTrue(still_waiting, result.stderr)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.markers()), 2)
 
     def test_lock_holder_past_bound_refuses_cli(self):
-        import time
         with self.held_lock():
             started = time.monotonic()
             self.assert_refused(2, ["lock"])

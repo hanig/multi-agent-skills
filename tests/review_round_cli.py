@@ -40,6 +40,17 @@ def main():
 
     review._post = transport
     review.urllib.request.urlopen = unexpected_network
+    if os.environ.get("ROUND_CLI_LOCK_READY"):
+        original_flock = review.fcntl.flock
+
+        def observed_flock(*args):
+            try:
+                return original_flock(*args)
+            except BlockingIOError:
+                Path(os.environ["ROUND_CLI_LOCK_READY"]).write_text("contended")
+                raise
+
+        review.fcntl.flock = observed_flock
     review.main()
 
 
