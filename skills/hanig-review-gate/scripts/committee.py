@@ -281,7 +281,7 @@ def ask_member(member, history, prompt, timeout, *, system=None,
         return None, ("empty reply; the model may have spent its whole output "
                       "budget on reasoning. Raise max_output_tokens for "
                       f"{member['name']} in reviewers.json."), usage
-    return text, None, usage
+    return R.redact(text), None, usage
 
 
 SYSTEM_PLANNER = """You are one of two members of a technical committee, chosen \

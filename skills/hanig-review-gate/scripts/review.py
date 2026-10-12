@@ -1231,7 +1231,7 @@ def call_openai(rev, prompt, timeout, deadline=None):
         completion_tokens=usage.get("output_tokens"))
     if empty_error:
         return None, empty_error
-    return {"text": text,
+    return {"text": redact(text),
             "in_tokens": usage.get("input_tokens"),
             "out_tokens": usage.get("output_tokens"),
             "reasoning_tokens": detail.get("reasoning_tokens"),
@@ -1272,7 +1272,7 @@ def call_openrouter(rev, prompt, timeout, deadline=None):
         completion_tokens=usage.get("completion_tokens"))
     if empty_error:
         return None, empty_error
-    return {"text": text,
+    return {"text": redact(text),
             "in_tokens": usage.get("prompt_tokens"),
             "out_tokens": usage.get("completion_tokens"),
             "reasoning_tokens": detail.get("reasoning_tokens"),
@@ -1313,7 +1313,7 @@ def anthropic_messages(rev, messages, system, timeout, deadline=None):
         reasoning = usage.get("reasoning_tokens", detail.get(
             "reasoning_tokens", detail.get("thinking_tokens")))
         stop = data.get("stop_reason")
-        result = {"text": text, "in_tokens": usage.get("input_tokens"),
+        result = {"text": redact(text), "in_tokens": usage.get("input_tokens"),
                   "out_tokens": usage.get("output_tokens"),
                   "reasoning_tokens": reasoning, "served_model": data.get("model"),
                   "status": "completed" if stop == "end_turn" else stop,

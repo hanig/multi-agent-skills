@@ -237,5 +237,71 @@ class TestAnthropicProvider(unittest.TestCase):
         self.assert_native_headers(request)
 
 
+class TestSuccessfulReplyRedaction(unittest.TestCase):
+    KEYS = {provider.upper() + "_API_KEY": 'synthetic-' + provider + '-"quoted\\value'
+            for provider in ("anthropic", "openai", "openrouter")}
+
+    def setUp(self):
+        env = mock.patch.dict(os.environ, self.KEYS)
+        env.start()
+        self.addCleanup(env.stop)
+        transport = mock.patch.object(R.urllib.request, "urlopen",
+                                      side_effect=AssertionError("network forbidden"))
+        self.urlopen = transport.start()
+        self.addCleanup(transport.stop)
+
+    def fake_reply(self, provider, text):
+        if provider == "anthropic":
+            data = {"content": [{"type": "text", "text": text}],
+                    "stop_reason": "end_turn"}
+        elif provider == "openai":
+            data = {"output": [{"type": "message", "content": [
+                {"type": "output_text", "text": text}]}], "status": "completed"}
+        else:
+            data = {"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
+        self.urlopen.side_effect = lambda *a, **k: io.BytesIO(json.dumps(data).encode())
+
+    def reflected_reply(self):
+        forms, replacements = [], []
+        for var, key in self.KEYS.items():
+            forms.extend((key, repr(key).strip("'\""), json.dumps(key)[1:-1]))
+            replacements.extend(["<" + var + " redacted>"] * 3)
+        return ("Before " + " / ".join(forms) + " after.",
+                "Before " + " / ".join(replacements) + " after.")
+
+    def test_every_provider_scrubs_successful_text(self):
+        reflected, expected = self.reflected_reply()
+        for provider in ("anthropic", "openai", "openrouter"):
+            with self.subTest(provider=provider):
+                self.fake_reply(provider, reflected)
+                seat = {"name": "fixture", "provider": provider, "model": "fixture-model"}
+                result, error = R.PROVIDERS[provider](seat, "prompt", 1)
+                self.assertIsNone(error)
+                self.assertEqual(result["text"], expected)
+                self.assertEqual(result["status"], "completed")
+
+    def test_committee_display_and_saved_session_scrub_successful_text(self):
+        reflected, expected = self.reflected_reply()
+        for provider in ("anthropic", "openai", "openrouter"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as tmp:
+                self.fake_reply(provider, reflected)
+                seat = {"name": "fixture", "provider": provider, "model": "fixture-model"}
+                session = {"members": {"fixture": {"history": []}}, "turns": []}
+                replies = C.run_turn([seat], session, "prompt", 1, "plan")
+                self.assertEqual(replies["fixture"][0], expected)
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    C.show_results(replies)
+                self.assertIn(expected, output.getvalue())
+                with mock.patch.object(C, "SESSIONS", Path(tmp) / "sessions"):
+                    C.save_session("redaction", session)
+                    persisted = json.loads(C.session_path("redaction").read_text())
+                history = persisted["members"]["fixture"]["history"]
+                self.assertEqual(history[-1], {"role": "assistant", "content": expected})
+                for key in self.KEYS.values():
+                    self.assertNotIn(key, output.getvalue())
+                    self.assertNotIn(key, json.dumps(persisted))
+
+
 if __name__ == "__main__":
     unittest.main()
