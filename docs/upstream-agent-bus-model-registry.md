@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: live
 Date: 2026-10-11
+Title: Upstream report: model-registry failures look like absence
+Purpose: `bin/bus` was vendored from Shreshth's `multi-agent-skills` archive dated 2026-08-25. The archive records commit `a96b951e55ca632c561ff832d67ca3853cc2c62b`, but it contains no remote URL and the upstream repository is not available to this checkout's GitHub identity.
 
 # Upstream report: model-registry failures look like absence
 

@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: superseded by plan-field-reports.md
 Date: 2026-10-11
+Title: Plan: what remains after the report/runtime/acknowledgment work
+Purpose: This largely delivered committee roadmap is retained for design history; the field-report plan tracks its successor work.
 
 # Plan: what remains after the report/runtime/acknowledgment work
 

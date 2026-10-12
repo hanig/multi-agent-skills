@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Plan: PR 1, Linear binding, read-only audit, audit-backed reporting
+Purpose: This delivered plan specifies tracker bindings, read-only audits, and reports that require audit evidence.
 
 # Plan: PR 1, Linear binding, read-only audit, audit-backed reporting
 

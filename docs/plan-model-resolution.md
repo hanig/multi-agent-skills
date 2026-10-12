@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Plan: adopt point releases per family at project start
+Purpose: Owner request, 2026-09-30: stop hand-maintaining model names; when a project starts, use the newest model in each family. Owner decision: point releases are adopted automatically; a new generation waits for the owner. The immediate GPT-6.1 Sol swap ships separately and does not depend on this.
 
 # Plan: adopt point releases per family at project start
 

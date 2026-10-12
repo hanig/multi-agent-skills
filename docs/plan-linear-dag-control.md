@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: live
 Date: 2026-10-11
+Title: Plan: mechanical control of the Linear DAG
+Purpose: This roadmap specifies mechanical tracker control; audit and mutation slices have shipped, while slice 5 (waves and harness restriction) remains unimplemented.
 
 # Plan: mechanical control of the Linear DAG
 

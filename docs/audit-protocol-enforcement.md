@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Protocol enforcement audit
+Purpose: This dated audit tracks which review-protocol rules have executable enforcement and which remain operator responsibilities.
 
 # Protocol enforcement audit
 

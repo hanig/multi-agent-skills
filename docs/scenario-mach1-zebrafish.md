@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: superseded by first-real-workloads.md
 Date: 2026-10-11
+Title: Scenario: "we want to do project X" — the whole string of events
+Purpose: This historical walkthrough illustrates a hypothetical workflow whose multi-cluster topology was corrected and replaced by the first-workload candidates.
 
 # Scenario: "we want to do project X" — the whole string of events
 

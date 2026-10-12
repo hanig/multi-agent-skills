@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: ARC-274 independent installer review
+Purpose: Reviewed `origin/main...2414d8a80e23ea8ae4e5638c65696b7a86f9f570` on 2026-09-05. This was a review-only pass over `lib/skill_installer.py`, `lib/skill_lifecycle.py`, discovery/diagnostics, and their cross-agent interfaces. No implementation changes, real user skill stores, credentials, agent sessions, paid models, pushes, PRs, or merges were used.
 
 # ARC-274 independent installer review
 

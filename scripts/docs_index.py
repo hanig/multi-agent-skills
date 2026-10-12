@@ -1,186 +1,172 @@
 #!/usr/bin/env python3
-"""Generate the documentation index from status metadata.
+"""Generate a documentation index from exactly six physical header lines.
 
-Links are not checked by this tool; link validation is filed separately as
-ARC-1787.
+The header is the status marker, Status, Date, Title, Purpose, then a blank
+line, in that order. Title and Purpose are literal nonempty single-line text.
+Only these six lines are decoded; the rest of each document is opaque.
+Successors are relative .md paths to indexed documents within docs/.
+
+Out of contract: link validity (ARC-1787), whether a status or purpose is
+factually current, and documents in docs/probes/ and docs/research/.
 """
 import argparse
 import datetime
-import html
 import re
 import sys
-from pathlib import Path
-from urllib.parse import urlsplit
+from pathlib import Path, PureWindowsPath
+from urllib.parse import quote, urlsplit
 
 
 MARKER = '<!-- docs-truth:status -->'
-STATUS = re.compile(r'Status: (live|historical|superseded by ([^\s]+\.md))\Z')
-DATE = re.compile(r'Date: (\d{4}-\d{2}-\d{2})\Z')
+DATE = re.compile(r'Date: ([0-9]{4}-[0-9]{2}-[0-9]{2})\Z')
+INDEX_TITLE = 'Documentation index'
 INDEX_INTRO = 'Browse the maintained references, historical records, and superseded plans in this repository.'
+EXCLUDED = ('probes', 'research')
 
 
 class DocsError(ValueError):
     pass
 
 
-def markdown_files(root):
-    return sorted(p for p in (root / 'docs').rglob('*')
-                  if p.is_file() and p.suffix.lower() == '.md')
+def refuse(path, line, reason):
+    raise DocsError('{}:{}: {}'.format(path, line, reason))
 
 
 def indexed_files(root):
-    return [p for p in markdown_files(root)
-            if p.relative_to(root / 'docs').parts[0] not in ('probes', 'research')]
+    return sorted(p for p in (root / 'docs').rglob('*')
+                  if p.is_file() and p.suffix.lower() == '.md'
+                  and p.relative_to(root / 'docs').parts[0] not in EXCLUDED)
 
 
 def metadata(path):
-    text = path.read_text(encoding='utf-8')
-    lines = text.splitlines()
-    if len(lines) < 3 or lines[0] != MARKER:
-        raise DocsError('{}: missing first-line status marker'.format(path))
-    status = STATUS.fullmatch(lines[1])
+    # Binary readline avoids decoding any body bytes through text buffering.
+    lines = []
+    with path.open('rb') as source:
+        for number in range(1, 7):
+            raw = source.readline()
+            if not raw:
+                refuse(path, number, 'missing header line')
+            if raw.endswith(b'\n'):
+                raw = raw[:-1]
+                if raw.endswith(b'\r'):
+                    raw = raw[:-1]
+            try:
+                line = raw.decode('utf-8')
+            except UnicodeDecodeError:
+                refuse(path, number, 'header must be UTF-8')
+            if '\r' in line:
+                refuse(path, number, 'unexpected carriage return in header')
+            lines.append(line)
+    if lines[0] != MARKER:
+        refuse(path, 1, 'expected exact status marker')
+    successor = None
+    if lines[1] in ('Status: live', 'Status: historical'):
+        status = lines[1][8:]
+    elif lines[1].startswith('Status: superseded by '):
+        status = lines[1][8:]
+        successor = lines[1][22:]
+    else:
+        refuse(path, 2, 'expected Status: live, historical, or superseded by <path>')
     date = DATE.fullmatch(lines[2])
-    if not status or not date:
-        raise DocsError('{}: invalid status/date metadata'.format(path))
+    if not date:
+        refuse(path, 3, 'expected Date: YYYY-MM-DD')
     try:
         datetime.date.fromisoformat(date[1])
     except ValueError:
-        raise DocsError('{}: invalid ISO date'.format(path))
-    title = next((heading for heading in headings(text) if heading[0] == 1), None)
-    if not title:
-        raise DocsError('{}: missing document title'.format(path))
-    # The first prose paragraph after the title supplies the purpose. Skip
-    # headings, comments and block quotes, which often carry old review notes.
-    paragraphs = re.split(r'\n\s*\n', text[title[2]:])
-    purpose = next((' '.join(p.split()) for p in paragraphs if p.strip()
-                    and not p.lstrip().startswith(('#', '>', '<!--', '```', '~~~', '- ', '|'))), '')
-    if not purpose:
-        raise DocsError('{}: missing purpose paragraph'.format(path))
-    successor = status[2]
-    if successor:
-        target = path.parent / successor
-        if (urlsplit(successor).scheme or successor.startswith('/')
-                or not target.is_file() or target.resolve() == path.resolve()):
-            raise DocsError('{}: invalid successor {}'.format(path, successor))
-    return dict(path=path, title=title[1], status=status[1], date=date[1],
-                purpose=purpose, successor=successor)
+        refuse(path, 3, 'invalid calendar date')
+    values = []
+    for number, prefix in ((4, 'Title: '), (5, 'Purpose: ')):
+        line = lines[number - 1]
+        if not line.startswith(prefix) or not line[len(prefix):].strip():
+            refuse(path, number, 'expected ' + prefix + '<nonempty text>')
+        values.append(line[len(prefix):])
+    if lines[5] != '':
+        refuse(path, 6, 'expected blank line')
+    return dict(path=path, title=values[0], status=status, date=date[1],
+                purpose=values[1], successor=successor)
+
+
+def validate_successor(record, files, root):
+    successor = record['successor']
+    if successor is None:
+        return
+    path = record['path']
+    if not successor or successor != successor.strip():
+        refuse(path, 2, 'successor must be nonempty and unpadded')
+    # URLs, fragments and absolute paths are not document-relative paths.
+    try:
+        parsed = urlsplit(successor)
+    except ValueError:
+        refuse(path, 2, 'successor must not be a malformed URL')
+    if (parsed.scheme or parsed.netloc or '#' in successor or '?' in successor
+            or Path(successor).is_absolute() or PureWindowsPath(successor).drive
+            or successor.startswith('\\') or not successor.endswith('.md')):
+        refuse(path, 2, 'successor must be a relative .md path without URL or fragment')
+    docs = root / 'docs'
+    # Resolve .. lexically first, refusing a traversal outside docs even if it
+    # subsequently re-enters. Internal spaces remain exactly as supplied.
+    parts = list(path.parent.relative_to(docs).parts)
+    for part in Path(successor).parts:
+        if part == '..':
+            if not parts:
+                refuse(path, 2, 'successor escapes docs directory')
+            parts.pop()
+        else:
+            parts.append(part)
+    target = path.parent / successor
+    try:
+        resolved = target.resolve()
+        relative = resolved.relative_to(docs.resolve())
+    except (ValueError, RuntimeError, OSError):
+        refuse(path, 2, 'successor escapes docs directory or cannot be resolved')
+    if (not parts or parts[0] in EXCLUDED or not relative.parts
+            or relative.parts[0] in EXCLUDED
+            or resolved not in {p.resolve() for p in files}):
+        refuse(path, 2, 'successor must name an existing indexed document')
+    if resolved == path.resolve():
+        refuse(path, 2, 'successor must not reference itself')
 
 
 def collect(root):
-    return [metadata(p) for p in indexed_files(root)]
-
-
-def blank(value):
-    return ''.join('\n' if c == '\n' else ' ' for c in value)
-
-
-def block_lines(text):
-    """Yield source lines with block code masked; keep list continuations."""
-    fence = None
-    indents = []
-    paragraph = False
-    for line in text.splitlines(keepends=True):
-        content = re.sub(r'^(?: {0,3}> ?)+', '', line).expandtabs(4)
-        spaces = len(content) - len(content.lstrip(' '))
-        if content.strip():
-            while indents and spaces < indents[-1]:
-                indents.pop()
-        indent = indents[-1] if indents else 0
-        residual = content[indent:]
-        item = re.match(r' {0,3}(?:[-+*]|[0-9]{1,9}[.)]) +', residual)
-        if item and not fence:
-            indent += item.end()
-            indents.append(indent)
-            residual = content[indent:]
-        token = re.match(r' {0,3}(`{3,}|~{3,})(.*)', residual)
-        if fence:
-            yield blank(line)
-            if re.fullmatch(r' {0,3}' + re.escape(fence[0]) + '{' + str(fence[1]) + r',}\s*', residual):
-                fence = None
-            paragraph = False
-        elif token and not (token[1][0] == '`' and '`' in token[2]):
-            fence = (token[1][0], len(token[1]))
-            yield blank(line)
-            paragraph = False
-        elif residual.startswith('    ') and not paragraph:
-            yield blank(line)
-        else:
-            yield line
-            paragraph = bool(residual.strip()) and not re.match(r' {0,3}#', residual)
-
-
-def mask_code_spans(text):
-    """Mask inline code without pairing backticks across a blank line."""
-    pattern = re.compile(r'(?<!\\)(`+)(?!`)(.*?)(?<!`)\1(?!`)', re.S)
-    # Code spans belong to a paragraph, not the whole document.
-    return ''.join(pattern.sub(lambda m: blank(m[0]), part)
-                   for part in re.split(r'(\n[ \t]*\n)', text))
-
-
-def mask_comments(text):
-    """Mask closed comments found outside inline code; retain other bytes."""
-    visible = mask_code_spans(text)
-    for match in reversed(list(re.finditer(r'<!--.*?-->', visible, re.S))):
-        text = text[:match.start()] + blank(text[match.start():match.end()]) + text[match.end():]
-    return text
-
-
-def plain(value):
-    # Protect literal code before removing underscore emphasis. Intraword
-    # underscores (including identifiers) are ordinary text in Markdown.
-    code = []
-
-    def save_code(match):
-        code.append(match[2])
-        return '\x00{}\x00'.format(len(code) - 1)
-
-    value = re.sub(r'(`+)(.*?)\1', save_code, value)
-    value = re.sub(r'(?<![\w\\])(_{1,3})(?=\S)(.*?\S)\1(?!\w)', r'\2', value)
-    value = re.sub(r'!?\[([^\]]+)\]\([^)]*\)', r'\1', value)
-    value = re.sub(r'<[^>]*>', '', value).replace('*', '')
-    value = re.sub(r'\x00(\d+)\x00', lambda m: code[int(m[1])], value)
-    return html.unescape(value)
-
-
-def headings(text):
-    """Read ATX/Setext titles for index metadata only, never link anchors."""
-    visible = ''.join(block_lines(text))
-    visible = mask_comments(visible)
-    previous = ''
-    offset = 0
-    for line in visible.splitlines(keepends=True):
-        offset += len(line)
-        heading = re.match(r' {0,3}(#{1,6})(?:[ \t]+(.+?))?(?:[ \t]+#+)?[ \t]*$', line.rstrip('\r\n'))
-        if heading:
-            yield len(heading[1]), heading[2] or '', offset
-        elif previous.strip() and re.fullmatch(r' {0,3}(=+|-+)[ \t]*\n?', line):
-            yield 1 if line.lstrip().startswith('=') else 2, previous.strip(), offset
-        previous = line
+    files = indexed_files(root)
+    records = [metadata(p) for p in files]
+    for record in records:
+        validate_successor(record, files, root)
+    return records
 
 
 def cell(text):
-    # Escape Markdown metacharacters so row text cannot create new links.
-    return html.escape(plain(text), quote=False).replace('\\', '&#92;').replace('|', '&#124;').replace('[', '&#91;').replace(']', '&#93;')
+    # Encode table/inline syntax, without interpreting any source Markdown.
+    return ''.join('&#{};'.format(ord(char)) if char in '&<>\\|[]*_`~!'
+                   else char for char in text)
 
 
 def render(records, root):
     records = [r for r in records if r['path'] != root / 'docs/README.md']
     date = max((r['date'] for r in records), default='2026-10-11')
-    lines = [MARKER, 'Status: live', 'Date: ' + date, '', '# Documentation index', '', INDEX_INTRO, '',
+    lines = [MARKER, 'Status: live', 'Date: ' + date,
+             'Title: ' + INDEX_TITLE, 'Purpose: ' + INDEX_INTRO, '',
+             '# ' + INDEX_TITLE, '', INDEX_INTRO, '',
              '<!-- Generated by scripts/docs_index.py; do not edit by hand. -->', '',
              'Regenerate with `python3 scripts/docs_index.py write` from the repository root.', '',
+             'Every indexed document starts with six physical lines: the exact',
+             '`<!-- docs-truth:status -->` marker, `Status: live`, `Status: historical`,',
+             'or `Status: superseded by <path>` on line 2, `Date: YYYY-MM-DD`,',
+             '`Title: <text>`, `Purpose: <text>`, then a blank line.',
+             'Title and Purpose are literal nonempty single-line text; the body is opaque.',
+             'Successors resolve from the source document to an existing indexed `.md`',
+             'document within `docs/`; internal spaces are allowed.',
              'Dates record status classification, not renewed measurement or authorization.',
              '`live` means a maintained reference or a plan with remaining work;',
              '`historical` preserves completed work, observations, or rejected proposals.',
-             'Superseded entries name their replacement relative to the original document.',
              'Research and probe documents are excluded from metadata and this index.',
-             'Links are not checked by this tool.', '',
+             'Link validity (ARC-1787) and factual currency of status or purpose are not checked.', '',
              '| Document | Status | Date | Purpose |', '| --- | --- | --- | --- |']
     for record in records:
         name = record['path'].relative_to(root / 'docs').as_posix()
-        # Angle destinations permit spaces and parentheses in file names.
         lines.append('| [{}](<{}>) | {} | {} | {} |'.format(
-            cell(record['title']), name, cell(record['status']), record['date'], cell(record['purpose'])))
+            cell(record['title']), quote(name, safe='/'), cell(record['status']),
+            record['date'], cell(record['purpose'])))
     return '\n'.join(lines) + '\n'
 
 
@@ -192,13 +178,12 @@ def main(argv=None):
     root = args.root.resolve()
     try:
         records = collect(root)
-        index = root / 'docs/README.md'
         expected = render(records, root)
-        index.write_text(expected, encoding='utf-8')
+        (root / 'docs/README.md').write_text(expected, encoding='utf-8')
     except (DocsError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print('Documentation index generated from status metadata.')
+    print('Documentation index generated from six-line headers.')
     return 0
 
 

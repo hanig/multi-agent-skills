@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Proposal: replace the action-naming lint with a refusal chokepoint
+Purpose: This rejected specification preserves the proposed shared refusal representation and its unresolved review findings.
 
 # Proposal: replace the action-naming lint with a refusal chokepoint
 

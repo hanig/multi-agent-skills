@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: live
 Date: 2026-10-11
+Title: Agent compatibility and capability contract
+Purpose: This repository distributes one Markdown skill format to several hosts. That is **loader compatibility**, not a promise that every host has the same tools, accounts, background-worker backend, or permission policy. This document records the audit at commit `8ac8992`; it is the support boundary for user-level macOS and Linux installations.
 
 # Agent compatibility and capability contract
 

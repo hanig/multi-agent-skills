@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: live
 Date: 2026-10-11
+Title: Connecting the swarm to an issue tracker
+Purpose: The coordinator runs on a cluster login node. The authorized operator runs `linear_sync.py drain` in a connected session using its `LINEAR_API_KEY`. `swarm.py` has no network code and holds no tracker credentials: it writes intents for that operator. Tracker state is a view of swarm state and never an input to the DAG judge.
 
 # Connecting the swarm to an issue tracker
 

@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: superseded by plan-swarm.md
 Date: 2026-10-11
+Title: Independent swarm plan variant
+Purpose: This independent planning transcript contributed to the consolidated autonomous swarm plan.
 
 # Independent swarm plan variant
 

@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Native agent validation
+Purpose: This validation record documents the native-agent harness, its measured results, and its unobserved checks.
 
 # Native agent validation
 

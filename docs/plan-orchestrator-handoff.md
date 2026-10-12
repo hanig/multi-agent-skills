@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Handoff contract for a mortal orchestrator
+Purpose: This dated design records what a successor orchestrator needs to recover pending judgments and authorization boundaries.
 
 # Handoff contract for a mortal orchestrator
 

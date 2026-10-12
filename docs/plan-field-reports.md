@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: live
 Date: 2026-10-11
+Title: Plan: the field-report items
+Purpose: This roadmap retains field reports, delivery evidence, and deferred work; check each dated item against the current code before treating it as still owed.
 
 # Plan: the field-report items
 

@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Step-back audit of both repositories
+Purpose: This historical review compares the rejected fusion designs and the code that motivated the replacement swarm plan.
 
 # Step-back audit of both repositories
 

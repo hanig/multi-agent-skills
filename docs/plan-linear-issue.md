@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Plan: PR 3, file and edit ad-hoc issues only as part of the DAG
+Purpose: This delivered plan specifies creating and editing ad-hoc issues with explicit dependency relationships and durable replay.
 
 # Plan: PR 3, file and edit ad-hoc issues only as part of the DAG
 

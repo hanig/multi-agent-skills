@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: superseded by orchestrator-mandate.md
 Date: 2026-10-11
+Title: The orchestrator role: plan
+Purpose: This early role proposal records the gap later addressed by the orchestrator mandate and operating skill.
 
 # The orchestrator role: plan
 

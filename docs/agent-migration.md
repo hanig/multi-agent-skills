@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: live
 Date: 2026-10-11
+Title: Migrating a skill installation between host agents
+Purpose: The installer manages a maintained skill set for Claude Code, Codex, OpenCode, and Pi. Treat it as the source of truth for its own managed records; do not copy skill directories between agent stores by hand.
 
 # Migrating a skill installation between host agents
 

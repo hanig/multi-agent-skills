@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Plan: a Codex home per dispatched agent
+Purpose: This delivered plan specifies a separate authenticated Codex home for each dispatched agent; the implementation lives in `skills/hanig-swarm/scripts/codex_home.py`.
 
 # Plan: a Codex home per dispatched agent
 

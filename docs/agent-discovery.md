@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: live
 Date: 2026-10-11
+Title: Agent skill discovery contract
+Purpose: `skills/hanig-project/scripts/agent_discovery.py` is the one read-only contract for user-level skill discovery on macOS and Linux. It is bundled with the project skill, so a copied survey can import it without the source checkout. It does not make a directory, start an interactive agent, read credentials, or make a model request.
 
 # Agent skill discovery contract
 

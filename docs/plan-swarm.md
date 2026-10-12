@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: historical
 Date: 2026-10-11
+Title: Plan: autonomous agent swarm (goal (b))
+Purpose: This delivered design records the autonomous swarm architecture, implementation stages, and their historical validation.
 
 # Plan: autonomous agent swarm (goal (b))
 

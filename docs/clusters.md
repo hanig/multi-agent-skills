@@ -1,6 +1,8 @@
 <!-- docs-truth:status -->
 Status: live
 Date: 2026-10-11
+Title: The three clusters: rules, partitions, and what breaks
+Purpose: Arc runs three Slurm clusters that this tooling targets: **chimera**, **lambda** and **andromeda**. A project is bound to exactly one of them, and plans are NOT portable between them: most partition names exist on only one cluster, and the two that do repeat mean different things (see §5).
 
 # The three clusters: rules, partitions, and what breaks
 
