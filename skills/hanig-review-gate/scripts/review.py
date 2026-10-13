@@ -2772,21 +2772,9 @@ def panel_policy_text(policy):
     return "" if not parts else " — " + "; ".join(parts)
 
 
-def escalate(all_reviewers, prompt, args, truncated, label, body_len):
-    """Cheapest-first with early exit.
-
-    Running the full panel every time means paying for the slowest, dearest
-    reviewer to re-find what a cheap one already caught. Each tier adds only
-    the reviewers the previous tier did not run; the first failing tier with
-    quorum ends it, including a claims-only REVIEW_CLAIMS_REFUTED result.
-    """
-    seen, completed, failed, unavailable = set(), [], [], []
-    tiers_run = []
+def validate_escalation_panel(all_reviewers, args):
+    """Refuse an empty ladder before main arms the provider watchdog."""
     tiers = escalation_tiers(args)
-    # Findings ACCUMULATE across tiers. Computed per tier, a finding from an
-    # earlier tier was forgotten once a later tier came back clean with quorum
-    # met, so the ladder fell through to the dearest reviewer with a defect
-    # already on the table (glm-5.1, MAJOR).
     # An escalation over an empty ladder used to run zero reviewers and
     # return four empty lists, which reads downstream as "nobody found
     # anything". Tightening in_profile() makes that reachable: a roster whose
@@ -2801,6 +2789,25 @@ def escalate(all_reviewers, prompt, args, truncated, label, body_len):
             f"clean review. Name one or more tiers in that reviewer's "
             f"'profiles' in reviewers.json, or pass --only to select "
             f"reviewers directly.")
+
+    return tiers
+
+
+def escalate(all_reviewers, prompt, args, truncated, label, body_len):
+    """Cheapest-first with early exit.
+
+    Running the full panel every time means paying for the slowest, dearest
+    reviewer to re-find what a cheap one already caught. Each tier adds only
+    the reviewers the previous tier did not run; the first failing tier with
+    quorum ends it, including a claims-only REVIEW_CLAIMS_REFUTED result.
+    """
+    seen, completed, failed, unavailable = set(), [], [], []
+    tiers_run = []
+    tiers = validate_escalation_panel(all_reviewers, args)
+    # Findings ACCUMULATE across tiers. Computed per tier, a finding from an
+    # earlier tier was forgotten once a later tier came back clean with quorum
+    # met, so the ladder fell through to the dearest reviewer with a defect
+    # already on the table (glm-5.1, MAJOR).
 
     bad_so_far = False
     for tier in tiers:
@@ -3052,6 +3059,14 @@ def build_parser():
 
 
 def main():
+    """A process-wide alarm must not escape an in-process CLI invocation."""
+    try:
+        return _main()
+    finally:
+        disarm_watchdog()
+
+
+def _main():
     args = build_parser().parse_args()
     if args.adjudicate is not None or args.open_findings:
         if (args.diff or args.staged or args.range or args.file or args.list or args.size or args.kind
@@ -3077,10 +3092,6 @@ def main():
     # Validate evidence before any provider path, including --list probes.
     dispositions = (load_dispositions(args.dispositions)
                     if args.dispositions else [])
-    # A total bound on top of every per-reviewer timeout.
-    arm_watchdog(args.watchdog if args.watchdog is not None
-                 else max(1800, args.timeout * 3))
-
     reviewers = load_effective_reviewers()
     roster = reviewers
     # --- the protocol, enforced rather than remembered ---------------------
@@ -3237,6 +3248,9 @@ def main():
     if args.list:
         print(f"profile: {profile}"
               + ("  (--only overrides profile filtering)" if args.only else ""))
+        if not args.no_probe:
+            arm_watchdog(args.watchdog if args.watchdog is not None
+                         else max(1800, args.timeout * 3))
         sys.exit(cmd_list(reviewers, probe=not args.no_probe))
 
     if args.escalate and args.only:
@@ -3311,6 +3325,11 @@ def main():
               f"with {len(runnable)} reviewer(s) [profile: {profile}]...")
 
     tiers_run = [profile]
+    if args.escalate:
+        validate_escalation_panel(reviewers, args)
+    # One total bound for the entire provider phase, including every tier.
+    arm_watchdog(args.watchdog if args.watchdog is not None
+                 else max(1800, args.timeout * 3))
     if args.escalate:
         completed, failed, unavailable, tiers_run = escalate(
             reviewers, prompt, args, truncated, label, len(body))

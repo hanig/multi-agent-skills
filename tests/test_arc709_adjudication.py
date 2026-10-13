@@ -1,5 +1,6 @@
 """Offline ledger tests through the CLI, with real isolated journal writes."""
 
+from tests.watchdog_guard import guarded_main
 import importlib.util
 import io
 import json
@@ -66,7 +67,7 @@ class TestAdjudication(unittest.TestCase):
                 with patch.object(review, "reserve_review_round",
                         side_effect=lambda args: isolated_reservation(
                             review, original_reservation, args)):
-                    review.main()
+                    guarded_main(review.main)
         return SimpleNamespace(returncode=stopped.exception.code,
                                stdout=stdout.getvalue(), stderr=stderr.getvalue())
 
@@ -689,12 +690,12 @@ class TestAdjudication(unittest.TestCase):
             with patch.object(sys, "argv", argv), patch.object(review, "load_reviewers", return_value=roster), \
                     patch.object(review, "availability", return_value=None), patch.object(review, "run_one", side_effect=answer), \
                     patch.object(review, "git_out", side_effect=moving_diff), \
-                    patch.object(review, "arm_watchdog"), patch.object(review, "disarm_watchdog"), redirect_stdout(stdout):
+                    redirect_stdout(stdout):
                 with self.assertRaises(SystemExit) as stopped:
                     with patch.object(review, "reserve_review_round",
                             side_effect=lambda args: isolated_reservation(
                                 review, original_reservation, args)):
-                        review.main()
+                        guarded_main(review.main)
             self.assertEqual(stopped.exception.code, 1)
             self.assertEqual(json.loads(stdout.getvalue())["state"], "REVIEW_FAIL")
             self.assertEqual(self.records()[-1]["reviewed_head"], reviewed_head)

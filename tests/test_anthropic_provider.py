@@ -1,5 +1,6 @@
 """Native Anthropic transport regressions; every provider call is offline."""
 
+from tests.watchdog_guard import guarded_main
 import io
 import json
 import os
@@ -375,7 +376,7 @@ class TestAnthropicCatalogEffort(unittest.TestCase):
                         mock.patch.object(R.urllib.request, "urlopen") as urlopen, \
                         redirect_stderr(error), redirect_stdout(io.StringIO()):
                     with self.assertRaises(SystemExit) as raised:
-                        R.main()
+                        guarded_main(R.main)
                     self.assertEqual(raised.exception.code, 4)
                 self.assertIn(seat["name"], error.getvalue())
                 self.assertIn(repr(effort), error.getvalue())

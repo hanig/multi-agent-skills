@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline tests for committee.py session token-usage evidence."""
 
+from tests.watchdog_guard import guarded_main
 import importlib.util
 import io
 import json
@@ -193,7 +194,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
                 mock.patch.object(committee.R, "_post", side_effect=self.provider), \
                 redirect_stdout(stdout):
             with self.assertRaises(SystemExit) as stopped:
-                committee.main()
+                guarded_main(committee.main)
         return stopped.exception.code, stdout.getvalue(), committee.load_session("split")
 
     def test_divergence_routes_to_sol_tiebreak_and_persists_ruling(self):
@@ -287,7 +288,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
                                   return_value=("Final position", None, None)), \
                 redirect_stdout(output):
             with self.assertRaises(SystemExit) as stopped:
-                committee.main()
+                guarded_main(committee.main)
         self.assertEqual(stopped.exception.code, 0, output.getvalue())
         self.assertEqual(committee.load_session("fresh")["author"], "gpt-6-astra")
         self.assertIn("committee.py synthesize fresh", output.getvalue())
@@ -300,7 +301,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
                                   return_value=("Final position", None, None)), \
                 redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as stopped:
-                committee.main()
+                guarded_main(committee.main)
         self.assertEqual(stopped.exception.code, 0)
         self.assertEqual(committee.load_session("split")["author"], "gpt-6.1-sol")
         code, _output, saved = self.invoke(author=None)
@@ -434,7 +435,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
                                   return_value=(None, "offline", None)), \
                 redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as stopped:
-                committee.main()
+                guarded_main(committee.main)
         self.assertEqual(stopped.exception.code, committee.STATES["UNAVAILABLE"])
         saved = committee.load_session("split")
         self.assertNotIn("resolution", saved)
@@ -451,7 +452,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
                 mock.patch.object(committee, "ask_member", side_effect=KeyboardInterrupt), \
                 redirect_stdout(io.StringIO()):
             with self.assertRaises(KeyboardInterrupt):
-                committee.main()
+                guarded_main(committee.main)
         self.assertEqual(committee.session_path("split").read_bytes(), before)
 
     def test_convergence_preserves_unified_plan_without_tiebreak(self):
@@ -569,7 +570,7 @@ class TestCommitteeAuthorMembers(unittest.TestCase):
                                   return_value=("Final position", None, None)) as ask, \
                 redirect_stdout(output):
             with self.assertRaises(SystemExit) as stopped:
-                committee.main()
+                guarded_main(committee.main)
         return stopped.exception.code, output.getvalue(), ask.call_count
 
     def test_explicit_sol_author_is_refused_before_session_or_provider(self):

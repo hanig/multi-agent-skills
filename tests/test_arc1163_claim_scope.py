@@ -5,6 +5,7 @@ aggregation and audit serialization. Only transports and external audit writes
 are replaced. Fixtures are self-contained; no historical receipt is required.
 """
 
+from tests.watchdog_guard import guarded_main
 import importlib.util
 import io
 import json
@@ -94,8 +95,6 @@ class TestCounterClaimScope(unittest.TestCase):
             stack.enter_context(patch.object(review, "load_reviewers", return_value=roster))
             stack.enter_context(patch.object(review, "availability", return_value=None))
             stack.enter_context(patch.dict(review.PROVIDERS, {"openai": transport, "openrouter": transport}))
-            stack.enter_context(patch.object(review, "arm_watchdog"))
-            stack.enter_context(patch.object(review, "disarm_watchdog"))
             stack.enter_context(patch.object(review, "_run_journal_append", side_effect=audit))
             stack.enter_context(redirect_stdout(stdout))
             stack.enter_context(redirect_stderr(stderr))
@@ -103,7 +102,7 @@ class TestCounterClaimScope(unittest.TestCase):
                 with patch.object(review, "reserve_review_round",
                         side_effect=lambda args: isolated_reservation(
                             review, original_reservation, args)):
-                    review.main()
+                    guarded_main(review.main)
         return stopped.exception.code, stdout.getvalue(), stderr.getvalue(), calls, audits
 
     def assert_blocked(self, result):

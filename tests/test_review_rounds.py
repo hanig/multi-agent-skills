@@ -1,5 +1,6 @@
 """Stable identities and enforcing reservations, through Git, CLI and races."""
 
+from tests.watchdog_guard import guarded_main
 import concurrent.futures
 import importlib.util
 import io
@@ -91,15 +92,13 @@ class TestRoundReservations(unittest.TestCase):
             for name, replacement in (("load_effective_reviewers", lambda: roster),
                                       ("availability", lambda _r: None),
                                       ("run_one", answer),
-                                      ("arm_watchdog", lambda *_a: None),
-                                      ("disarm_watchdog", lambda: None),
                                       ("_run_journal_append", journal)):
                 stack.enter_context(patch.object(review, name, replacement))
             stack.enter_context(patch.object(sys, "argv", argv))
             stack.enter_context(redirect_stdout(out))
             stack.enter_context(redirect_stderr(err))
             with self.assertRaises(SystemExit) as stopped:
-                review.main()
+                guarded_main(review.main)
         return stopped.exception.code, out.getvalue(), err.getvalue(), calls, records
 
     @contextmanager
