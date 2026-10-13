@@ -95,7 +95,7 @@ class TestJournalExtraction(unittest.TestCase):
         self.assertFalse({str(n).split(".")[0] for n in imports} & forbidden)
         # pathlib may import urllib.parse; network clients remain forbidden.
         runtime_forbidden = (forbidden - {"urllib"}) | {"urllib.request"}
-        result = subprocess.run([sys.executable, "-c", (
+        result = subprocess.run([sys.executable, "-S", "-c", (
             "import sys; sys.path.insert(0, sys.argv[1]); import swarm_journal; "
             "assert not set(sys.modules).intersection(" + repr(runtime_forbidden) + ")"
         ), str(SCRIPTS)], capture_output=True, text=True, timeout=30)

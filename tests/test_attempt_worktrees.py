@@ -1733,7 +1733,7 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
     def test_no_archive_call_escapes_a_dry_run_guard(self):
         import ast
         paths = sorted(SCRIPTS.glob("swarm*.py"))
-        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py"}
+        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py"}
                         <= {path.name for path in paths})
         unguarded, calls = [], []
         definitions = set()
@@ -1758,6 +1758,8 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
                     calls.append((path.name, node.lineno))
                     if not any(lo <= node.lineno <= hi for lo, hi in guarded):
                         unguarded.append((path.name, node.lineno))
+        self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
+                         "_dispatch_prompt", "_code_protocol_problem"} <= definitions)
         self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= definitions)
         self.assertTrue({"declared_seed", "account_problems", "resolve_promote_to"} <= definitions)
         self.assertTrue({"emit_intent", "load_outbox_contract", "record_receipt",

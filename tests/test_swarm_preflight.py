@@ -150,7 +150,7 @@ class TestPreflightExtraction(unittest.TestCase):
                     for a in n.names}
         self.assertFalse({str(n).split(".")[0] for n in imports} & forbidden)
         blocked = (forbidden - {"urllib"}) | {"urllib.request"}
-        result = subprocess.run([sys.executable, "-c", (
+        result = subprocess.run([sys.executable, "-S", "-c", (
             "import sys; sys.path.insert(0, sys.argv[1]); import swarm_preflight; "
             "assert not set(sys.modules).intersection(" + repr(blocked) + ")"
         ), str(SCRIPTS)], capture_output=True, text=True, timeout=30)

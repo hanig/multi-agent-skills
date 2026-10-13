@@ -458,7 +458,8 @@ class TestTheLiftIsClosed(unittest.TestCase):
 
     FILES = (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
              SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_plan_rules.py",
-             SCRIPTS / "swarm_outbox.py", SCRIPTS / "swarm_preflight.py")
+             SCRIPTS / "swarm_outbox.py", SCRIPTS / "swarm_preflight.py",
+             SCRIPTS / "swarm_code_protocol.py")
 
     def _assigned(self, tree):
         import ast
@@ -489,6 +490,10 @@ class TestTheLiftIsClosed(unittest.TestCase):
         import ast
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_code_protocol.py":
+                self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
+                                 "_dispatch_prompt", "_code_protocol_problem"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_preflight.py":
                 self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
@@ -519,6 +524,10 @@ class TestTheLiftIsClosed(unittest.TestCase):
                   "tempfile", "fnmatch", "pathlib"}
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_code_protocol.py":
+                self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
+                                 "_dispatch_prompt", "_code_protocol_problem"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_preflight.py":
                 self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
@@ -932,8 +941,12 @@ class TestClosureByExclusion(unittest.TestCase):
         for f in (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
                   SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_plan_rules.py",
                   SCRIPTS / "swarm_outbox.py", SCRIPTS / "swarm_preflight.py",
-                  SCRIPTS / "converge.py"):
+                  SCRIPTS / "swarm_code_protocol.py", SCRIPTS / "converge.py"):
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_code_protocol.py":
+                self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
+                                 "_dispatch_prompt", "_code_protocol_problem"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_preflight.py":
                 self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})

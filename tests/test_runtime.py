@@ -162,13 +162,14 @@ class TestNoInferredFacts(unittest.TestCase):
     compute-node availability from it violates declared-facts."""
 
     def test_the_validator_never_stats_an_entrypoint(self):
-        # Preserve the entire original interval's coverage across both owners.
+        # Preserve the entire original interval's coverage across all owners.
         expected = {"_validate_runtimes", "_seed_carry_forward",
                     "_code_completion_protocol", "_dispatch_prompt",
                     "_code_protocol_problem", "converge_problem",
                     "converge_verdict", "_units_with_canary"}
         segments = {}
-        for path in (SWARM, SWARM.with_name("swarm_plan_rules.py")):
+        for path in (SWARM, SWARM.with_name("swarm_plan_rules.py"),
+                     SWARM.with_name("swarm_code_protocol.py")):
             src = path.read_text()
             for node in ast.parse(src).body:
                 if isinstance(node, ast.FunctionDef) and node.name in expected:

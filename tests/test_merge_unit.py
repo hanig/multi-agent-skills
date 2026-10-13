@@ -1314,7 +1314,7 @@ class TestMergeUnit(unittest.TestCase):
     def test_coordinator_never_imports_network_operator(self):
         imports = []
         definitions = set()
-        for name in ("swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py"):
+        for name in ("swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py"):
             tree = ast.parse((SCRIPTS / name).read_text())
             definitions.update(n.name for n in tree.body
                                if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
@@ -1324,6 +1324,8 @@ class TestMergeUnit(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom):
                     imports.append(node.module)
         self.assertTrue({"cmd_merge", "load_agent_routing", "PlanError", "acquire_lease", "_fsync_append", "attested_receipt", "_intent_key"} <= definitions)
+        self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
+                         "_dispatch_prompt", "_code_protocol_problem"} <= definitions)
         self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= definitions)
         self.assertTrue({"declared_seed", "account_problems", "resolve_promote_to"} <= definitions)
         self.assertTrue({"emit_intent", "load_outbox_contract", "record_receipt",
