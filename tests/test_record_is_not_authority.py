@@ -91,7 +91,7 @@ ALLOWED = {
     ("swarm.py", "_preserve_and_archive_code_worktree"):
         "reads coordinator-state workspace identity, base and repository "
         "metadata only for preservation and cleanup, never from worker files",
-    ("swarm.py", "_execution_workspace"):
+    ("swarm_preflight.py", "_execution_workspace"):
         "reads the declared workspace from the PLAN, not from a record",
     ("swarm.py", "validate_plan"):
         "validates the plan's own execution_workspace field before any run",

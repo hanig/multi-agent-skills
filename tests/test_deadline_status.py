@@ -11,6 +11,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+import swarm_preflight as SP
 import swarm as S  # noqa: E402
 import swarm_evidence as SE
 
@@ -138,7 +139,7 @@ class TestDeadlineBreach(unittest.TestCase):
         with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
                 mock.patch.object(S.SS, "renew_lease", return_value=True), \
                 mock.patch.object(SE, "_check", check), \
-                mock.patch.object(S, "_release_output_claims", release), \
+                mock.patch.object(SP, "_release_output_claims", release), \
                 mock.patch.object(S, "_allocate", allocate):
             report, dispatched, halted = S.advance(
                 plan, S.load_state(str(state_dir)), str(state_dir),
@@ -202,7 +203,7 @@ class TestDeadlineBreach(unittest.TestCase):
                     mock.patch.object(
                         SE, "_reported_check_result",
                         return_value=({"receipt_sha256": "a" * 64}, None)), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 S.advance(plan, S.load_state(str(state_dir)),
                           str(state_dir), str(root / "runs"), False)
             current = S.load_state(str(state_dir))["units"]["u"]
@@ -266,7 +267,7 @@ class TestDeadlineBreach(unittest.TestCase):
                     mock.patch.object(S, "reconcile_orphan",
                                       side_effect=reconcile), \
                     mock.patch.object(S, "_allocate", allocate), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 S.advance(plan, S.load_state(str(state_dir)), str(state_dir),
                           str(root / "runs"), False)
             current = S.load_state(str(state_dir))["units"]["u"]
@@ -305,7 +306,7 @@ class TestDeadlineBreach(unittest.TestCase):
                     mock.patch.object(S, "_recover_code_launch",
                                       side_effect=recover), \
                     mock.patch.object(SE, "_check", check), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 report, dispatched, halted = S.advance(
                     plan, S.load_state(str(state_dir)), str(state_dir),
                     str(root / "runs"), False)
@@ -351,7 +352,7 @@ class TestDeadlineBreach(unittest.TestCase):
                     mock.patch.object(S, "_recover_code_launch",
                                       side_effect=recover), \
                     mock.patch.object(SE, "_check", check), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 report, _dispatched, _halted = S.advance(
                     plan, S.load_state(str(state_dir)), str(state_dir),
                     str(root / "runs"), False)
@@ -398,7 +399,7 @@ class TestDeadlineBreach(unittest.TestCase):
                     mock.patch.object(S, "_recover_code_launch",
                                       side_effect=recover), \
                     mock.patch.object(SE, "_check", check), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 S.advance(plan, S.load_state(str(state_dir)), str(state_dir),
                           str(root / "runs"), False)
             current = S.load_state(str(state_dir))["units"]["u"]
@@ -438,7 +439,7 @@ class TestDeadlineBreach(unittest.TestCase):
                     mock.patch.object(
                         SE, "_reported_check_result",
                         return_value=({"receipt_sha256": "a" * 64}, None)), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 S.advance(plan, S.load_state(str(state_dir)), str(state_dir),
                           str(root / "runs"), False)
             current = S.load_state(str(state_dir))["units"]["u"]
@@ -487,7 +488,7 @@ class TestDeadlineBreach(unittest.TestCase):
                         mock.patch.object(
                             S.SS, "renew_lease", return_value=True), \
                         mock.patch.object(SE, "_check", check), \
-                        mock.patch.object(S, "_release_output_claims"):
+                        mock.patch.object(SP, "_release_output_claims"):
                     S.advance(
                         plan, S.load_state(str(state_dir)), str(state_dir),
                         str(root / "runs"), False,
@@ -665,7 +666,7 @@ class TestDeadlineBreach(unittest.TestCase):
             with mock.patch.object(S.time, "time", return_value=200.0), \
                     mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(SE, "_check", check), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 report, dispatched, halted = S.advance(
                     plan, S.load_state(str(state_dir)), str(state_dir),
                     str(root / "runs"), False)
@@ -720,7 +721,7 @@ class TestDeadlineBreach(unittest.TestCase):
             with mock.patch.object(S.time, "time", return_value=180.0), \
                     mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(SE, "_check", check), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 S.advance(new_plan, S.load_state(str(state_dir)),
                           str(state_dir), str(root / "runs"), False,
                           accept_plan_change=True)
@@ -759,7 +760,7 @@ class TestDeadlineBreach(unittest.TestCase):
                         return_value=({"receipt_sha256": "a" * 64}, None)), \
                     mock.patch.object(S, "converge_verdict",
                                       return_value=("NOT_CONVERGED", ["x"])), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 S.advance(plan, S.load_state(str(state_dir)), str(state_dir),
                           str(root / "runs"), False)
             current = S.load_state(str(state_dir))["units"]["u"]
@@ -802,7 +803,7 @@ class TestDeadlineBreach(unittest.TestCase):
                     mock.patch.object(
                         S, "converge_verdict",
                         return_value=("NOT_CONVERGED", ["loss too high"])), \
-                    mock.patch.object(S, "_release_output_claims"):
+                    mock.patch.object(SP, "_release_output_claims"):
                 for _poll in range(2):
                     S.advance(plan, S.load_state(str(state_dir)),
                               str(state_dir), str(root / "runs"), False)

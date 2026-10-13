@@ -13,6 +13,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "hanig-swarm" / "scripts"))
+import swarm_preflight as SP
 import swarm as S
 import worktree as W
 from tests.test_attempt_worktrees import ENV, FakePaseo, code_unit, git, repo_at
@@ -247,14 +248,14 @@ class TestInstalledSkillDrift(unittest.TestCase):
     def test_unresolved_abbreviation_is_not_treated_as_equal(self):
         short = self.base[:7]
         self.install(".agents", "hanig-swarm", short)
-        real_git = S._git
+        real_git = SP._git
 
         def ambiguous(repo, *args, **kwargs):
             if args == ("rev-parse", "--disambiguate=" + short):
                 return 128, "", "ambiguous revision"
             return real_git(repo, *args, **kwargs)
 
-        with mock.patch.object(S, "_git", ambiguous):
+        with mock.patch.object(SP, "_git", ambiguous):
             _attempt, facts, warning = self.dispatch()
         self.assertIn(short, warning)
         self.assertIn(self.base, warning)
@@ -374,7 +375,7 @@ class TestInstalledSkillDrift(unittest.TestCase):
     def test_incomplete_object_lookup_stays_advisory_and_is_not_a_commit(self):
         short = git(self.repo, "rev-parse", "--short", "HEAD")
         self.install(".agents", "hanig-swarm", short)
-        real_git = S._git
+        real_git = SP._git
         results = [(0, "", ""), (0, "malformed", ""),
                    (0, self.base + "\n" + "f" * 40, ""),
                    (1, self.base, "lookup failed"), (0, "f" * 40, "")]
@@ -385,7 +386,7 @@ class TestInstalledSkillDrift(unittest.TestCase):
                         return result
                     return real_git(repo, *args, **kwargs)
 
-                with mock.patch.object(S, "_git", incomplete):
+                with mock.patch.object(SP, "_git", incomplete):
                     _attempt, facts, warning = self.dispatch("lookup-" + str(index))
                 self.assertIn(short, warning)
                 self.assertIn(self.base, warning)
