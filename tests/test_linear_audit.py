@@ -1058,7 +1058,7 @@ class TestAudit(AuditCase):
             for node in ast.walk(function):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     self.assertFalse(node.value.lstrip().startswith('mutation'))
-        for path in (SWARM / 'swarm.py', SWARM / 'swarm_routing.py', SWARM / 'swarm_types.py', SWARM / 'swarm_state.py', SWARM / 'swarm_journal.py', SWARM / 'swarm_evidence.py', SWARM / 'swarm_outbox.py', PROJECT / 'tickets.py', PROJECT / 'drain_contract.py'):
+        for path in (SWARM / 'swarm.py', SWARM / 'swarm_routing.py', SWARM / 'swarm_types.py', SWARM / 'swarm_state.py', SWARM / 'swarm_journal.py', SWARM / 'swarm_evidence.py', SWARM / 'swarm_outbox.py', SWARM / 'swarm_plan_rules.py', PROJECT / 'tickets.py', PROJECT / 'drain_contract.py'):
             tree_boundary = ast.parse(path.read_text())
             if path.name == "swarm_outbox.py":
                 self.assertTrue({"emit_intent", "load_outbox_contract", "record_receipt",
@@ -1069,7 +1069,8 @@ class TestAudit(AuditCase):
                         "swarm_types.py": "PlanError", "swarm_state.py": "acquire_lease",
                         "swarm_journal.py": "_fsync_append",
                         "swarm_evidence.py": "attested_receipt",
-                        "swarm_outbox.py": "_intent_key"}.get(path.name)
+                        "swarm_outbox.py": "_intent_key",
+                        "swarm_plan_rules.py": "declared_seed"}.get(path.name)
             if expected:
                 self.assertIn(expected, {n.name for n in tree_boundary.body
                                          if isinstance(n, (ast.FunctionDef, ast.ClassDef))})
