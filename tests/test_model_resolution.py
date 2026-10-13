@@ -116,6 +116,32 @@ class TestFamilyParser(unittest.TestCase):
                 with self.assertRaises(MF.FamilyError):
                     MF.check_family(bad)
 
+    def test_named_family_is_an_exact_pin_through_resolver_and_reader(self):
+        seat = next(r for r in shipped()[0] if r["name"] == "muse-wonder")
+        family = MF.check_family(seat["family"])
+        self.assertEqual((family["vendor"], family["prefix"],
+                          family["named_version"], family["major"]),
+                         ("meta", "muse-", "wonder", 0))
+        self.assertEqual(MF.version_of(seat["model"], family), (0, 0))
+        RM.validate_config(*shipped())
+        candidates = ["meta/muse-0.1", "meta/muse-1", "meta/muse-wonder-2",
+                      "meta/muse-wonder:free", "meta/muse-wonder-preview",
+                      "meta/muse-other", "other/muse-wonder", "muse-wonder",
+                      "meta/muse-Wonder", "meta/muse-wonder "]
+        self.assertEqual(MF.select(candidates + [seat["model"]], family,
+                                   seat["model"]), (None, []))
+        for model in candidates:
+            with self.subTest(model=model):
+                self.assertIsNone(MF.version_of(model, family))
+                entry = {"model": model, "record": dict(
+                    seat["_max_output_tokens_accepted"], model=model)}
+                self.assertIsNone(MF.reviewer_override(seat, entry))
+        for bad in (None, "", "0", "Wonder", " wonder", "wonder ", "a/b", True):
+            with self.subTest(named_version=bad), self.assertRaises(MF.FamilyError):
+                MF.check_family(dict(family, named_version=bad))
+        with self.assertRaises(MF.FamilyError):
+            MF.check_family(dict(family, major=1))
+
     def test_every_shipped_pin_is_in_its_family_at_its_major(self):
         reviewers, agents = shipped()
         declared = [(r["name"], r["model"], r["family"])

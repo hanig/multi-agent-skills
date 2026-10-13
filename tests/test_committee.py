@@ -583,8 +583,8 @@ class TestCommitteeAuthorMembers(unittest.TestCase):
 
     def test_default_committee_cannot_seat_its_author(self):
         code, _output, calls = self.invoke(
-            "open", "--author", "codex/gpt-6-luna", "--problem", "Order?")
-        self.assertIn("luna refused: authored this change", str(code))
+            "open", "--author", "openrouter/meta/muse-wonder", "--problem", "Order?")
+        self.assertIn("muse-wonder refused: authored this change", str(code))
         self.assertEqual(calls, 0)
 
     def test_repeated_author_exclusion_is_not_last_flag_wins(self):
