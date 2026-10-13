@@ -359,13 +359,15 @@ class TestTheAgentCannotReachTheBaseline(Base):
         """The launch record is audit-only. Putting the baseline there would
         make an audit copy decide admission, which is the defect six review
         rounds were spent removing."""
-        src = (SCRIPTS / "swarm.py").read_text()
-        i = src.index("def _write_launch_record")
-        j = src.index("\ndef ", i + 10)
-        self.assertNotIn("artifact_basis", src[i:j])
-        payload = src.index("def _code_launch_record_payload")
-        end = src.index("\ndef ", payload + 10)
-        self.assertNotIn("artifact_basis", src[payload:end])
+        import ast
+        src = (SCRIPTS / "swarm_code_launch.py").read_text()
+        tree = ast.parse(src)
+        names = {"_write_launch_record", "_code_launch_record_payload"}
+        functions = {n.name: n for n in tree.body
+                     if isinstance(n, ast.FunctionDef) and n.name in names}
+        self.assertEqual(set(functions), names)
+        for name, function in functions.items():
+            self.assertNotIn("artifact_basis", ast.get_source_segment(src, function), name)
 
     def test_the_basis_reaches_the_judge_from_state_and_nowhere_else(self):
         seen = {}

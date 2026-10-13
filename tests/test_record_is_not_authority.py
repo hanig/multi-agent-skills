@@ -64,13 +64,13 @@ ALLOWED = {
     ("merge_unit.py", "reconcile"):
         "compares receipts against the repository binding derived from "
         "coordinator-state launch anchors, never trusting worker files",
-    ("swarm.py", "_write_launch_record"):
+    ("swarm_code_launch.py", "_write_launch_record"):
         "writes the record from the coordinator's own git observation",
-    ("swarm.py", "_code_launch_record_payload"):
+    ("swarm_code_launch.py", "_code_launch_record_payload"):
         "renders deterministic audit bytes from coordinator-state facts",
-    ("swarm.py", "_complete_code_launch"):
+    ("swarm_code_launch.py", "_complete_code_launch"):
         "combines the trusted launch intent with Paseo's returned cwd",
-    ("swarm.py", "_code_launch_intent_problem"):
+    ("swarm_code_launch.py", "_code_launch_intent_problem"):
         "validates the coordinator-state intent, including that its generated "
         "source branch differs from its plan-declared pull-request target",
     ("swarm_code_protocol.py", "_code_completion_protocol"):
@@ -79,9 +79,9 @@ ALLOWED = {
     ("swarm_code_protocol.py", "_code_protocol_problem"):
         "checks an assembled prompt against the coordinator-state launch "
         "intent (or validate_plan's fixed canary intent)",
-    ("swarm.py", "_register_code_workspace"):
+    ("swarm_code_launch.py", "_register_code_workspace"):
         "records cleanup metadata from the coordinator-state intent",
-    ("swarm.py", "_create_code_worktree"):
+    ("swarm_code_launch.py", "_create_code_worktree"):
         "creates the coordinator-owned worktree from the coordinator-state "
         "launch intent before Paseo starts",
     ("swarm.py", "_registered_attempt_workspace"):
@@ -146,7 +146,7 @@ ALLOWED = {
         "coordinator authority before dispatch",
     ("swarm_preflight.py", "_dispatch_source_identity"):
         "compares the checkout to the coordinator-resolved target",
-    ("swarm.py", "_capture_code_launch"):
+    ("swarm_code_launch.py", "_capture_code_launch"):
         "pins the coordinator-created source observation before launch",
     ("swarm_evidence.py", "admit_merge"):
         "compares the merge attestation's repository to trusted state",
@@ -282,6 +282,15 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
                                      f"{key!r}")
         self.assertTrue({("swarm_code_protocol.py", "_code_completion_protocol"),
                          ("swarm_code_protocol.py", "_code_protocol_problem")} <= found)
+        self.assertTrue({
+            ("swarm_code_launch.py", "_capture_code_launch"),
+            ("swarm_code_launch.py", "_code_launch_intent_problem"),
+            ("swarm_code_launch.py", "_code_launch_record_payload"),
+            ("swarm_code_launch.py", "_create_code_worktree"),
+            ("swarm_code_launch.py", "_register_code_workspace"),
+            ("swarm_code_launch.py", "_complete_code_launch"),
+            ("swarm_code_launch.py", "_write_launch_record"),
+        } <= found)
         self.assertEqual(
             offenders, [],
             "These sites name a field whose value decides something. Take it "

@@ -277,7 +277,7 @@ class TestARC682Recovery(unittest.TestCase):
         state = {"units": {}}
         state_dir = self.tmp / "create-crash-state"
         with mock.patch.object(
-                S, "_register_code_workspace", side_effect=Crash()):
+                S.SCL, "_register_code_workspace", side_effect=Crash()):
             with self.assertRaises(Crash):
                 S._submit(unit, str(attempt), False, state, str(state_dir))
 
