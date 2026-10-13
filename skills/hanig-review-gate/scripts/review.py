@@ -2927,16 +2927,7 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
     inline, the failed-reviewer hole below was invisible to every test."""
     if n_completed == 0:
         return "REVIEW_INCOMPLETE" if n_incomplete else "REVIEW_UNAVAILABLE"
-    # Quorum gates the FAIL as well as the PASS. It used to sit below the
-    # finding check, so one completed reviewer could deliver a verdict that the
-    # panel never reached: found live when a plan review returned REVIEW_FAIL
-    # on a single verdict because the second reviewer returned an empty
-    # response. The same asymmetry was fixed in escalate() and missed here --
-    # one rule, two places, the defect class this repo has hit 19 times.
-    #
-    # The finding is NOT discarded: it is still printed, and REVIEW_PARTIAL is
-    # not a pass (the caller is told never to treat it as one). What changes is
-    # that one opinion is not dignified as a committee verdict.
+    # Quorum gates both FAIL and PASS; below quorum findings remain visible.
     if n_completed >= quorum:
         if confirmed:
             return "REVIEW_FAIL"
@@ -2947,10 +2938,7 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
     if n_completed < quorum:
         return "REVIEW_PARTIAL"
     if n_failed:
-        # A reviewer that errored, timed out, or returned unparseable output
-        # produced no verdict. Quorum among the others does not speak for it,
-        # and this gate's premise is that absent evidence is not a pass (luna).
-        # `unavailable` differs: it never ran at all, and quorum covers that.
+        # Quorum cannot excuse a dispatched reviewer producing no verdict.
         return "REVIEW_PARTIAL"
     if n_out_of_scope_critical:
         # `in_scope: false` is a reviewer's judgment about MY threat model, and
@@ -3372,6 +3360,8 @@ def _main():
         reserve_review_round(args)
 
     if args.kind == "plan":
+        arm_watchdog(args.watchdog if args.watchdog is not None
+                     else max(1800, args.timeout * 3))
         sys.exit(cmd_plan_review(args, [r for r in reviewers if r.get("enabled", True)],
                                  prompt, label, truncated, profile_reason, excluded))
 

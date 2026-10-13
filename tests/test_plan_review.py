@@ -14,6 +14,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest import mock
+from tests.watchdog_guard import guarded_main
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'skills' / 'hanig-review-gate' / 'scripts'))
@@ -101,12 +102,10 @@ class TestPlanExchange(unittest.TestCase):
         with mock.patch.object(sys, 'argv', argv), \
                 mock.patch.object(review, 'load_effective_reviewers', return_value=members), \
                 mock.patch.object(committee.R, '_post', side_effect=self.transport), \
-                mock.patch.object(review, 'arm_watchdog'), \
-                mock.patch.object(review, 'disarm_watchdog'), \
                 mock.patch.object(review, 'run_one', side_effect=AssertionError('stateless path')), \
                 redirect_stdout(stdout), redirect_stderr(stderr), \
                 self.assertRaises(SystemExit) as stopped:
-            review.main()
+            guarded_main(review.main)
         output = stdout.getvalue()
         return stopped.exception.code, (json.loads(output) if json_output and output else output), stderr.getvalue()
 

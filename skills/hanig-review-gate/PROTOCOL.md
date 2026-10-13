@@ -397,63 +397,47 @@ it.
 
 ## Collaborative plan review
 
-**Two contrasting models for a plan, never escalated.** A third adds agreement,
-not insight. Measured, not assumed: a four-model panel on one design proposal
-had one reviewer uphold every claim and add nothing, while the other two found
-all five defects. Contrasting means a different provider and family, so the two
-cannot share a failure mode. `--plan` fixes the panel at two and refuses
-`--escalate` or a quorum above 2.
+**Two contrasting models for a plan, never escalated.** Contrasting means
+different providers and families. `--plan` requires two seats and quorum 2,
+and refuses `--escalate`.
 
-Plan review uses the committee's member conversations. Turn 1 independently
-reviews the plan against the claims in the existing verdict schema. Turn 2
-retains each seat's own history and supplies the other seat's turn-1 answer
-after shared secret redaction, otherwise verbatim. Each peer block uses a fresh
-`secrets.token_hex(16)` nonce generated after redaction; if the nonce occurs in
-the redacted reply, it is regenerated until absent. The opening and closing
-tags contain this nonce, and the enclosed reply is unchanged. For every peer finding,
-each seat must `concur`, `refute` with a
-concrete reason or counterexample, or `refine` with a corrected statement.
-Each seat also marks its own findings kept or withdrawn, gives any defense,
-and may add new findings. There is no third turn and no `--round`.
-**Cost: two seats times two turns**, with both requests parallel within each
-turn; turn 2 includes the preceding history and peer answer.
+Plan review uses committee conversations. Turn 1 independently assesses the
+claims using the existing verdict schema. Turn 2 retains each seat's history
+and delivers the peer's turn-1 answer verbatim after shared secret redaction.
+Opening and closing tags use a fresh `secrets.token_hex(16)` nonce, regenerated
+until absent from the redacted reply. Each peer finding requires `concur`,
+`refute` with a concrete reason or counterexample, or `refine` with a corrected
+statement. Seats mark their own findings kept or withdrawn, supply any defense,
+and may add findings. **Cost: two seats times two turns**, parallel within each
+turn. There is no third turn or `--round`.
 
-Code computes the joint table and verdict from both turn-2 answers. A finding
-stands unless the peer refutes it with a reason of at least 40 characters after
-collapsing whitespace and its author supplies no explicit defense while keeping
-it. This is a length floor, not a judgment of whether the reason is concrete.
-A shorter or missing reason counts as no response: the finding stands, and the
-joint table records `refutation_too_short` with the verbatim response.
-A refinement retains the original severity. Withdrawal
-alone does not drop an unrefuted finding; new turn-2 findings stand as
-unrefuted. Because the final turns are simultaneous, a defense can address
-turn-1 contrary evidence but cannot answer an unseen turn-2 refutation.
-Refuted findings remain in the table with the original finding, author
-position and peer response. A claim is upheld only if both seats mark it
-`supported` after turn 2.
+Code decides the joint table and verdict from both turn-2 answers. A finding
+stands unless the peer refutes it with at least 40 whitespace-collapsed
+characters and its author does not both keep and explicitly defend it.
+This measures length, not substance. A shorter or missing reason leaves the
+finding standing with `refutation_too_short` and the verbatim response.
+Refinement retains severity; withdrawal alone cannot drop an unrefuted finding.
+New findings stand unrefuted. Simultaneous final turns allow defenses of turn-1
+evidence, not unseen turn-2 refutations. Refuted rows retain the original finding,
+author position and peer response. Both seats must mark a claim `supported`
+after turn 2 for it to be upheld.
 
-An own turn-2 finding with the same normalized summary and failure scenario
-as an own turn-1 finding is merged into that original finding. Each text field
-is normalized by Unicode NFC, casefold, collapsing whitespace runs to one space,
-and stripping surrounding whitespace, in that order. Nothing else counts as
-equal. The first matching own turn-1 finding supplies the peer response and
-outcome; all original findings retain their independent responses. The merged
-finding keeps the higher severity, ordered minor < major < critical; a
-restatement can raise severity but never lower it. The recorded replies retain
-their original severities, and the peer response still decides whether the
-finding stands. The joint table keeps the merged row with outcome `restated`,
-`restated_finding_id` and
-`response_outcome`. It adds no finding to the verdict or final findings list.
-A paraphrase remains a new, unrefuted finding.
+An own turn-2 finding merges with the first own turn-1 finding whose summary
+and failure scenario match after Unicode NFC, casefold, whitespace collapsing
+and stripping, in that order. Only that equality counts. The original supplies
+the peer response and outcome; all originals retain independent responses.
+The merge keeps the higher severity (minor < major < critical), never lowering
+it. Recorded replies retain original severities. The peer response still
+decides whether the finding stands. The merged row records `restated`,
+`restated_finding_id` and `response_outcome`, adding nothing to the verdict or
+final findings list. A paraphrase remains new and unrefuted.
 
-Any standing major or critical finding produces PLAN_FAIL,
-including a new turn-2 finding, which receives no peer response. A false
-positive can therefore fail a sound plan. A defended or paraphrased
-finding also stands. Plan review fails closed.
+Any standing major or critical finding produces PLAN_FAIL, including new
+turn-2 findings without peer responses. Defended or paraphrased findings also
+stand. This fails closed: a false positive can fail a sound plan.
 
-Declared limit: code follows the response enum (`concur`,
-`refute`, `refine`), never the prose: a `concur` whose explanation contradicts
-it still counts as concurrence, and the explanation stays in the record.
+Code follows the response enum (`concur`, `refute`, `refine`), even when its
+explanation contradicts it; the explanation remains recorded.
 
 `PLAN_PASS` (exit 0) requires every claim upheld and no standing major or
 critical finding, irrespective of confidence or scope labels. Otherwise the
