@@ -94,7 +94,7 @@ class TestRoutingExtraction(unittest.TestCase):
         # Python 3.12 pathlib imports urllib.parse for path/URI conversion;
         # the package alone is not network I/O. Block its network client.
         runtime_forbidden = (forbidden - {"urllib"}) | {"urllib.request"}
-        proc = subprocess.run([sys.executable, "-c", (
+        proc = subprocess.run([sys.executable, "-S", "-c", (
             "import sys; sys.path.insert(0, sys.argv[1]); "
             "import swarm_types, swarm_routing; swarm_routing._model_family(); "
             "assert not set(sys.modules).intersection(" + repr(runtime_forbidden) + ")"

@@ -1,9 +1,11 @@
 """Code-protocol extraction preserves exports and patch delivery."""
 
 import ast
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -95,11 +97,19 @@ class TestCodeProtocolExtraction(unittest.TestCase):
         imports |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
                     for a in n.names}
         self.assertFalse({str(n).split(".")[0] for n in imports} & forbidden)
-        result = subprocess.run([sys.executable, "-c", (
+        # Exclude interpreter startup hooks so the module graph belongs to
+        # this probe; sitecustomize may legitimately preload network clients.
+        result = subprocess.run([sys.executable, "-S", "-c", (
             "import sys; sys.path.insert(0, sys.argv[1]); import swarm_code_protocol; "
             "assert not set(sys.modules).intersection(" + repr(forbidden) + ")"
         ), str(SCRIPTS)], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_offline_probe_ignores_startup_customization(self):
+        with tempfile.TemporaryDirectory(prefix="protocol-startup-") as directory:
+            Path(directory, "sitecustomize.py").write_text("import ssl\n")
+            with mock.patch.dict(os.environ, {"PYTHONPATH": directory}):
+                self.test_standalone_offline_import()
 
 
 if __name__ == "__main__":

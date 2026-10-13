@@ -134,7 +134,7 @@ class TestStateExtraction(unittest.TestCase):
         # pathlib can load urllib.parse on newer Python; the network client
         # remains forbidden throughout the owner's transitive import graph.
         runtime_forbidden = (forbidden - {"urllib"}) | {"urllib.request"}
-        result = subprocess.run([sys.executable, "-c", (
+        result = subprocess.run([sys.executable, "-S", "-c", (
             "import sys; sys.path.insert(0, sys.argv[1]); import swarm_state; "
             "assert not set(sys.modules).intersection(" + repr(runtime_forbidden) + ")"
         ), str(SCRIPTS)], capture_output=True, text=True, timeout=30)
