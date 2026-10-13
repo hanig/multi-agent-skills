@@ -147,6 +147,27 @@ class TestPlanExchange(unittest.TestCase):
         self.assert_direct_panel_refused([
             MEMBERS[0], dict(MEMBERS[1], name=MEMBERS[0]['name'])])
 
+    def assert_exchange_panel_refused(self, members):
+        stderr = io.StringIO()
+        with mock.patch.object(committee.R, '_post', side_effect=self.transport) as transport, \
+                redirect_stderr(stderr), self.assertRaises(SystemExit) as stopped:
+            review.run_plan_exchange(members, self.plan.read_text(), [CLAIM], 1)
+        self.assertEqual(stopped.exception.code, 4)
+        transport.assert_not_called()
+        self.assertEqual(self.requests, {})
+        self.assertIn('REVIEW_ERROR', stderr.getvalue())
+        self.assertIn(review.plan_panel_error(members), stderr.getvalue())
+
+    def test_exchange_same_provider_refused_before_transport(self):
+        self.assert_exchange_panel_refused([
+            MEMBERS[0], dict(MEMBERS[1], provider=MEMBERS[0]['provider'])])
+
+    def test_exchange_other_invalid_panels_refused_before_transport(self):
+        for members in ([], MEMBERS[:1], MEMBERS + [dict(MEMBERS[0], name='gamma')],
+                        [MEMBERS[0], dict(MEMBERS[1], name=MEMBERS[0]['name'])]):
+            with self.subTest(members=members):
+                self.assert_exchange_panel_refused(members)
+
     def test_cli_uses_joint_verdict_in_plan_owner(self):
         self.finding()
         with mock.patch.object(plan_review, 'joint_plan_verdict',
@@ -154,8 +175,8 @@ class TestPlanExchange(unittest.TestCase):
             code, report, _ = self.run_cli()
         self.assertEqual((code, report['state']), (0, 'PLAN_PASS'))
         decide.assert_called_once()
-        names, first, second, claims, truncated = decide.call_args.args
-        self.assertEqual(names, ['alpha', 'beta'])
+        members, first, second, claims, truncated = decide.call_args.args
+        self.assertEqual(members, MEMBERS)
         self.assertEqual(first, self.first)
         self.assertEqual(second, self.second)
         self.assertEqual(claims, [CLAIM])
@@ -609,9 +630,29 @@ class TestJointPlanPanel(unittest.TestCase):
 
     def test_one_seat_is_unavailable(self):
         self.assertEqual(review.joint_plan_verdict(
-            ['alpha'], {'alpha': answer()},
+            MEMBERS[:1], {'alpha': answer()},
             {'alpha': dict(answer(), own_findings=[], peer_responses=[])}, [CLAIM]),
             ('REVIEW_UNAVAILABLE', []))
+
+    def test_same_provider_is_unavailable(self):
+        members = [MEMBERS[0], dict(MEMBERS[1], provider=MEMBERS[0]['provider'])]
+        first = {m['name']: answer() for m in members}
+        second = {n: dict(answer(), own_findings=[], peer_responses=[]) for n in first}
+        self.assertEqual(review.joint_plan_verdict(members, first, second, [CLAIM]),
+                         ('REVIEW_UNAVAILABLE', []))
+
+    def test_other_invalid_panels_are_unavailable(self):
+        for members in (MEMBERS + [dict(MEMBERS[0], name='gamma')],
+                        [MEMBERS[0], dict(MEMBERS[1], name=MEMBERS[0]['name'])],
+                        ['alpha', 'beta'],
+                        [MEMBERS[0], {'name': 'beta'}]):
+            with self.subTest(members=members):
+                names = [m['name'] if isinstance(m, dict) else m for m in members]
+                first = {n: answer() for n in names}
+                second = {n: dict(answer(), own_findings=[], peer_responses=[])
+                          for n in names}
+                self.assertEqual(review.joint_plan_verdict(members, first, second, [CLAIM]),
+                                 ('REVIEW_UNAVAILABLE', []))
 
     def test_both_seats_must_complete_both_turns(self):
         for turn in (1, 2):
@@ -622,7 +663,7 @@ class TestJointPlanPanel(unittest.TestCase):
                               for n in first}
                     del (first if turn == 1 else second)[seat]
                     self.assertEqual(review.joint_plan_verdict(
-                        ['alpha', 'beta'], first, second, [CLAIM]),
+                        MEMBERS, first, second, [CLAIM]),
                         ('REVIEW_UNAVAILABLE', []))
 
 

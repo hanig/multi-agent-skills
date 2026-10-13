@@ -80,7 +80,7 @@ def plan_schema_error(verdict, claims, own_ids=None, peer_ids=None):
     return None
 
 
-def joint_plan_verdict(names, first, second, claims, truncated=False):
+def joint_plan_verdict(members, first, second, claims, truncated=False):
     """Decide from both final answers; preserve refutations, never vote on prose.
 
     Defense is the author's explicit turn-2 argument, not an inferred match
@@ -89,8 +89,10 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
     """
     from review import norm, unassessed_claims
 
-    if (len(names) != 2 or len(set(names)) != 2
-            or set(first) != set(names) or set(second) != set(names)):
+    if plan_panel_error(members):
+        return "REVIEW_UNAVAILABLE", []
+    names = [m["name"] for m in members]
+    if set(first) != set(names) or set(second) != set(names):
         return "REVIEW_UNAVAILABLE", []
     severity_order = {"minor": 0, "major": 1, "critical": 2}
     table = []
@@ -143,9 +145,12 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
 
 def run_plan_exchange(members, prompt, claims, timeout, truncated=False):
     """Use committee conversations for two turns, with no schema repair turn."""
-    from review import PLAN_SYSTEM, parse_verdict
+    from review import PLAN_SYSTEM, config_error, parse_verdict
     import committee
 
+    panel_error = plan_panel_error(members)
+    if panel_error:
+        config_error(panel_error)
     names = [m["name"] for m in members]
     session = {"members": {m["name"]: {"provider": m["provider"], "model": m["model"],
                                        "history": [], "answers": []} for m in members},
@@ -184,7 +189,7 @@ def run_plan_exchange(members, prompt, claims, timeout, truncated=False):
                 prompts[name] = plan_cross_prompt(
                     name, peer, plan_finding_ids(name, first[name]),
                     plan_finding_ids(peer, first[peer]), results[peer][0]) + committee.NO_EDITS
-    state, session["joint_table"] = joint_plan_verdict(names, first, second, claims, truncated)
+    state, session["joint_table"] = joint_plan_verdict(members, first, second, claims, truncated)
     completed = [{**second[name], "name": name,
                   "findings": [row["finding"] for row in session["joint_table"]
                                if row["author"] == name
@@ -195,6 +200,10 @@ def run_plan_exchange(members, prompt, claims, timeout, truncated=False):
 
 def plan_panel_error(members):
     """Check the effective plan seats after selection and author exclusion."""
+    if any(not isinstance(m, dict)
+           or any(not isinstance(m.get(key), str) or not m[key]
+                  for key in ("name", "provider")) for m in members):
+        return "plan reviewers require nonempty name and provider strings."
     names = ", ".join(sorted(r["name"] for r in members)) or "none"
     if len(members) != 2:
         return (
