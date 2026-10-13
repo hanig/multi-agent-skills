@@ -18,8 +18,8 @@ from unittest import mock
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'skills' / 'hanig-review-gate' / 'scripts'))
 import committee
-import plan_review
 import review
+plan_review = review._load_plan_review()
 
 CLAIM = 'The design preserves every input record in its original order.'
 FINDING = {'severity': 'major', 'confidence': 'high', 'file': 'plan.md',
@@ -182,7 +182,7 @@ class TestPlanExchange(unittest.TestCase):
 
     def test_cli_uses_joint_verdict_in_plan_owner(self):
         self.finding()
-        with mock.patch.object(review, '_joint_plan_verdict',
+        with mock.patch.object(plan_review, '_joint_plan_verdict',
                                wraps=plan_review._joint_plan_verdict) as decide:
             code, report, _ = self.run_cli()
         self.assertEqual((code, report['state']), (0, 'PLAN_PASS'))
@@ -213,14 +213,15 @@ def load(name):
     spec.loader.exec_module(subject)
     return subject
 subject = load('file_review')
-owner = sys.modules['plan_review']
+owner = subject._load_plan_review()
+assert sys.modules['_hanig_review_gate_plan_review'] is owner
 assert Path(owner.__file__).resolve() == scripts / 'plan_review.py'
-assert load('second_file_review')._run_plan_exchange is owner._run_plan_exchange
+assert load('second_file_review')._load_plan_review() is owner
 sys.path.insert(0, str(repo))
 from tests.test_plan_review import TestPlanExchange, MEMBERS, CLAIM
 import committee, review
-assert review._run_plan_exchange is subject._run_plan_exchange
-assert committee.R._run_plan_exchange is owner._run_plan_exchange
+assert review._load_plan_review() is owner
+assert committee.R._load_plan_review() is owner
 case = TestPlanExchange()
 case.setUp()
 try:
@@ -630,7 +631,7 @@ finally:
                 # This parses and has findings, but lacks verdict and claim coverage.
                 self.raw = {(seat, turn): json.dumps({'findings': [],
                             'own_findings': [], 'peer_responses': []})}
-                with mock.patch.object(review, '_joint_plan_verdict',
+                with mock.patch.object(plan_review, '_joint_plan_verdict',
                                        wraps=plan_review._joint_plan_verdict) as decide:
                     code, report, _ = self.run_cli()
                 self.assertEqual((code, report['state']), (2, 'REVIEW_UNAVAILABLE'))
@@ -683,7 +684,7 @@ finally:
 
 
 class TestJointPlanPanel(unittest.TestCase):
-    def test_only_command_is_public_and_review_imports_only_its_helpers(self):
+    def test_only_command_is_public_and_helpers_stay_in_plan_module(self):
         self.assertTrue(callable(review.cmd_plan_review))
         for name in ('MIN_PLAN_REFUTATION_CHARS', 'plan_finding_ids',
                      'plan_finding_text', 'plan_cross_prompt', 'plan_schema_error',
@@ -693,7 +694,8 @@ class TestJointPlanPanel(unittest.TestCase):
                 self.assertFalse(hasattr(plan_review, name))
         for name in ('_joint_plan_verdict', '_run_plan_exchange',
                      '_plan_panel_error', '_plan_schema_error'):
-            self.assertIs(getattr(review, name), getattr(plan_review, name))
+            self.assertFalse(hasattr(review, name))
+            self.assertTrue(callable(getattr(plan_review, name)))
         for name in ('_MIN_PLAN_REFUTATION_CHARS', '_plan_finding_ids',
                      '_plan_finding_text', '_plan_cross_prompt'):
             self.assertFalse(hasattr(review, name))

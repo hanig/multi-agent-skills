@@ -463,7 +463,9 @@ failing in either turn, including an unusable or incomplete answer, gives
 plan-review entry used by the CLI. It validates the panel and supplies the
 schema validator for every answer collected by the private exchange before
 computing a verdict. The exchange, verdict and helpers in `plan_review.py`
-are private; `review.py` imports only those it needs internally. The private
+are private; `review.py` loads that sibling by path under the private name
+`_hanig_review_gate_plan_review` only on the plan path. Its shared loader
+caches the module and refuses a private cache entry from another path. The private
 verdict independently validates the panel, both turn-1 schemas and both
 turn-2 schemas (including finding-ID coverage), refusing incomplete input
 even if a caller omitted validation. JSON and the journal retain both turns per seat,

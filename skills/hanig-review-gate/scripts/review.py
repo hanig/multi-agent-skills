@@ -2970,12 +2970,22 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
 
 
 # --- bounded collaborative plan review -------------------------------------
-# File-path loaders need the shipped siblings too. Normal import caches one
-# plan_review object in sys.modules for the facade, committee and tests.
-sys.path.insert(0, str(HERE))
-from plan_review import (
-    _joint_plan_verdict, _plan_panel_error, _plan_schema_error, _run_plan_exchange,
-)
+def _load_plan_review():
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "plan_review.py"
+    name = "_hanig_review_gate_plan_review"
+    if name in sys.modules:
+        module = sys.modules[name]
+        if getattr(module, "__file__", None) != str(path):
+            raise ImportError(f"{name} is not loaded from {path}")
+        return module
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules[name] = module
+    sys.path.insert(0, str(path.parent))
+    return module
 
 PLAN_SYSTEM = SYSTEM + """
 
@@ -2990,7 +3000,8 @@ The final verdict is computed by code, not by either seat.
 
 def cmd_plan_review(args, members, prompt, label, truncated, profile_reason, excluded):
     """The public plan-review entry; validate every answer before joint judgment."""
-    panel_error = _plan_panel_error(members)
+    plan = _load_plan_review()
+    panel_error = plan._plan_panel_error(members)
     if panel_error:
         disarm_watchdog()
         print(f"error: {panel_error}", file=sys.stderr)
@@ -3003,9 +3014,9 @@ def cmd_plan_review(args, members, prompt, label, truncated, profile_reason, exc
         state, exchange, completed = "REVIEW_UNAVAILABLE", {
             "members": {}, "turns": [], "joint_table": []}, []
     else:
-        exchange, first, second = _run_plan_exchange(
-            members, prompt, args.claim, args.timeout, validate=_plan_schema_error)
-        state, exchange["joint_table"] = _joint_plan_verdict(
+        exchange, first, second = plan._run_plan_exchange(
+            members, prompt, args.claim, args.timeout, validate=plan._plan_schema_error)
+        state, exchange["joint_table"] = plan._joint_plan_verdict(
             members, first, second, args.claim, truncated)
         completed = [] if state == "REVIEW_UNAVAILABLE" else [
             {**second[m["name"]], "name": m["name"],
@@ -3302,15 +3313,10 @@ def _main():
             else:
                 print("REVIEW_UNAVAILABLE — " + reason)
             sys.exit(STATES["REVIEW_UNAVAILABLE"])
-    # --- validate the EFFECTIVE panel -------------------------------------
-    # Every earlier version of this checked the panel BEFORE selection, so
-    # `--plan --only a,b,c` ran three reviewers and `--plan --only x --quorum 1`
-    # ran one. A rule applied to the intended panel and not the actual one is
-    # not enforcement (sol). This runs after --only, --profile and enabled
-    # state, and before any reviewer is called.
+    # Validate the effective panel after selection, before dispatch.
     if args.kind == "plan" and not args.list:
         runnable = [r for r in reviewers if r.get("enabled", True)]
-        panel_error = _plan_panel_error(runnable)
+        panel_error = _load_plan_review()._plan_panel_error(runnable)
         if panel_error:
             config_error(panel_error)
         if args.quorum != 2:
