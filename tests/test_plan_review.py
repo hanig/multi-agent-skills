@@ -134,6 +134,10 @@ class TestPlanExchange(unittest.TestCase):
         self.assert_direct_panel_refused([
             MEMBERS[0], dict(MEMBERS[1], provider=MEMBERS[0]['provider'])])
 
+    def test_direct_duplicate_seat_names_refused_before_transport(self):
+        self.assert_direct_panel_refused([
+            MEMBERS[0], dict(MEMBERS[1], name=MEMBERS[0]['name'])])
+
     def test_refuted_finding_dropped_and_both_texts_recorded(self):
         self.finding()
         code, report, _ = self.run_cli()
@@ -199,14 +203,85 @@ class TestPlanExchange(unittest.TestCase):
                 self.assertEqual(row['response'], response)
                 self.assertEqual(report['results'][0]['findings'], [FINDING])
 
-    def test_restated_refuted_finding_stands_and_fails(self):
+    def test_restated_refuted_finding_merges_and_is_dropped(self):
         self.finding()
         self.second['alpha']['findings'] = [copy.deepcopy(FINDING)]
         code, report, _ = self.run_cli()
-        self.assertEqual((code, report['state']), (1, 'PLAN_FAIL'))
+        self.assertEqual((code, report['state']), (0, 'PLAN_PASS'))
         table = report['plan_exchange']['joint_table']
-        self.assertEqual([row['outcome'] for row in table], ['refuted', 'standing'])
+        self.assertEqual([row['outcome'] for row in table], ['refuted', 'restated'])
         self.assertEqual(table[1]['finding'], FINDING)
+        self.assertEqual(table[1]['restated_finding_id'], 'alpha:1')
+        self.assertEqual(table[1]['response_outcome'], 'refuted')
+        self.assertEqual(table[1]['response'], self.second['beta']['peer_responses'][0])
+        self.assertEqual(report['results'][0]['findings'], [])
+        self.assertEqual(self.journal(report)['plan_exchange'], report['plan_exchange'])
+        self.assertEqual(len(self.requests), 4)
+
+    def test_restated_text_normalization_is_exact_and_closed(self):
+        original = dict(FINDING, summary='Caf\u00e9 STRASSE sorts records.',
+                        failure_scenario='Input B,A becomes A,B.')
+        for summary, scenario, merged in (
+                ('  CAFE\u0301 stra\u00dfe\t sorts\nrecords. ',
+                 '\n INPUT\t B,A   becomes A,B. ', True),
+                ('Caf\u00e9 STRASSE sorts records!', original['failure_scenario'], False),
+                ('Cafe STRASSE sorts records.', original['failure_scenario'], False),
+                ('Caf\u00e9 STRASSE rearranges records.', original['failure_scenario'], False),
+                (original['summary'], 'Input C,B becomes B,C.', False),
+                ('\uff23af\u00e9 STRASSE sorts records.', original['failure_scenario'], False)):
+            with self.subTest(summary=summary, scenario=scenario):
+                self.finding()
+                self.first['alpha']['findings'] = [original]
+                restated = dict(original, summary=summary, failure_scenario=scenario)
+                self.second['alpha']['findings'] = [restated]
+                code, report, _ = self.run_cli()
+                self.assertEqual((code, report['state']),
+                                 (0, 'PLAN_PASS') if merged else (1, 'PLAN_FAIL'))
+                row = report['plan_exchange']['joint_table'][1]
+                self.assertEqual(row['outcome'], 'restated' if merged else 'standing')
+                self.assertEqual(row['finding'], restated)
+
+    def test_restated_finding_retains_original_response_outcome(self):
+        for response, defense, reason, outcome in (
+                ('concur', '', 'The ordering concern remains applicable.', 'standing'),
+                ('refine', '', 'Only duplicate keys reorder records.', 'standing'),
+                ('refute', '', 'No.', 'refutation_too_short'),
+                ('refute', 'The plan separately sorts duplicate keys.',
+                 'The plan explicitly retains input order and never sorts.', 'standing')):
+            with self.subTest(response=response, defense=defense):
+                self.finding(response, defense, kept=bool(defense))
+                self.second['beta']['peer_responses'][0]['text'] = reason
+                self.second['alpha']['findings'] = [copy.deepcopy(FINDING)]
+                code, report, _ = self.run_cli()
+                self.assertEqual((code, report['state']), (1, 'PLAN_FAIL'))
+                table = report['plan_exchange']['joint_table']
+                self.assertEqual(table[0]['outcome'], outcome)
+                self.assertEqual(table[1]['outcome'], 'restated')
+                self.assertEqual(table[1]['response_outcome'], outcome)
+                self.assertEqual(report['results'][0]['findings'], [FINDING])
+
+    def test_peer_finding_is_not_merged_as_own_restatement(self):
+        self.finding()
+        self.second['beta']['findings'] = [copy.deepcopy(FINDING)]
+        code, report, _ = self.run_cli()
+        self.assertEqual((code, report['state']), (1, 'PLAN_FAIL'))
+        row = report['plan_exchange']['joint_table'][1]
+        self.assertEqual((row['author'], row['outcome']), ('beta', 'standing'))
+        self.assertIsNone(row['response'])
+
+    def test_nontext_finding_fields_are_not_restatement_keys(self):
+        for field in ('summary', 'failure_scenario'):
+            for value in (None, [], {}):
+                with self.subTest(field=field, value=value):
+                    self.finding()
+                    finding = dict(FINDING, severity='minor', **{field: value})
+                    self.first['alpha']['findings'] = [finding]
+                    self.second['alpha']['findings'] = [finding]
+                    code, report, _ = self.run_cli()
+                    self.assertEqual((code, report['state']), (0, 'PLAN_PASS'))
+                    self.assertEqual(report['plan_exchange']['joint_table'][1]['outcome'],
+                                     'standing')
+                    self.assertEqual(report['results'][0]['findings'], [finding])
 
     def test_concurred_finding_stands(self):
         self.finding('concur', kept=True)

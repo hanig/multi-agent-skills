@@ -428,9 +428,22 @@ Refuted findings remain in the table with the original finding, author
 position and peer response. A claim is upheld only if both seats mark it
 `supported` after turn 2.
 
-Declared limits: a seat that restates its own refuted turn-1 finding as a new
-turn-2 finding has defended it. The restatement stands; a major or critical
-restatement yields `PLAN_FAIL`. Code follows the response enum (`concur`,
+An own turn-2 finding with the same normalized summary and failure scenario
+as an own turn-1 finding is merged into that original finding. Each text field
+is normalized by Unicode NFC, casefold, collapsing whitespace runs to one space,
+and stripping surrounding whitespace, in that order. Nothing else counts as
+equal. The first matching own turn-1 finding supplies the peer response and
+outcome; all original findings retain their independent responses. The joint
+table keeps the merged row with outcome `restated`, `restated_finding_id` and
+`response_outcome`. It adds no finding to the verdict or final findings list.
+A paraphrase remains a new, unrefuted finding.
+
+Any standing major or critical finding produces PLAN_FAIL,
+including a new turn-2 finding, which receives no peer response. A false
+positive can therefore fail a sound plan. A defended or paraphrased
+finding also stands. Plan review fails closed.
+
+Declared limit: code follows the response enum (`concur`,
 `refute`, `refine`), never the prose: a `concur` whose explanation contradicts
 it still counts as concurrence, and the explanation stays in the record.
 
@@ -443,3 +456,7 @@ unless exactly two seats completed both turns. JSON and the journal retain both 
 the joint table and token usage; text output displays them too. Verbatim peer
 delivery happens before report/journal credential redaction. Implementation
 reviews retain their existing stateless behavior and confirmation filter.
+
+Both the CLI and direct plan command require exactly two uniquely named seats
+from different providers. An invalid panel returns `REVIEW_ERROR` (exit 4)
+before any provider call.

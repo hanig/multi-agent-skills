@@ -78,6 +78,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -2987,6 +2988,15 @@ def plan_finding_ids(seat, verdict):
     return [f"{seat}:{i + 1}" for i in range(len(verdict["findings"]))]
 
 
+def plan_finding_text(finding):
+    """Compare summary and failure scenario using only the declared normalization."""
+    texts = [finding.get(field) for field in ("summary", "failure_scenario")]
+    if any(not isinstance(text, str) for text in texts):
+        return None
+    return tuple(" ".join(unicodedata.normalize("NFC", text).casefold().split())
+                 for text in texts)
+
+
 def plan_cross_prompt(own, peer, own_ids, peer_ids, peer_text):
     return (
         "TURN 2: cross-examination. No third turn follows. Return the existing "
@@ -3060,6 +3070,7 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
         peer = next(n for n in names if n != author)
         own = {e["finding_id"]: e for e in second[author]["own_findings"]}
         responses = {e["finding_id"]: e for e in second[peer]["peer_responses"]}
+        originals = {}
         for fid, finding in zip(plan_finding_ids(author, first[author]),
                                 first[author]["findings"]):
             position, response = own[fid], responses[fid]
@@ -3074,7 +3085,17 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
             table.append({"finding_id": fid, "finding": finding, "author": author,
                           "author_position": position, "other_seat": peer,
                           "response": response, "outcome": outcome})
+            text = plan_finding_text(finding)
+            if text is not None:
+                originals.setdefault(text, table[-1])
         for i, finding in enumerate(second[author]["findings"]):
+            original = originals.get(plan_finding_text(finding))
+            if original is not None:
+                table.append({**original, "finding_id": f"{author}:new:{i + 1}",
+                              "finding": finding, "outcome": "restated",
+                              "restated_finding_id": original["finding_id"],
+                              "response_outcome": original["outcome"]})
+                continue
             table.append({"finding_id": f"{author}:new:{i + 1}", "finding": finding,
                           "author": author, "author_position": None,
                           "other_seat": peer, "response": None, "outcome": "standing"})
@@ -3082,7 +3103,7 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
     # to support: an extra contradictory assessment cannot hide behind a match.
     upheld = all(all(norm(c["status"]) == "supported" for c in second[n]["claims"])
                  and not unassessed_claims(second[n]["claims"], claims) for n in names)
-    blocking = any(row["outcome"] != "refuted"
+    blocking = any(row["outcome"] not in ("refuted", "restated")
                    and norm(row["finding"]["severity"]) in ("major", "critical")
                    for row in table)
     return ("PLAN_PASS" if upheld and not blocking and not truncated else "PLAN_FAIL"), table
@@ -3133,7 +3154,8 @@ def run_plan_exchange(members, prompt, claims, timeout, truncated=False):
     state, session["joint_table"] = joint_plan_verdict(names, first, second, claims, truncated)
     completed = [{**second[name], "name": name,
                   "findings": [row["finding"] for row in session["joint_table"]
-                               if row["author"] == name and row["outcome"] != "refuted"]}
+                               if row["author"] == name
+                               and row["outcome"] not in ("refuted", "restated")]}
                  for name in names]
     return state, session, completed
 
@@ -3152,6 +3174,8 @@ def plan_panel_error(members):
             f"the two plan reviewers ({names}) share a provider, so they "
             f"can share a failure mode. Contrasting means different "
             f"providers. Name one from each.")
+    if len({r["name"] for r in members}) != 2:
+        return f"the two plan reviewers ({names}) must have unique seat names."
     return None
 
 
