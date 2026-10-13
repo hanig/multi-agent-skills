@@ -225,12 +225,12 @@ class CommitIdentityTests(unittest.TestCase):
 
         with mock.patch.object(S, "_allocate", side_effect=allocate), \
                 mock.patch.object(
-                    S, "_resolve_dispatch_target",
+                    SP, "_resolve_dispatch_target",
                     wraps=S._resolve_dispatch_target) as resolve, \
                 mock.patch.object(S.SS, "renew_lease", return_value=True), \
                 mock.patch.object(S, "_bind", return_value=None), \
                 mock.patch.object(
-                    S, "_git_push_destination",
+                    SP, "_git_push_destination",
                     wraps=S._git_push_destination) as remote_query:
             result = S.advance(
                 plan, state, str(self.tmp / "once-state"),
@@ -291,7 +291,7 @@ class CommitIdentityTests(unittest.TestCase):
 
         with mock.patch.object(SP, "_plan_workspace",
                                side_effect=workspace_spelling), \
-                mock.patch.object(S, "_git_push_destination",
+                mock.patch.object(SP, "_git_push_destination",
                                   side_effect=moving_target), \
                 mock.patch.object(S, "_allocate", side_effect=allocate), \
                 mock.patch.object(S.SS, "renew_lease", return_value=True), \
@@ -327,7 +327,7 @@ class CommitIdentityTests(unittest.TestCase):
                  dict(self.plan["units"][0], repo=str(other)),
                  dict(self.plan["units"][0], target_branch="release")]
         cache = {}
-        with mock.patch.object(S, "_resolve_dispatch_target",
+        with mock.patch.object(SP, "_resolve_dispatch_target",
                                wraps=S._resolve_dispatch_target) as resolve:
             for unit in units:
                 target, problem = S._dispatch_target_for_advance(unit, cache)
@@ -453,7 +453,7 @@ class CommitIdentityTests(unittest.TestCase):
                 "PATH": str(fakebin) + os.pathsep + os.environ["PATH"]}), \
                 mock.patch.object(S.SS, "renew_lease", return_value=True), \
                 mock.patch.object(SE, "_check", wraps=SE._check) as check, \
-                mock.patch.object(S, "_resolve_dispatch_target",
+                mock.patch.object(SP, "_resolve_dispatch_target",
                                   side_effect=AssertionError("rechecked target")):
             result = S.advance(self.plan, state, str(state_dir),
                                str(self.tmp / "legacy-runs"), False)

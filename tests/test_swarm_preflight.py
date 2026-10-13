@@ -20,6 +20,21 @@ DEFS = (
     "_inside_dir", "_output_destinations", "_claim_dir", "_claim_liveness",
     "_claim_refusal", "_claim_record", "_own_claim", "_take_output_claims",
     "_drop_claims", "_release_output_claims", "_note_claimed_attempt",
+    "_code_worktree_names",
+    "_git_worktrees_on_branch",
+    "_stash_refusal",
+    "_stash_preflight",
+    "_repeat_stash_preflight",
+    "_git_push_destination",
+    "_exact_remote_ref_head",
+    "_dispatch_base_refusal",
+    "_resolve_dispatch_target",
+    "_dispatch_source_identity",
+    "_dispatch_target_for_advance",
+    "_installed_skill_source_version",
+    "_installed_skill_snapshot",
+    "_warn_installed_skill_drift",
+    "_seed_reachability_problem",
 )
 CONSTS = (
     "OUTPUT_CLAIMS_DIRNAME", "CLAIM_FILE", "CLAIM_LIVE", "CLAIM_FREE",
@@ -62,11 +77,31 @@ class TestPreflightExtraction(unittest.TestCase):
         consumers = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
                      and isinstance(n.value, ast.Name) and n.value.id == "SP"}
         self.assertEqual(consumers, {
-            "DRY_PREFIX", "PreflightRefusal", "_dirty_refusal",
-            "_execution_workspace", "_git", "_inside_dir",
-            "_note_claimed_attempt", "_plan_workspace", "_release_output_claims",
-            "_repeat_launch_preflight", "_requires_clean_workspace",
-            "_take_output_claims", "_unattended_mode_example",
+            "DRY_PREFIX",
+            "PreflightRefusal",
+            "_code_worktree_names",
+            "_dirty_refusal",
+            "_dispatch_base_refusal",
+            "_dispatch_source_identity",
+            "_dispatch_target_for_advance",
+            "_execution_workspace",
+            "_git",
+            "_git_push_destination",
+            "_git_worktrees_on_branch",
+            "_inside_dir",
+            "_installed_skill_snapshot",
+            "_note_claimed_attempt",
+            "_plan_workspace",
+            "_release_output_claims",
+            "_repeat_launch_preflight",
+            "_repeat_stash_preflight",
+            "_requires_clean_workspace",
+            "_resolve_dispatch_target",
+            "_seed_reachability_problem",
+            "_stash_preflight",
+            "_take_output_claims",
+            "_unattended_mode_example",
+            "_warn_installed_skill_drift",
         })
         self.assertEqual(bare, [], "facade bypasses patches")
 
@@ -99,7 +134,9 @@ class TestPreflightExtraction(unittest.TestCase):
                         offenders.append((path.name, node.lineno, target, name))
                     if target in owners | {"swarm_preflight", "S.SP", "self.S.SP"}:
                         owner_patches.add(name)
-        self.assertTrue({"_git", "_plan_workspace", "_release_output_claims"} <= owner_patches)
+        self.assertTrue({"_git", "_plan_workspace", "_release_output_claims",
+                         "_resolve_dispatch_target", "_installed_skill_snapshot",
+                         "_stash_preflight", "_git_push_destination"} <= owner_patches)
         self.assertEqual(offenders, [])
 
     def test_standalone_offline_import(self):

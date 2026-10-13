@@ -75,6 +75,21 @@ from swarm_preflight import (
     _drop_claims, _release_output_claims, _note_claimed_attempt,
     OUTPUT_CLAIMS_DIRNAME, CLAIM_FILE, CLAIM_LIVE, CLAIM_FREE, CLAIM_UNKNOWN,
     DRY_PREFIX,
+    _code_worktree_names,
+    _git_worktrees_on_branch,
+    _stash_refusal,
+    _stash_preflight,
+    _repeat_stash_preflight,
+    _git_push_destination,
+    _exact_remote_ref_head,
+    _dispatch_base_refusal,
+    _resolve_dispatch_target,
+    _dispatch_source_identity,
+    _dispatch_target_for_advance,
+    _installed_skill_source_version,
+    _installed_skill_snapshot,
+    _warn_installed_skill_drift,
+    _seed_reachability_problem,
 )
 from swarm_plan_rules import (
     _unquoted_shell_syntax,
@@ -1810,7 +1825,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 except PlanError as exc:
                     anchor_err = str(exc)
                 else:
-                    anchor_err = (_seed_reachability_problem(
+                    anchor_err = (SP._seed_reachability_problem(
                         seed, existing_intent["repo"],
                         existing_intent.get("repository_remote_raw"),
                         existing_intent.get("repository_remote")))
@@ -1818,13 +1833,13 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             # Recheck admission, but never migrate an existing intent or ask
             # this question while judging an already-launched attempt.
             if not anchor_err and dispatch_source is None:
-                target, anchor_err = _resolve_dispatch_target(u)
+                target, anchor_err = SP._resolve_dispatch_target(u)
                 if not anchor_err:
-                    dispatch_source, anchor_err = _dispatch_source_identity(
+                    dispatch_source, anchor_err = SP._dispatch_source_identity(
                         u, target)
             if (not anchor_err and existing_intent["base_commit"] !=
                     dispatch_source["target_commit"]):
-                anchor_err = _dispatch_base_refusal(
+                anchor_err = SP._dispatch_base_refusal(
                     u.get("id"), dispatch_source["repo"],
                     f"recorded launch base {existing_intent['base_commit']} "
                     f"differs from resolved target "
@@ -1837,7 +1852,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             # base is never recaptured or re-trusted here, only the CURRENT
             # condition re-asked.
             if not anchor_err:
-                anchor_err = _repeat_stash_preflight(u)
+                anchor_err = SP._repeat_stash_preflight(u)
             anchored_base = (None if anchor_err else {
                 "base": existing_intent["base_commit"],
                 "intent": existing_intent,
@@ -1849,7 +1864,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             return None, anchor_err
         # One warning point for cached/uncached sources and restored intents.
         # Keep it outside their branches so every code snapshot is reported.
-        _warn_installed_skill_drift(
+        SP._warn_installed_skill_drift(
             anchored_base["intent"].get("installed_skills"),
             anchored_base["base"], u.get("id"))
     elif SP._requires_clean_workspace(u):
@@ -2088,7 +2103,7 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
                 if state_dir is not None:
                     SS.save_state(state_dir, state)
                 return str(existing_agent), None
-            candidates = _git_worktrees_on_branch(
+            candidates = SP._git_worktrees_on_branch(
                 source_repo, intent["branch"])
             if not candidates or len(candidates) != 1:
                 return None, (
@@ -2300,427 +2315,6 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
 LAUNCH_RECORD = "launch.json"
 
 
-def _code_worktree_names(unit_dir):
-    """Name coordinator/Git resources from the random attempt id."""
-    attempt = Path(unit_dir).name
-    return attempt, f"swarm-{attempt}"
-
-
-def _git_worktrees_on_branch(repo, branch):
-    """Return worktree roots Git associates with one exact local branch."""
-    rc, out, _ = SP._git(repo, "worktree", "list", "--porcelain")
-    if rc != 0:
-        return None
-    wanted = f"refs/heads/{branch}"
-    found = []
-    current = None
-    for line in (out + "\n").splitlines():
-        if line.startswith("worktree "):
-            current = line[len("worktree "):]
-        elif line == f"branch {wanted}" and current:
-            found.append(str(Path(current).resolve()))
-        elif not line:
-            current = None
-    return found
-
-
-def _stash_refusal(uid, repo, entries):
-    """ARC-243, at second zero, in the same shape as C10's dirty refusal.
-
-    The dirty index of the source checkout is deliberately NOT checked here,
-    for the reason the docstring below gives: it cannot reach a worktree made
-    from an object id. THE STASH STACK IS DIFFERENT, and that is the whole
-    reason this refusal exists. It is one ref in the shared common Git
-    directory, so it is visible and mutable from the fresh attempt worktree
-    too -- it crosses the isolation boundary every other part of the
-    code-unit design rests on. If the stack is non-empty at second zero, the
-    agent's worktree is not isolated with respect to it before the agent has
-    run a single command.
-
-    This does NOT stop an agent creating a stash mid-run; nothing at dispatch
-    can. What it stops is a run STARTING on top of somebody else's parked
-    work, which is the case where recovery is hardest because nobody knows
-    the entry is there to look for.
-    """
-    lines = [
-        f"unit {uid!r}: launch preflight refused source checkout "
-        f"{str(repo)!r}; its `git stash` stack holds {len(entries)} "
-        f"entry/entries:"]
-    lines += [f"  {line}" for line in entries[:10]]
-    if len(entries) > 10:
-        lines.append(f"  ... and {len(entries) - 10} more")
-    lines.append(
-        "The stack is a SINGLE ref in the shared common Git directory, so it "
-        "is shared with every worktree of this repository, including the one "
-        "this attempt would be given. Three agents lost work to that in one "
-        "window: each popped an entry another had pushed.")
-    lines.append(
-        "Deal with the parked work first -- `git stash list` to see it, then "
-        "apply or drop each entry -- and the next advance dispatches this "
-        "unit. No retry was charged.")
-    refusal = SP.PreflightRefusal("\n".join(lines))
-    refusal.workspace = str(repo)
-    refusal.dirty_count = 0
-    refusal.reason = "shared-stash-stack"
-    return refusal
-
-
-def _stash_preflight(uid, repo):
-    """The refusal for a non-empty shared stash stack, or None."""
-    rc, stashes, _ = SP._git(repo, "stash", "list")
-    if rc != 0:
-        # Not being able to ask is not an answer, the same rule the output
-        # claims are built on. A checkout whose HEAD reads fine but whose
-        # stash list errors is not a checkout we can call free of parked work.
-        return (f"unit {uid!r}: cannot read the `git stash` stack in "
-                f"{str(repo)!r}, so it cannot be shown to be empty. The stack "
-                f"is shared with every worktree of this repository; refusing "
-                f"rather than assuming it is empty.")
-    entries = [line for line in (stashes or "").splitlines() if line.strip()]
-    return _stash_refusal(uid, repo, entries) if entries else None
-
-
-def _repeat_stash_preflight(u):
-    """Re-ask the stash question without recapturing or trusting an anchor."""
-    repo, err = SP._plan_workspace(u)
-    if err:
-        return err
-    return _stash_preflight(u.get("id"), repo)
-
-
-def _git_push_destination(repo, raw, resolved, remote_index, *args,
-                          timeout=60):
-    """Run a remote command against origin's once-expanded push route."""
-    routed_args = list(args)
-    if (remote_index < 0 or remote_index >= len(routed_args)
-            or routed_args[remote_index] != raw):
-        return 2, "", "internal error: push-route argument is not anchored"
-    alias = "hanig-swarm-route:" + os.urandom(16).hex()
-    routed_args[remote_index] = alias
-    handle = tempfile.NamedTemporaryFile(
-        prefix="hanig-swarm-push-route-", delete=False)
-    config_path = handle.name
-    handle.close()
-    try:
-        rc, out, err = U.run(
-            ["git", "config", "--file", config_path, "--add",
-             f"url.{resolved}.insteadOf", alias], timeout=timeout)
-        if rc != 0:
-            return rc, (out or "").strip(), (err or "").strip()
-        return SP._git(repo, "-c", f"include.path={config_path}", *routed_args,
-                    timeout=timeout)
-    finally:
-        try:
-            os.unlink(config_path)
-        except OSError:
-            pass
-
-
-def _exact_remote_ref_head(listing, ref):
-    """Return the sole valid object id reported for exactly ``ref``."""
-    matches = []
-    for line in listing.splitlines():
-        fields = line.split()
-        if len(fields) == 2 and fields[1] == ref:
-            matches.append(fields[0])
-    if len(matches) != 1:
-        return None
-    head = matches[0]
-    if (len(head) not in (40, 64)
-            or any(c not in "0123456789abcdef" for c in head.lower())):
-        return None
-    return head
-
-
-def _dispatch_base_refusal(uid, repo, message):
-    """Carry a source-identity refusal to the command exit contract."""
-    refusal = SP.PreflightRefusal(f"unit {uid!r}: {message}")
-    refusal.workspace = str(repo)
-    refusal.dirty_count = 0
-    refusal.reason = "dispatch-base"
-    return refusal
-
-
-def _resolve_dispatch_target(u):
-    """Resolve one code unit's target commit without deciding from a branch.
-
-    The caller caches this value for an entire advance. Every launch uses
-    the same immutable commit, even if the remote target moves afterwards.
-    """
-    repo, err = SP._plan_workspace(u)
-    if err:
-        return None, _dispatch_base_refusal(u.get("id"), u.get("repo"), err)
-    repo = str(Path(repo).resolve())
-    target = str(u.get("target_branch") or "").strip()
-    if not target:
-        return None, _dispatch_base_refusal(
-            u.get("id"), repo, "no target_branch was declared")
-    remote_raw, remote, problem = W.remote_push_transport(U.run, repo)
-    if problem:
-        return None, _dispatch_base_refusal(
-            u.get("id"), repo,
-            f"repository has no readable single origin push destination "
-            f"({problem}). Code attempts must push their generated branch "
-            f"to origin")
-    target_ref = f"refs/heads/{target}"
-    rc, listing, remote_err = _git_push_destination(
-        repo, remote_raw, remote, 2, "ls-remote", "--exit-code", remote_raw,
-        target_ref)
-    target_commit = _exact_remote_ref_head(listing, target_ref)
-    if rc != 0 or target_commit is None:
-        detail = remote_err or "no single valid exact-ref answer"
-        return None, _dispatch_base_refusal(
-            u.get("id"), repo,
-            f"cannot resolve origin/{target} before dispatch: {detail[:200]}")
-    return {
-        "repo": repo,
-        "repository_remote": remote,
-        "repository_remote_raw": remote_raw,
-        "target_branch": target,
-        "target_ref": target_ref,
-        "target_commit": target_commit,
-    }, None
-
-
-def _dispatch_source_identity(u, target):
-    """Bind actual launch source to the target commit, irrespective of ref."""
-    repo = target["repo"]
-    rc, head, head_err = SP._git(repo, "rev-parse", "HEAD")
-    if rc != 0:
-        return None, _dispatch_base_refusal(
-            u.get("id"), repo,
-            f"checkout has no readable HEAD: {head_err[:200]}")
-    rc, base_ref, _ = SP._git(repo, "symbolic-ref", "--quiet", "HEAD")
-    if rc != 0:
-        base_ref = None
-        base_branch = "(detached HEAD)"
-    elif base_ref.startswith("refs/heads/"):
-        base_branch = base_ref[len("refs/heads/"):]
-    else:
-        base_branch = base_ref
-    if head != target["target_commit"]:
-        return None, _dispatch_base_refusal(
-            u.get("id"), repo,
-            f"checkout {base_branch!r} at {head} differs from "
-            f"origin/{target['target_branch']} at "
-            f"{target['target_commit']}; launch source must equal the "
-            f"pinned target commit")
-    rc, tree, tree_err = SP._git(repo, "rev-parse", head + "^{tree}")
-    if rc != 0:
-        return None, _dispatch_base_refusal(
-            u.get("id"), repo,
-            f"cannot read the tree of target {head}: {tree_err[:200]}")
-    source = dict(target)
-    source.update({"base_commit": target["target_commit"],
-                   "base_tree": tree})
-    return source, None
-
-
-def _dispatch_target_for_advance(u, cache):
-    """Resolve a target once per advance and return the cached observation."""
-    # A plan may spell its workspace as a subdirectory of the repository.
-    # Key by the same resolved Git root that target resolution and launch use.
-    repo, problem = SP._plan_workspace(u)
-    if problem:
-        return None, _dispatch_base_refusal(
-            u.get("id"), SP._execution_workspace(u), problem)
-    key = (str(Path(repo).resolve()),
-           str(u.get("target_branch") or "").strip())
-    if key not in cache:
-        cache[key] = _resolve_dispatch_target(u)
-    return cache[key]
-
-
-def _installed_skill_source_version(marker):
-    """Read a marker's claim, never installation or execution authority."""
-    fd = None
-    try:
-        fd = os.open(str(marker), os.O_RDONLY | os.O_NONBLOCK)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None, "marker is not a regular file"
-        with os.fdopen(fd, "rb") as stream:
-            fd = None
-            raw = stream.read(65537)
-        if len(raw) > 65536:
-            return None, "marker exceeds 65536 bytes"
-        versions = [line.partition("=")[2]
-                    for line in raw.decode("utf-8").splitlines()
-                    if line.startswith("source_version=")]
-        if len(versions) != 1 or not versions[0]:
-            return None, "marker needs one non-empty source_version"
-        return versions[0], None
-    except (OSError, UnicodeError) as exc:
-        return None, f"{type(exc).__name__}: {exc}"
-    finally:
-        if fd is not None:
-            os.close(fd)
-
-
-def _installed_skill_snapshot(repo, base):
-    """Best-effort audit of ~/.agents/skills and ~/.claude/skills only.
-
-    These are available candidates, not evidence of which skill a worker
-    loads. Loader precedence, project/custom stores and later edits are not
-    observed. Keep each path and raw marker claim, including duplicate names.
-    A symlinked skill store holding a link install can yield the wrong sidecar
-    path (for example after relocation); record an advisory error instead of
-    a version and report it at dispatch. This does not certify installed bytes.
-    """
-    snapshot = {"skills": [], "errors": []}
-    resolved_versions = {}
-    try:
-        home = Path.home()
-    except (OSError, RuntimeError) as exc:
-        snapshot["errors"].append({"path": "~", "error": str(exc)})
-        return snapshot
-    for root in (home / ".agents" / "skills", home / ".claude" / "skills"):
-        try:
-            candidates = sorted(root.iterdir())
-        except FileNotFoundError as exc:
-            # An absent optional store is quiet. A dangling store symlink
-            # still exists as an entry and needs a visible audit error.
-            error = exc
-            try:
-                root.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as probe_error:
-                error = probe_error
-            snapshot["errors"].append({"path": str(root), "error": str(error)})
-            continue
-        except OSError as exc:
-            snapshot["errors"].append({"path": str(root), "error": str(exc)})
-            continue
-        for skill in candidates:
-            if not skill.name.startswith("hanig-"):
-                continue
-            try:
-                if not (skill / "SKILL.md").is_file():
-                    snapshot["errors"].append({
-                        "path": str(skill), "error": "no loadable SKILL.md"})
-                    continue
-                marker = skill / ".installed-by-multi-agent-skills"
-                # Link installs keep provenance beside the destination. This
-                # mirrors the installer's default sidecar naming only; the
-                # recorded claim does not certify ownership or current bytes.
-                # A marker in the linked source describes that source copy,
-                # not this link installation; the sidecar takes precedence.
-                if skill.is_symlink():
-                    destination = skill.parent.resolve() / skill.name
-                    digest = hashlib.sha256(os.fsencode(str(destination)))
-                    marker = (destination.parent / ".multi-agent-skills-provenance"
-                              / f"{skill.name}-{digest.hexdigest()[:24]}.provenance")
-                version, error = _installed_skill_source_version(marker)
-            except (OSError, RuntimeError) as exc:
-                snapshot["errors"].append({"path": str(skill), "error": str(exc)})
-                continue
-            entry = {"skill": skill.name, "path": str(skill),
-                     "marker": str(marker), "source_version": version}
-            if error:
-                entry["error"] = error
-            # Keep the marker's spelling. Search the object namespace only:
-            # revision expressions can instead resolve a hash-named ref.
-            # Equality needs exactly one object, the full pinned base; an
-            # ambiguous or unavailable claim remains advisory uncertainty.
-            # Several skills commonly share one installed revision, so only
-            # resolve each distinct claim once in this dispatch snapshot.
-            if (version and version != base
-                    and re.fullmatch(r"[0-9a-fA-F]{4,64}", version)):
-                if version not in resolved_versions:
-                    rc, resolved, _ = SP._git(repo, "rev-parse",
-                                           "--disambiguate=" + version, timeout=5)
-                    resolved_versions[version] = (
-                        base if rc == 0 and resolved == base else None)
-                if resolved_versions[version] is not None:
-                    entry["resolved_commit"] = resolved_versions[version]
-            snapshot["skills"].append(entry)
-    return snapshot
-
-
-def _warn_installed_skill_drift(snapshot, base, uid):
-    """Report audit observations; never return an admission decision."""
-    observations = []
-    for entry in (snapshot or {}).get("skills", []):
-        version = entry["source_version"]
-        if entry.get("error"):
-            observations.append(
-                f"installed skill audit incomplete at {entry['path']!r}: "
-                f"marker={entry['marker']!r}; {entry['error']!r}.")
-        elif (version is not None and version != base
-                and entry.get("resolved_commit") != base):
-            observations.append(
-                f"installed skill drift check at {entry['path']!r}: "
-                f"source_version={version!r}; attempt base={base!r}. "
-                "Equality was not established.")
-    for error in (snapshot or {}).get("errors", []):
-        observations.append(
-            f"installed skill audit incomplete at {error['path']!r}: "
-            f"{error['error']!r}.")
-    for observation in observations:
-        try:
-            print(f"WARNING: unit {uid!r}: {observation} Only ~/.agents/skills "
-                  "and ~/.claude/skills are scanned; project/custom stores "
-                  "are not scanned; symlinked skill stores may hide "
-                  "link-install sidecars. Advisory only; dispatch continues.",
-                  file=sys.stderr, flush=True)
-        except (OSError, ValueError):
-            # A closed/broken diagnostic stream must not turn this audit
-            # warning into a new dispatch refusal. The snapshot persists.
-            pass
-
-
-def _seed_reachability_problem(seed, repo, raw, remote):
-    """Fetch an exact seed ref and check base <= head <= fetched tip.
-
-    The private temporary ref avoids stale tracking refs and shared FETCH_HEAD
-    as a deciding value. Fetch writes Git metadata only; no index, worktree or
-    attempt branch is changed. Reachability is a point-in-time admission fact,
-    not proof that a worker replayed the seed or that replay has no conflicts.
-    """
-    if seed is None:
-        return None
-    cache_ref = "refs/hanig-swarm-seeds/" + os.urandom(16).hex()
-    problem = None
-    try:
-        rc, _, err = _git_push_destination(
-            repo, raw, remote, 4, "fetch", "--no-tags", "--force",
-            "--recurse-submodules=no", raw, seed["ref"] + ":" + cache_ref,
-            timeout=120)
-        if rc != 0:
-            problem = f"seed.ref {seed['ref']!r} cannot be fetched: {err[:200]}"
-        else:
-            for field in ("base", "head"):
-                rc, kind, _ = SP._git(repo, "cat-file", "-t", seed[field])
-                if rc != 0 or kind != "commit":
-                    problem = f"seed.{field} {seed[field]!r} is not an available commit"
-                    break
-                # Git accepts a unique 40-hex abbreviation in a SHA-256
-                # repository. Syntax alone therefore does not establish a
-                # full object ID. Preserve the input spelling; compare widths.
-                rc, full_id, _ = SP._git(repo, "rev-parse", "--verify", seed[field])
-                if rc != 0 or len(full_id) != len(seed[field]):
-                    problem = f"seed.{field} {seed[field]!r} is not a full commit id in this repository"
-                    break
-            if not problem:
-                for ancestor, descendant in ((seed["base"], seed["head"]),
-                                             (seed["head"], cache_ref)):
-                    rc, _, _ = SP._git(repo, "merge-base", "--is-ancestor",
-                                    ancestor, descendant)
-                    if rc != 0:
-                        problem = (f"seed range {seed['base']}..{seed['head']} "
-                                   f"is not reachable in order from seed.ref {seed['ref']!r}")
-                        break
-    finally:
-        cleanup_rc, _, _ = SP._git(repo, "update-ref", "-d", cache_ref)
-    if cleanup_rc != 0:
-        # The random cache ref is never reused. A leftover metadata ref is
-        # housekeeping, not reachability evidence or a reason to reject work.
-        print(f"WARNING: seed preflight could not remove temporary Git ref "
-              f"{cache_ref!r}; remove it after the competing Git operation "
-              "finishes. The reachability result is unchanged.", file=sys.stderr)
-    return problem
-
-
 def _capture_code_launch(unit_dir, u, dispatch_source=None):
     """Record immutable input to coordinator worktree creation.
 
@@ -2739,7 +2333,7 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
     repo, err = SP._plan_workspace(u)
     if err:
         return err, None
-    stash_problem = _stash_preflight(u.get("id"), repo)
+    stash_problem = SP._stash_preflight(u.get("id"), repo)
     if stash_problem:
         return stash_problem, None
     target = str(u.get("target_branch") or "").strip()
@@ -2747,7 +2341,7 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
         return (f"unit {u.get('id')!r}: no target_branch was declared; "
                 f"refusing to create a source branch for a pull request with "
                 f"no named destination"), None
-    slug, branch = _code_worktree_names(unit_dir)
+    slug, branch = SP._code_worktree_names(unit_dir)
     # The generated source name depends on the attempt id, so plan validation
     # cannot know this collision. Intent construction is the first point that
     # can, and it is still before the coordinator creates a worktree or agent.
@@ -2762,16 +2356,16 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
     repo = str(Path(repo).resolve())
     source = dispatch_source
     if source is None:
-        resolved, problem = _resolve_dispatch_target(u)
+        resolved, problem = SP._resolve_dispatch_target(u)
         if problem:
             return problem, None
-        source, problem = _dispatch_source_identity(u, resolved)
+        source, problem = SP._dispatch_source_identity(u, resolved)
         if problem:
             return problem, None
     if source.get("repo") != repo or source.get("target_branch") != target:
-        return _dispatch_base_refusal(
+        return SP._dispatch_base_refusal(
             u.get("id"), repo, "cached dispatch source names another target"), None
-    seed_problem = _seed_reachability_problem(
+    seed_problem = SP._seed_reachability_problem(
         seed, repo, source["repository_remote_raw"], source["repository_remote"])
     if seed_problem:
         return seed_problem, None
@@ -2783,7 +2377,7 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
     # `url.*.pushInsteadOf` configured they are different repositories, and
     # the attempt will push to the former. Checking the latter for collisions
     # asks the wrong repository and later judges the wrong one too.
-    remote_rc, _remote_head, remote_err = _git_push_destination(
+    remote_rc, _remote_head, remote_err = SP._git_push_destination(
         repo, remote_raw, remote, 2, "ls-remote", "--exit-code", remote_raw,
         f"refs/heads/{branch}")
     if remote_rc == 0:
@@ -2832,7 +2426,7 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         # Audit-only, captured before Paseo runs and persisted with the intent
         # so recovery retains this observation instead of sampling a new one.
-        "installed_skills": _installed_skill_snapshot(repo, head),
+        "installed_skills": SP._installed_skill_snapshot(repo, head),
         # Prompt metadata only, using the same defaults/overrides as _submit.
         # Do not copy into launch facts or use for admission/closure. Missing
         # fields in legacy intents remain unknown; never backfill them.
@@ -4312,10 +3906,10 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         # recovery through the same durable bind protocol as
                         # every other dispatch; do not intercept it merely
                         # because the branch exists.
-                        target, problem = _dispatch_target_for_advance(
+                        target, problem = SP._dispatch_target_for_advance(
                             u, dispatch_targets)
                         if not problem:
-                            source, problem = _dispatch_source_identity(u, target)
+                            source, problem = SP._dispatch_source_identity(u, target)
                         if not problem:
                             recovered_job, problem = _submit(
                                 u, us["attempt_dir"], False, state, state_dir,
@@ -4853,9 +4447,9 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
 
         dispatch_source = None
         if u.get("kind") == "code":
-            target, problem = _dispatch_target_for_advance(u, dispatch_targets)
+            target, problem = SP._dispatch_target_for_advance(u, dispatch_targets)
             if not problem:
-                dispatch_source, problem = _dispatch_source_identity(u, target)
+                dispatch_source, problem = SP._dispatch_source_identity(u, target)
             if problem:
                 report.append(f"{uid}: REFUSING dispatch -- {problem}")
                 dispatch_refusal = str(problem)
