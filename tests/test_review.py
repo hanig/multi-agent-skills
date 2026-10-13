@@ -2447,6 +2447,9 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                 dir=_ensure_module_state_home())).resolve()
             self.addCleanup(shutil.rmtree, self.cycle_root)
             (self.cycle_root / "dispositions.json").write_text("{}")
+        # Protocol checks need complete input, independent of review.py's size.
+        subject = self.cycle_root / "subject.py"
+        subject.write_text("def identity(value):\n    return value\n")
         roster = roster if roster is not None else [
             {"name": "a", "profiles": ["fast", "standard", "deep"]},
             {"name": "b", "profiles": ["fast", "standard", "deep"]},
@@ -2464,7 +2467,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                         "status": "refuted" if failing else "supported",
                         "why": "offline assessment for the panel regression"}]}
 
-        argv = [str(SCRIPT), "--file", str(SCRIPT), "--kind", "implementation",
+        argv = [str(SCRIPT), "--file", str(subject), "--kind", "implementation",
                 "--round", "1", "--claim", review.HONEST_RUN_CLAIM,
                 "--dispositions", str(self.cycle_root / "dispositions.json"),
                 *flags]
@@ -2709,6 +2712,8 @@ class TestFindingDispositions(unittest.TestCase):
     def test_cli_wires_not_reproduced_finding_into_reviewer_prompt(self):
         digest, entry = self.entry()
         path = self.write_dispositions({digest: entry})
+        subject = path.parent / "subject.py"
+        subject.write_text("def identity(value):\n    return value\n")
         captured = []
         original = {
             "argv": sys.argv,
@@ -2719,7 +2724,7 @@ class TestFindingDispositions(unittest.TestCase):
         reviewer = {"name": "offline", "provider": "offline", "model": "m",
                     "profiles": ["standard"], "enabled": True}
         try:
-            sys.argv = [str(SCRIPT), "--file", str(SCRIPT),
+            sys.argv = [str(SCRIPT), "--file", str(subject),
                         "--kind", "implementation", "--round", "2",
                         "--claim", review.HONEST_RUN_CLAIM,
                         "--dispositions", str(path), "--quorum", "1",
