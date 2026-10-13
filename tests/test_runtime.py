@@ -10,6 +10,7 @@ submit-host stat asserts a fact about a machine this one cannot see. These
 tests pin the replacement: DECLARE the runtime uniformly, and require
 something that proves it where the job actually lands.
 """
+import ast
 import sys
 import unittest
 from pathlib import Path
@@ -161,10 +162,20 @@ class TestNoInferredFacts(unittest.TestCase):
     compute-node availability from it violates declared-facts."""
 
     def test_the_validator_never_stats_an_entrypoint(self):
-        src = SWARM.read_text()
-        i = src.index("def _validate_runtimes")
-        j = src.index("def validate_plan")
-        seg = src[i:j]
+        # Preserve the entire original interval's coverage across both owners.
+        expected = {"_validate_runtimes", "_seed_carry_forward",
+                    "_code_completion_protocol", "_dispatch_prompt",
+                    "_code_protocol_problem", "converge_problem",
+                    "converge_verdict", "_units_with_canary"}
+        segments = {}
+        for path in (SWARM, SWARM.with_name("swarm_plan_rules.py")):
+            src = path.read_text()
+            for node in ast.parse(src).body:
+                if isinstance(node, ast.FunctionDef) and node.name in expected:
+                    self.assertNotIn(node.name, segments)
+                    segments[node.name] = ast.get_source_segment(src, node)
+        self.assertEqual(set(segments), expected)
+        seg = "\n".join(segments.values())
         for forbidden in ("os.path.exists", "os.stat", "shutil.which",
                           "os.access", "isfile"):
             self.assertNotIn(forbidden, seg,
