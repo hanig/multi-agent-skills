@@ -207,16 +207,13 @@ def format_usage(usage):
 
 def ask_member(member, history, prompt, timeout, *, system=None,
                require_complete=False, preserve_reply=False):
-    """Redact committee output; plan exchange retains raw replies in memory.
+    """Redact every reply before history or peer delivery, otherwise verbatim.
 
-    Plan cross-examination must deliver the peer's exact answer. Its caller
-    redacts the final report and journal, after deciding from the raw answers.
+    preserve_reply selects the raw provider path, never a redaction bypass.
     """
     result = _ask_member(member, history, prompt, timeout, system=system,
                          require_complete=require_complete,
                          preserve_reply=preserve_reply)
-    if preserve_reply:
-        return result
     return tuple(R.deep_redact(value) for value in result)
 
 

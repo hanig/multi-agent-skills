@@ -407,7 +407,8 @@ cannot share a failure mode. `--plan` fixes the panel at two and refuses
 Plan review uses the committee's member conversations. Turn 1 independently
 reviews the plan against the claims in the existing verdict schema. Turn 2
 retains each seat's own history and supplies the other seat's turn-1 answer
-verbatim. For every peer finding, each seat must `concur`, `refute` with a
+after shared secret redaction, otherwise verbatim. For every peer finding,
+each seat must `concur`, `refute` with a
 concrete reason or counterexample, or `refine` with a corrected statement.
 Each seat also marks its own findings kept or withdrawn, gives any defense,
 and may add new findings. There is no third turn and no `--round`.
@@ -457,8 +458,10 @@ result is `PLAN_FAIL` (exit 1); truncated input also cannot pass. Either seat
 failing in either turn, including an unusable or incomplete answer, gives
 `REVIEW_UNAVAILABLE` (exit 2). The joint-verdict function itself also refuses
 unless exactly two seats completed both turns. JSON and the journal retain both turns per seat,
-the joint table and token usage; text output displays them too. Verbatim peer
-delivery happens before report/journal credential redaction. Implementation
+the joint table and token usage; text output displays them too. Every provider
+reply passes through the shared secret redactor before entering conversation
+history or the peer's prompt; all other bytes remain unchanged. Reports and
+journals retain their redaction as well. Implementation
 reviews retain their existing stateless behavior and confirmation filter.
 
 Both the CLI and direct plan command require exactly two uniquely named seats

@@ -48,6 +48,7 @@ class TestPlanExchange(unittest.TestCase):
             review.JOURNAL_TEST_MARKER: str(self.root),
             'OPENAI_API_KEY': 'test-plan-alpha-key',
             'OPENROUTER_API_KEY': 'test-plan-beta-key',
+            'ANTHROPIC_API_KEY': 'test-plan-anthropic-key',
             'HANIG_ROUTING_SNAPSHOTS': 'off',
         })
         self.env.start()
@@ -57,6 +58,7 @@ class TestPlanExchange(unittest.TestCase):
                        for n in self.first}
         self.raw = {}
         self.requests = {}
+        self.request_bodies = {}
         self.failures = {}
         self.responses = {}
 
@@ -73,25 +75,30 @@ class TestPlanExchange(unittest.TestCase):
         messages = payload.get('input', payload.get('messages'))
         turn = sum(m['role'] == 'user' for m in messages)
         self.requests[(name, turn)] = copy.deepcopy(messages)
+        self.request_bodies[(name, turn)] = copy.deepcopy(payload)
         if (name, turn) in self.failures:
             return None, self.failures[(name, turn)]
         if (name, turn) in self.responses:
             return self.responses[(name, turn)], None
         raw = self.raw.get((name, turn), json.dumps(
             (self.first if turn == 1 else self.second)[name], indent=2))
-        if name == 'alpha':
+        if 'api.anthropic.com' in url:
+            return {'stop_reason': 'end_turn',
+                    'content': [{'type': 'text', 'text': raw}],
+                    'usage': {'input_tokens': 100 * turn, 'output_tokens': 40 * turn}}, None
+        if 'api.openai.com' in url:
             return {'status': 'completed', 'output': [
                 {'type': 'message', 'content': [{'text': raw}]}],
                 'usage': {'input_tokens': 100 * turn, 'output_tokens': 40 * turn}}, None
         return {'choices': [{'finish_reason': 'stop', 'message': {'content': raw}}],
                 'usage': {'prompt_tokens': 100 * turn, 'completion_tokens': 40 * turn}}, None
 
-    def run_cli(self, *flags, json_output=True):
+    def run_cli(self, *flags, json_output=True, members=MEMBERS):
         stdout, stderr = io.StringIO(), io.StringIO()
         argv = ['review.py', '--kind', 'plan', '--file', str(self.plan),
                 '--claim', CLAIM] + (['--json'] if json_output else []) + list(flags)
         with mock.patch.object(sys, 'argv', argv), \
-                mock.patch.object(review, 'load_effective_reviewers', return_value=MEMBERS), \
+                mock.patch.object(review, 'load_effective_reviewers', return_value=members), \
                 mock.patch.object(committee.R, '_post', side_effect=self.transport), \
                 mock.patch.object(review, 'arm_watchdog'), \
                 mock.patch.object(review, 'disarm_watchdog'), \
@@ -465,14 +472,42 @@ finally:
                 {'phase': 'turn-2', 'in_tokens': 200, 'out_tokens': 80}])
 
     def test_peer_reply_is_not_normalized_before_delivery_but_output_is_redacted(self):
-        secret = os.environ['OPENAI_API_KEY']
-        self.first['alpha']['notes'] = secret
-        self.raw[('alpha', 1)] = json.dumps(self.first['alpha'])
-        code, report, _ = self.run_cli()
-        self.assertEqual(code, 0)
-        self.assertIn(self.raw[('alpha', 1)], self.requests[('beta', 2)][-1]['content'])
-        self.assertNotIn(secret, json.dumps(report))
-        self.assertNotIn(secret, json.dumps(self.journal(report)))
+        keys = {'openai': 'OPENAI_API_KEY', 'openrouter': 'OPENROUTER_API_KEY',
+                'anthropic': 'ANTHROPIC_API_KEY'}
+        for provider, other in (('openai', 'openrouter'),
+                                ('openrouter', 'anthropic'), ('anthropic', 'openai')):
+            with self.subTest(provider=provider):
+                members = [dict(MEMBERS[0], provider=provider),
+                           dict(MEMBERS[1], provider=other)]
+                expected, secrets = {}, []
+                self.requests.clear()
+                self.request_bodies.clear()
+                for member in members:
+                    name, key = member['name'], keys[member['provider']]
+                    secret = os.environ[key]
+                    secrets.append(secret)
+                    self.first[name]['notes'] = 'MiXeD e\u0301 café  \t ' + secret
+                    raw = (' \t\n```json\n' + json.dumps(self.first[name], indent=3,
+                            ensure_ascii=False) + '\n``` \t\n')
+                    self.raw[(name, 1)] = raw
+                    expected[name] = raw.replace(secret, '<' + key + ' redacted>')
+                code, report, _ = self.run_cli(members=members)
+                self.assertEqual(code, 0)
+                self.assertEqual(len(self.request_bodies), 4)
+                for name, peer in (('alpha', 'beta'), ('beta', 'alpha')):
+                    messages = self.requests[(name, 2)]
+                    delivered = messages[-1]['content'].split('<peer-turn-1>\n', 1)[1]
+                    delivered = delivered.split('\n</peer-turn-1>', 1)[0]
+                    self.assertEqual(delivered, expected[peer])
+                    own_history = next(m['content'] for m in messages
+                                       if m['role'] == 'assistant')
+                    self.assertEqual(own_history, expected[name])
+                journal = self.journal(report)
+                for secret in secrets:
+                    for body in self.request_bodies.values():
+                        self.assertNotIn(secret, json.dumps(body, ensure_ascii=False))
+                    self.assertNotIn(secret, json.dumps(report))
+                    self.assertNotIn(secret, json.dumps(journal))
 
     def test_claim_upheld_by_only_one_seat_fails(self):
         for status in ('refuted', 'unverifiable'):
