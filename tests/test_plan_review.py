@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
@@ -105,6 +106,33 @@ class TestPlanExchange(unittest.TestCase):
                    Path(report['journal']['path']).read_text().splitlines()]
         self.assertEqual(len(records), 1)
         return records[0]
+
+    def assert_direct_panel_refused(self, members):
+        args = SimpleNamespace(claim=[CLAIM], timeout=1, json=True,
+                               panel_policy={}, input_redactions=[])
+        stderr = io.StringIO()
+        with mock.patch.object(committee.R, '_post', side_effect=self.transport) as transport, \
+                mock.patch.object(review, 'record_review_round', return_value={}), \
+                mock.patch.object(review, 'disarm_watchdog'), \
+                redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+            code = review.cmd_plan_review(
+                args, members, 'Review this plan.', str(self.plan), False,
+                'plan review', [])
+        self.assertEqual(code, 4)
+        transport.assert_not_called()
+        self.assertEqual(self.requests, {})
+        self.assertIn('REVIEW_ERROR', stderr.getvalue())
+
+    def test_direct_one_seat_refused_before_transport(self):
+        self.assert_direct_panel_refused(MEMBERS[:1])
+
+    def test_direct_three_seats_refused_before_transport(self):
+        self.assert_direct_panel_refused(MEMBERS + [
+            dict(MEMBERS[0], name='gamma', model='stub-gamma')])
+
+    def test_direct_same_provider_refused_before_transport(self):
+        self.assert_direct_panel_refused([
+            MEMBERS[0], dict(MEMBERS[1], provider=MEMBERS[0]['provider'])])
 
     def test_refuted_finding_dropped_and_both_texts_recorded(self):
         self.finding()

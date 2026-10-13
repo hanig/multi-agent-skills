@@ -3138,7 +3138,31 @@ def run_plan_exchange(members, prompt, claims, timeout, truncated=False):
     return state, session, completed
 
 
+def plan_panel_error(members):
+    """Check the effective plan seats after selection and author exclusion."""
+    names = ", ".join(sorted(r["name"] for r in members)) or "none"
+    if len(members) != 2:
+        return (
+            f"a plan review is exactly TWO contrasting models; this panel "
+            f"has {len(members)} ({names}). A third adds agreement, not "
+            f"insight, and one is not a committee. Drop --only, or name "
+            f"exactly two reviewers from different providers.")
+    if len({r["provider"] for r in members}) != 2:
+        return (
+            f"the two plan reviewers ({names}) share a provider, so they "
+            f"can share a failure mode. Contrasting means different "
+            f"providers. Name one from each.")
+    return None
+
+
 def cmd_plan_review(args, members, prompt, label, truncated, profile_reason, excluded):
+    panel_error = plan_panel_error(members)
+    if panel_error:
+        disarm_watchdog()
+        print(f"error: {panel_error}", file=sys.stderr)
+        print("REVIEW_ERROR — configuration problem; no review took place.",
+              file=sys.stderr)
+        return STATES["REVIEW_ERROR"]
     unavailable = [{"name": m["name"], "reason": availability(m)} for m in members
                    if availability(m)]
     if unavailable:
@@ -3444,18 +3468,9 @@ def _main():
     # state, and before any reviewer is called.
     if args.kind == "plan" and not args.list:
         runnable = [r for r in reviewers if r.get("enabled", True)]
-        names = ", ".join(sorted(r["name"] for r in runnable)) or "none"
-        if len(runnable) != 2:
-            config_error(
-                f"a plan review is exactly TWO contrasting models; this panel "
-                f"has {len(runnable)} ({names}). A third adds agreement, not "
-                f"insight, and one is not a committee. Drop --only, or name "
-                f"exactly two reviewers from different providers.")
-        if len({r["provider"] for r in runnable}) != 2:
-            config_error(
-                f"the two plan reviewers ({names}) share a provider, so they "
-                f"can share a failure mode. Contrasting means different "
-                f"providers. Name one from each.")
+        panel_error = plan_panel_error(runnable)
+        if panel_error:
+            config_error(panel_error)
         if args.quorum != 2:
             config_error(
                 f"a plan review needs both verdicts: pass --quorum 2, not "
