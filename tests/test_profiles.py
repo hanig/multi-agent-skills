@@ -6,6 +6,7 @@ inclusive spelling `not r.get("profiles") or tier in r["profiles"]`. That is
 the path every escalated review takes, and every review in the session that
 found this bug ran with --escalate.
 """
+from tests.watchdog_guard import guarded_main
 import io
 import json
 import os
@@ -252,15 +253,13 @@ class TestChangedPathProfiles(unittest.TestCase):
                              "offline" if unavailable or not r.get("enabled", True)
                              else None), \
                 patch.object(R, "run_one", side_effect=answer), \
-                patch.object(R, "arm_watchdog"), \
-                patch.object(R, "disarm_watchdog"), \
                 patch.object(R, "record_review_round", return_value={}), \
                 redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as stopped:
                 with patch.object(R, "reserve_review_round",
                         side_effect=lambda args: isolated_reservation(
                             R, original_reservation, args)):
-                    R.main()
+                    guarded_main(R.main)
         return stopped.exception.code, stdout.getvalue(), stderr.getvalue(), called
 
     def report(self, *flags, **kwargs):
@@ -500,15 +499,13 @@ class TestAuthorExclusion(unittest.TestCase):
                              None if r.get("enabled", True) else "disabled"), \
                 patch.object(R, "run_one", side_effect=answer), \
                 patch.object(R, "gather", return_value=("diff", "offline diff")), \
-                patch.object(R, "arm_watchdog"), \
-                patch.object(R, "disarm_watchdog"), \
                 patch.object(R, "record_review_round", return_value={}), \
                 redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as stopped:
                 with patch.object(R, "reserve_review_round",
                         side_effect=lambda args: isolated_reservation(
                             R, original_reservation, args)):
-                    R.main()
+                    guarded_main(R.main)
         return stopped.exception.code, stdout.getvalue(), stderr.getvalue(), called
 
     def test_deep_excludes_sol_author_and_names_removal(self):

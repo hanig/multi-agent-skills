@@ -15,6 +15,7 @@ supervised worker, including when -k is supplied. Fully qualified class or
 method names bypass load_tests and retain only the per-test fixtures.
 """
 
+from tests.watchdog_guard import guarded_main
 import ast
 import errno
 import importlib.util
@@ -1326,12 +1327,10 @@ class TestRangeDivergence(unittest.TestCase):
                 patch.object(review, "load_reviewers", return_value=[reviewer]), \
                 patch.object(review, "availability", return_value=None), \
                 patch.object(review, "run_one", return_value=result), \
-                patch.object(review, "arm_watchdog"), \
-                patch.object(review, "disarm_watchdog"), \
                 patch.object(review, "record_review_round", return_value={}), \
                 redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as stopped:
-                review.main()
+                guarded_main(review.main)
         self.assertEqual(stopped.exception.code, review.STATES["REVIEW_PASS"])
         header = next(line for line in stdout.getvalue().splitlines()
                       if line.startswith("reviewing commit range"))
@@ -1616,11 +1615,10 @@ class TestClaimsRefuted(unittest.TestCase):
                                 patch.object(review, "availability", return_value=None), \
                                 patch.object(review, "run_one", side_effect=answer), \
                                 patch.object(review, "gather", return_value=("diff", "fixture")), \
-                                patch.object(review, "arm_watchdog"), \
                                 patch.dict(os.environ, {"XDG_STATE_HOME": tmp}), \
                                 redirect_stdout(stdout), redirect_stderr(stderr):
                             with self.assertRaises(SystemExit) as stopped:
-                                review.main()
+                                guarded_main(review.main)
                         self.assertEqual(stopped.exception.code, 7)
                         self.assertEqual(stderr.getvalue(), "")
                         self.assertEqual(set(called), {"a", "b", "c"})
@@ -2477,11 +2475,10 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                 patch.object(review, "availability", side_effect=lambda r:
                              "offline" if r["name"] in unavailable else None), \
                 patch.object(review, "run_one", side_effect=answer), \
-                patch.object(review, "arm_watchdog"), \
                 patch.dict(os.environ, {"XDG_STATE_HOME": str(self.cycle_root)}), \
                 redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as stopped:
-                review.main()
+                guarded_main(review.main)
         return SimpleNamespace(returncode=stopped.exception.code,
                                stdout=stdout.getvalue(),
                                stderr=stderr.getvalue(), called=called)
@@ -2718,7 +2715,6 @@ class TestFindingDispositions(unittest.TestCase):
             "load_reviewers": review.load_reviewers,
             "availability": review.availability,
             "run_one": review.run_one,
-            "arm_watchdog": review.arm_watchdog,
         }
         reviewer = {"name": "offline", "provider": "offline", "model": "m",
                     "profiles": ["standard"], "enabled": True}
@@ -2731,7 +2727,6 @@ class TestFindingDispositions(unittest.TestCase):
                         "--json"]
             review.load_reviewers = lambda: [reviewer]
             review.availability = lambda _reviewer: None
-            review.arm_watchdog = lambda _seconds: None
 
             def run_one(_reviewer, prompt, *_args, **_kwargs):
                 captured.append(prompt)
@@ -2743,7 +2738,7 @@ class TestFindingDispositions(unittest.TestCase):
             review.run_one = run_one
             with redirect_stdout(io.StringIO()):
                 with self.assertRaises(SystemExit) as raised:
-                    review.main()
+                    guarded_main(review.main)
             self.assertEqual(raised.exception.code,
                              review.STATES["REVIEW_PASS"])
         finally:
@@ -2751,7 +2746,6 @@ class TestFindingDispositions(unittest.TestCase):
             review.load_reviewers = original["load_reviewers"]
             review.availability = original["availability"]
             review.run_one = original["run_one"]
-            review.arm_watchdog = original["arm_watchdog"]
         self.assertEqual(len(captured), 1)
         self.assertIn(entry["summary"], captured[0])
 
@@ -3311,7 +3305,6 @@ class TestReviewJournal(unittest.TestCase):
             "availability": review.availability,
             "run_one": review.run_one,
             "gather": review.gather,
-            "arm_watchdog": review.arm_watchdog,
             "disarm_watchdog": review.disarm_watchdog,
             "record_review_round": review.record_review_round,
             "time_ns": review.time.time_ns,
@@ -3327,7 +3320,6 @@ class TestReviewJournal(unittest.TestCase):
         ]
         review.availability = lambda _reviewer: None
         review.gather = lambda _args: ("diff body", "test diff")
-        review.arm_watchdog = lambda _seconds: None
         review.run_one = self.answer
 
     def restore(self):
@@ -3336,7 +3328,6 @@ class TestReviewJournal(unittest.TestCase):
         review.availability = self.saved["availability"]
         review.run_one = self.saved["run_one"]
         review.gather = self.saved["gather"]
-        review.arm_watchdog = self.saved["arm_watchdog"]
         review.disarm_watchdog = self.saved["disarm_watchdog"]
         review.record_review_round = self.saved["record_review_round"]
         review.time.time_ns = self.saved["time_ns"]
@@ -3367,7 +3358,7 @@ class TestReviewJournal(unittest.TestCase):
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as stopped:
-                review.main()
+                guarded_main(review.main)
         return stopped.exception.code, stdout.getvalue(), stderr.getvalue()
 
     def journal_path(self):
@@ -3821,7 +3812,7 @@ class TestReviewJournal(unittest.TestCase):
                 OSError("descriptor 2 is unavailable"))
             with redirect_stdout(stdout):
                 with self.assertRaises(SystemExit) as stopped:
-                    review.main()
+                    guarded_main(review.main)
         finally:
             sys.stderr = saved_stderr
             review.os.write = saved_write
@@ -4067,10 +4058,16 @@ class TestReviewJournal(unittest.TestCase):
 
     def test_watchdog_is_disarmed_before_journal_persistence(self):
         events = []
-        review.disarm_watchdog = lambda: events.append("disarmed")
+
+        def disarm():
+            events.append("disarmed")
+            self.saved["disarm_watchdog"]()
+
+        review.disarm_watchdog = disarm
 
         def record(_args, _completed, _verdict):
             self.assertEqual(events, ["disarmed"])
+            self.assertEqual(signal.alarm(0), 0)
             return {"path": "test", "written": True, "error": None}
 
         review.record_review_round = record

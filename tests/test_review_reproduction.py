@@ -1,5 +1,6 @@
 """Reproduction records are validated before transport and delivered as evidence."""
 
+from tests.watchdog_guard import guarded_main
 import copy
 import importlib.util
 import io
@@ -83,8 +84,6 @@ class TestReproductionEvidence(unittest.TestCase):
             stack.enter_context(patch.dict(os.environ, {
                 "OPENAI_API_KEY": "fixture-key", "OPENROUTER_API_KEY": "fixture-key"}))
             stack.enter_context(patch.object(review, "load_effective_reviewers", return_value=roster))
-            stack.enter_context(patch.object(review, "arm_watchdog"))
-            stack.enter_context(patch.object(review, "disarm_watchdog"))
             stack.enter_context(patch.object(review, "_post", side_effect=transport))
             stack.enter_context(patch.object(review, "record_review_round", return_value={}))
             # A new transport path must fail instead of contacting the network.
@@ -96,7 +95,7 @@ class TestReproductionEvidence(unittest.TestCase):
                 with patch.object(review, "reserve_review_round",
                         side_effect=lambda args: isolated_reservation(
                             review, original_reservation, args)):
-                    review.main()
+                    guarded_main(review.main)
         return raised.exception.code, stderr.getvalue(), captured, stdout.getvalue()
 
     def assert_refused(self, entry, field, extra=()):

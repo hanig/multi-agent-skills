@@ -12,6 +12,7 @@ prerequisite for these tests. The read-limit fixtures use a 1 MiB test cap;
 the historical post-round3 scratch probe also measured the real 64 MiB cap.
 """
 
+from tests.watchdog_guard import guarded_main
 import importlib.util
 import hashlib
 import io
@@ -102,8 +103,6 @@ class TestPriorDecisionInputs(unittest.TestCase):
             stack.enter_context(patch("sys.argv", arguments))
             stack.enter_context(patch.object(review, "availability", return_value=unavailable))
             stack.enter_context(patch.object(review, "run_one", side_effect=receive))
-            stack.enter_context(patch.object(review, "arm_watchdog"))
-            stack.enter_context(patch.object(review, "disarm_watchdog"))
             stack.enter_context(patch.object(review, "_run_journal_append", side_effect=audit))
             if empty_body:
                 stack.enter_context(patch.object(review, "git_out", return_value=""))
@@ -115,7 +114,7 @@ class TestPriorDecisionInputs(unittest.TestCase):
                 with patch.object(review, "reserve_review_round",
                         side_effect=lambda args: isolated_reservation(
                             review, original_reservation, args)):
-                    review.main()
+                    guarded_main(review.main)
         self.report_text = stdout.getvalue()
         return raised.exception.code, stderr.getvalue(), captured
 

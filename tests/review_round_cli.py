@@ -11,6 +11,10 @@ from pathlib import Path
 import sys
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tests.watchdog_guard import guarded_main
+
+
 def main():
     script = sys.argv.pop(1)
     sys.argv[0] = script
@@ -51,7 +55,7 @@ def main():
                 raise
 
         review.fcntl.flock = observed_flock
-    review.main()
+    guarded_main(review.main)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Execute documented review invocations offline with real Git identities."""
 
+from tests.watchdog_guard import guarded_main
 import ast
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import importlib.util
@@ -100,8 +101,6 @@ class TestDocumentedReviewCommands(unittest.TestCase):
             for name, replacement in [('load_effective_reviewers', lambda: roster),
                                       ('availability', lambda _r: None),
                                       ('run_one', answer),
-                                      ('arm_watchdog', lambda *_a: None),
-                                      ('disarm_watchdog', lambda: None),
                                       ('cmd_list', lambda *_a, **_k: 0),
                                       ('cmd_ledger', lambda _a: 0),
                                       ('_run_journal_append', lambda *_a: dict(
@@ -113,7 +112,7 @@ class TestDocumentedReviewCommands(unittest.TestCase):
             stack.enter_context(redirect_stdout(out))
             stack.enter_context(redirect_stderr(err))
             with self.assertRaises(SystemExit) as stopped:
-                review.main()
+                guarded_main(review.main)
         markers = [json.loads(p.read_text()) for p in state.glob(
             'hanig-review-gate/rounds/*/*.json')]
         return stopped.exception.code, err.getvalue(), calls, markers

@@ -1,5 +1,6 @@
 """Offline size preflight exercises the same input gathering as a review."""
 
+from tests.watchdog_guard import guarded_main
 import importlib.util
 import io
 import json
@@ -63,7 +64,7 @@ class TestSizePreflight(unittest.TestCase):
             stack.enter_context(redirect_stdout(stdout))
             stack.enter_context(redirect_stderr(stderr))
             with self.assertRaises(SystemExit) as exited:
-                review.main()
+                guarded_main(review.main)
             transport.assert_not_called()
             for guard in guards:
                 guard.assert_not_called()
