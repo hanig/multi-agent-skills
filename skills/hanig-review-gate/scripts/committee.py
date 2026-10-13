@@ -7,8 +7,9 @@ alive across plan -> implement -> review. This repo has no agent daemon, so the
 same shape is built on message history: each member is a conversation, not a
 call.
 
-Why this is not review.py. review.py is a stateless refutation gate: one HTTP
-call per reviewer per round, no memory, no follow-ups. Three things follow, and
+Implementation review in review.py is a stateless refutation gate. Plan review
+reuses this module's member conversations for a bounded two-turn exchange.
+For stateless implementation reviews, three things follow, and
 all three cost this repo real time:
 
   - A reviewer that never wrote a plan reviews against its own idea of
@@ -204,15 +205,30 @@ def format_usage(usage):
     return f"{shown_in}in/{shown_out}out"
 
 
-@R.redact_provider_result
 def ask_member(member, history, prompt, timeout, *, system=None,
-               require_complete=False):
+               require_complete=False, preserve_reply=False):
+    """Redact committee output; plan exchange retains raw replies in memory.
+
+    Plan cross-examination must deliver the peer's exact answer. Its caller
+    redacts the final report and journal, after deciding from the raw answers.
+    """
+    result = _ask_member(member, history, prompt, timeout, system=system,
+                         require_complete=require_complete,
+                         preserve_reply=preserve_reply)
+    if preserve_reply:
+        return result
+    return tuple(R.deep_redact(value) for value in result)
+
+
+def _ask_member(member, history, prompt, timeout, *, system=None,
+                require_complete=False, preserve_reply=False):
     """One turn. Returns (reply_text, error, usage). History is the full prior
     exchange, so the member answers WITH its own earlier reasoning in view --
     the property a stateless gate cannot have."""
     msgs = list(history) + [{"role": "user", "content": prompt}]
     if member["provider"] == "anthropic":
-        result, err = R.anthropic_messages(
+        transport = (R._anthropic_messages if preserve_reply else R.anthropic_messages)
+        result, err = transport(
             member, msgs, system or SYSTEM_PLANNER, timeout)
         if err:
             return None, err, None
@@ -282,7 +298,7 @@ def ask_member(member, history, prompt, timeout, *, system=None,
         return None, ("empty reply; the model may have spent its whole output "
                       "budget on reasoning. Raise max_output_tokens for "
                       f"{member['name']} in reviewers.json."), usage
-    return R.redact(text), None, usage
+    return text, None, usage
 
 
 SYSTEM_PLANNER = """You are one of two members of a technical committee, chosen \
@@ -319,16 +335,25 @@ def phase_prompt(problem):
         + NO_EDITS)
 
 
-def run_turn(members, session, prompt, timeout, label):
-    """Both members, in parallel, same prompt. Waits for BOTH: the reference
-    skill is explicit that you wait for both, not whichever finishes first."""
+def run_turn(members, session, prompt, timeout, label, *, system=None,
+             require_complete=False, preserve_reply=False):
+    """Wait for every member; prompt may be shared or keyed by member name."""
     import concurrent.futures
     session.pop("resolution", None)  # A later turn supersedes any ruling.
     results = {}
+    prompts = (prompt if isinstance(prompt, dict) else
+               {m["name"]: prompt for m in members})
+    options = {}
+    if system is not None:
+        options["system"] = system
+    if require_complete:
+        options["require_complete"] = True
+    if preserve_reply:
+        options["preserve_reply"] = True
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         futs = {ex.submit(ask_member, m,
                           session["members"][m["name"]]["history"],
-                          prompt, timeout): m for m in members}
+                          prompts[m["name"]], timeout, **options): m for m in members}
         for fut in concurrent.futures.as_completed(futs):
             m = futs[fut]
             try:
@@ -339,7 +364,7 @@ def run_turn(members, session, prompt, timeout, label):
     for m in members:
         text, err, usage = results[m["name"]]
         rec = session["members"][m["name"]]
-        rec["history"].append({"role": "user", "content": prompt})
+        rec["history"].append({"role": "user", "content": prompts[m["name"]]})
         if err:
             rec["history"].append({"role": "assistant",
                                    "content": f"[no reply: {err}]"})

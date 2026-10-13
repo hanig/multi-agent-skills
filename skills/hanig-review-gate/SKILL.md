@@ -39,7 +39,7 @@ because these rules were written down once and drifted from anyway.
 | | plan review | implementation review |
 |---|---|---|
 | when | before code exists | after the change is written |
-| panel | **two contrasting models** | fixed profile or cheapest-first ladder |
+| panel | **two contrasting models, two turns** | fixed profile or cheapest-first ladder |
 | escalation | **never** | optional; `--escalate` starts at the selected tier |
 | flag | `--kind plan` | `--kind implementation --round N [--escalate]` |
 | judged against | do these criteria hold together | does the code meet them |
@@ -50,6 +50,35 @@ had one reviewer uphold every claim and add nothing, while the other two found
 all five defects. Contrasting means a different provider and family, so the two
 cannot share a failure mode. `--plan` fixes the panel at two and refuses
 `--escalate` or a quorum above 2.
+
+Plan review uses the committee's member conversations. Turn 1 independently
+reviews the plan against the claims in the existing verdict schema. Turn 2
+retains each seat's own history and supplies the other seat's turn-1 answer
+verbatim. For every peer finding, each seat must `concur`, `refute` with a
+concrete reason or counterexample, or `refine` with a corrected statement.
+Each seat also marks its own findings kept or withdrawn, gives any defense,
+and may add new findings. There is no third turn and no `--round`.
+**Cost: two seats times two turns**, with both requests parallel within each
+turn; turn 2 includes the preceding history and peer answer.
+
+Code computes the joint table and verdict from both turn-2 answers. A finding
+stands unless the peer refutes it and its author supplies no explicit defense
+while keeping it. A refinement retains the original severity. Withdrawal
+alone does not drop an unrefuted finding; new turn-2 findings stand as
+unrefuted. Because the final turns are simultaneous, a defense can address
+turn-1 contrary evidence but cannot answer an unseen turn-2 refutation.
+Refuted findings remain in the table with the original finding, author
+position and peer response. A claim is upheld only if both seats mark it
+`supported` after turn 2.
+
+`PLAN_PASS` (exit 0) requires every claim upheld and no standing major or
+critical finding, irrespective of confidence or scope labels. Otherwise the
+result is `PLAN_FAIL` (exit 1); truncated input also cannot pass. Either seat
+failing in either turn, including an unusable or incomplete answer, gives
+`REVIEW_UNAVAILABLE` (exit 2). JSON and the journal retain both turns per seat,
+the joint table and token usage; text output displays them too. Verbatim peer
+delivery happens before report/journal credential redaction. Implementation
+reviews retain their existing stateless behavior and confirmation filter.
 
 **Plan review is Phase 1 and it is where the value is.** Three plan reviews cost
 about ten cents and twelve minutes and rejected two designs before any code
@@ -419,9 +448,9 @@ These rounds count toward the same round bound.
 
 | Exit | State | Meaning |
 |---|---|---|
-| 0 | `REVIEW_PASS` | Quorum reviewed; no confirmed defect, no refuted claim |
-| 1 | `REVIEW_FAIL` | Quorum reviewed; a confirmed defect, with or without refuted claims |
-| 2 | `REVIEW_UNAVAILABLE` | No reviewer ran — **not a pass** |
+| 0 | `REVIEW_PASS` / `PLAN_PASS` | Implementation quorum passed, or both plan seats completed and the joint criteria passed |
+| 1 | `REVIEW_FAIL` / `PLAN_FAIL` | Implementation has a confirmed defect, or the plan's joint criteria failed |
+| 2 | `REVIEW_UNAVAILABLE` | No implementation reviewer ran, or either plan seat failed in either turn — **not a pass** |
 | 3 | `REVIEW_PARTIAL` | Some ran, quorum unmet — degraded, caller decides |
 | 4 | `REVIEW_ERROR` | Usage or configuration error |
 | 6 | `REVIEW_INCOMPLETE` | A required reviewer returned no usable content |
@@ -432,7 +461,7 @@ Exit 5 remains reserved; adjudication introduces no review verdict.
 Every nonzero state is non-success. Incomplete review is not an implementation
 failure, but it supplies no judgment and cannot satisfy required coverage.
 
-A finding counts against the gate only if it is critical or major, at high or
+A finding counts against the implementation gate only if it is critical or major, at high or
 medium confidence, **and** carries a concrete failure scenario. That filter
 exists to keep speculative and stylistic noise from blocking real work.
 
