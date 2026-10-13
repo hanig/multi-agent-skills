@@ -147,7 +147,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
             "standard": {"luna", "kimi-k2.7-code", "sonnet-5.5"},
             "deep": {"luna", "kimi-k2.7-code", "sonnet-5.5", "sol"},
             "plan": {"astra", "kimi-k3"},
-            "committee": {"deepseek-v4-pro", "muse-wonder", "sonnet-5.5"},
+            "committee": {"deepseek-v4-pro", "gemini-argon", "sonnet-5.5"},
             "tiebreak": {"sol-tiebreak"},
         }
         for profile, names in expected.items():
@@ -167,7 +167,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
             "haiku-5.5": ("anthropic", "claude-haiku-5-5", "max"),
             "astra": ("openai", "gpt-6-astra", "xhigh"),
             "kimi-k3": ("openrouter", "moonshotai/kimi-k3", "xhigh"),
-            "muse-wonder": ("openrouter", "meta/muse-wonder", "high"),
+            "gemini-argon": ("openrouter", "google/gemini-4-argon", "xhigh"),
             "kimi-k2.7-code": ("openrouter", "moonshotai/kimi-k2.7-code", None),
             "sonnet-5.5": ("anthropic", "claude-sonnet-5-5", "high"),
             "deepseek-v4-pro": ("openrouter", "deepseek/deepseek-v4-pro", None),
@@ -179,7 +179,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
 
     def test_new_seats_reach_the_real_provider_payload_builders(self):
         roster = {r["name"]: r for r in R.load_reviewers()}
-        for name in ("muse-wonder", "haiku-5.5", "kimi-k3"):
+        for name in ("gemini-argon", "haiku-5.5", "kimi-k3"):
             seat = roster[name]
             with self.subTest(seat=name), patch.dict(os.environ, {
                     "OPENROUTER_API_KEY": "test-key",
@@ -199,7 +199,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
         import committee
         members = committee.pick_members([], authors=["codex/gpt-6-astra"])
         self.assertEqual({m["name"] for m in members},
-                         {"deepseek-v4-pro", "muse-wonder", "sonnet-5.5"})
+                         {"deepseek-v4-pro", "gemini-argon", "sonnet-5.5"})
         self.assertEqual(len(members), 3)
         self.assertEqual({m["provider"] for m in members},
                          {"openrouter", "anthropic"})

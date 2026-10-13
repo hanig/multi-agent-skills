@@ -736,8 +736,9 @@ Owner decision 2026-10-12: Luna runs at `max`, and native Anthropic Haiku 5.5
 joins fast at `max`. Plan pairs OpenAI Astra at `xhigh` with Moonshot Kimi K3
 at `xhigh` (accepted live through OpenRouter), because the orchestrator writing
 plans is a Claude model. Sonnet 5.5 retains standard, deep and committee at
-`high`; Sol retains deep at `xhigh`. The committee is DeepSeek V4 Pro, Muse
-Wonder at `high`, and Sonnet 5.5. The separate `sol-tiebreak` seat is unchanged.
+`high`; Sol retains deep at `xhigh`. Owner decision 2026-10-13: the committee
+is DeepSeek V4 Pro, Gemini 4 Argon at `xhigh`, and Sonnet 5.5. The separate
+`sol-tiebreak` seat is unchanged.
 All enabled seats retain or declare 128000-token output caps; dated acceptance
 probes live in `reviewers.json`. An escalation starting at fast retains Haiku's
 verdict, adds Kimi K2.7 Code and Sonnet at standard, then Sol at deep.
@@ -756,7 +757,7 @@ python3 scripts/resolve_models.py --project . --dry-run  # list and select only
 
 A family is a literal `vendor`, `prefix` and `suffix` around a version `N` or
 `N<separator>M`, plus `major`, the owner's ceiling. A `named_version` with
-`major: 0` admits only its exact name (Muse Wonder); it has no automatic
+`major: 0` admits only its exact name (Gemini 4 Argon); it has no automatic
 point-release upgrades. The resolver lists the
 provider's catalog (`openai`, `openrouter`, or `paseo:<provider>`), takes the
 greatest id with that major above the shipped pin, and probes it: an API seat

@@ -456,7 +456,7 @@ Routing lives in `reviewers.json`; `review.py --list` measures availability live
 | `kimi-k2.7-code` | OpenRouter | `moonshotai/kimi-k2.7-code` (standard/deep) | `OPENROUTER_API_KEY` |
 | `astra` | OpenAI | `gpt-6-astra` (effort `xhigh`, plan) | `OPENAI_API_KEY` |
 | `kimi-k3` | OpenRouter | `moonshotai/kimi-k3` (effort `xhigh`, plan) | `OPENROUTER_API_KEY` |
-| `muse-wonder` | OpenRouter | `meta/muse-wonder` (effort `high`, committee) | `OPENROUTER_API_KEY` |
+| `gemini-argon` | OpenRouter | `google/gemini-4-argon` (effort `xhigh`, committee) | `OPENROUTER_API_KEY` |
 | `sol` | OpenAI | `gpt-6.1-sol` (effort `xhigh`, deep) | `OPENAI_API_KEY` |
 
 Provider keys come from `~/.zshrc`; run through `zsh -ic` so the gate can read them.
@@ -464,7 +464,7 @@ Provider keys come from `~/.zshrc`; run through `zsh -ic` so the gate can read t
 **Point releases resolve per project** (`scripts/resolve_models.py`; README, "Model families").
 
 Owner decision 2026-10-12: plan pairs Astra and Kimi K3 (OpenAI and Moonshot), since a Claude orchestrator writes plans.
-The committee is DeepSeek V4 Pro, Muse Wonder and Sonnet 5.5; `sol-tiebreak` stays unchanged. Declared authors are excluded.
+The committee is DeepSeek V4 Pro, Gemini 4 Argon and Sonnet 5.5; `sol-tiebreak` stays unchanged. Declared authors are excluded.
 Reviewers run in parallel, so wall time is the slowest one.
 
 Transient 5xx and 429 responses are retried with backoff — a gateway hiccup must
