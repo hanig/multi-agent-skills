@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -153,6 +154,52 @@ class TestPlanExchange(unittest.TestCase):
         self.assertEqual(claims, [CLAIM])
         self.assertFalse(truncated)
         self.assertEqual(len(self.requests), 4)
+
+    def test_file_loader_from_unrelated_cwd_runs_plan_command(self):
+        # Fresh interpreter: no earlier test may make shipped siblings importable.
+        (self.root / 'plan_review.py').write_text("raise AssertionError('cwd import')\n")
+        code = '''
+import importlib.util, io, sys
+from contextlib import redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+repo = Path(sys.argv[1])
+scripts = repo / 'skills/hanig-review-gate/scripts'
+assert str(scripts) not in sys.path
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, scripts / 'review.py')
+    subject = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(subject)
+    return subject
+subject = load('file_review')
+owner = sys.modules['plan_review']
+assert Path(owner.__file__).resolve() == scripts / 'plan_review.py'
+assert load('second_file_review').run_plan_exchange is owner.run_plan_exchange
+sys.path.insert(0, str(repo))
+from tests.test_plan_review import TestPlanExchange, MEMBERS, CLAIM
+import committee, review
+assert review.run_plan_exchange is subject.run_plan_exchange
+assert committee.R.run_plan_exchange is owner.run_plan_exchange
+case = TestPlanExchange()
+case.setUp()
+try:
+    args = SimpleNamespace(claim=[CLAIM], timeout=1, json=True,
+                           panel_policy={}, input_redactions=[])
+    with mock.patch.object(committee.R, '_post', side_effect=case.transport), \\
+            mock.patch.object(subject, 'record_review_round', return_value={}), \\
+            mock.patch.object(subject, 'disarm_watchdog'), redirect_stdout(io.StringIO()):
+        result = subject.cmd_plan_review(args, MEMBERS, 'Review this plan.',
+                                         'plan.md', False, 'plan review', [])
+    assert result == 0, result
+    assert len(case.requests) == 4, case.requests
+finally:
+    case.doCleanups()
+'''
+        result = subprocess.run([sys.executable, '-c', code, str(REPO)],
+                                cwd=self.root, capture_output=True, text=True,
+                                timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_refuted_finding_dropped_and_both_texts_recorded(self):
         self.finding()

@@ -44,6 +44,12 @@ review = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(review)
 
 
+def copy_review_script(destination):
+    """Copy the entry point and its eager shipped dependency as fixture data."""
+    for name in ("review.py", "plan_review.py"):
+        (destination.parent / name).write_bytes((SCRIPT.parent / name).read_bytes())
+
+
 _MODULE_STATE_HOME = None
 _SAVED_MODULE_ENV = None
 _ORIGINAL_APPEND_REVIEW_JOURNAL = review.append_review_journal
@@ -543,7 +549,7 @@ class TestConfigErrors(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         (tmp / "scripts").mkdir()
         script = tmp / "scripts" / "review.py"
-        script.write_text(SCRIPT.read_text())
+        copy_review_script(script)
         if content is not None:
             (tmp / "reviewers.json").write_text(content)
         return subprocess.run([sys.executable, str(script), "--list"],
@@ -775,7 +781,7 @@ class TestJointReviewRegressions(unittest.TestCase):
             with self.subTest(provider=bad):
                 tmp = Path(_tf.mkdtemp())
                 (tmp / "scripts").mkdir()
-                (tmp / "scripts" / "review.py").write_text(SCRIPT.read_text())
+                copy_review_script(tmp / "scripts" / "review.py")
                 (tmp / "reviewers.json").write_text(
                     '{"reviewers":[{"name":"x","provider":' + bad +
                     ',"model":"m"}]}')
@@ -789,7 +795,7 @@ class TestJointReviewRegressions(unittest.TestCase):
         import tempfile as _tf
         tmp = Path(_tf.mkdtemp())
         (tmp / "scripts").mkdir()
-        (tmp / "scripts" / "review.py").write_text(SCRIPT.read_text())
+        copy_review_script(tmp / "scripts" / "review.py")
         (tmp / "reviewers.json").write_text(
             '{"reviewers":[{"name":"x","provider":"openai","model":"m",'
             '"profiles":"fast"}]}')
@@ -924,7 +930,7 @@ class TestConfigFifo(unittest.TestCase):
         import tempfile as _tf, os as _os
         tmp = Path(_tf.mkdtemp())
         (tmp / "scripts").mkdir()
-        (tmp / "scripts" / "review.py").write_text(SCRIPT.read_text())
+        copy_review_script(tmp / "scripts" / "review.py")
         _os.mkfifo(tmp / "reviewers.json")
         pr = subprocess.Popen(
             [sys.executable, str(tmp / "scripts" / "review.py"), "--list"],

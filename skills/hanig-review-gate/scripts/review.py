@@ -2970,6 +2970,9 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
 
 
 # --- bounded collaborative plan review -------------------------------------
+# File-path loaders need the shipped siblings too. Normal import caches one
+# plan_review object in sys.modules for the facade, committee and tests.
+sys.path.insert(0, str(HERE))
 from plan_review import (
     MIN_PLAN_REFUTATION_CHARS, joint_plan_verdict, plan_cross_prompt,
     plan_finding_ids, plan_finding_text, plan_panel_error, plan_schema_error,
