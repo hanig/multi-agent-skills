@@ -2970,6 +2970,8 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
 
 
 # --- bounded collaborative plan review -------------------------------------
+MIN_PLAN_REFUTATION_CHARS = 40
+
 PLAN_SYSTEM = SYSTEM + """
 
 This is a PLAN review: assess the supplied design and acceptance criteria,
@@ -2998,7 +3000,9 @@ def plan_cross_prompt(own, peer, own_ids, peer_ids, peer_text):
         "if refuted. You cannot see the peer's turn-2 response.\n"
         "Also return peer_responses: exactly one object for EACH peer turn-1 ID, "
         "with finding_id, response (exactly concur, refute, or refine), and text. "
-        "For refute, text must give a concrete reason or counterexample; for "
+        "For refute, text must give a concrete reason or counterexample with at "
+        f"least {MIN_PLAN_REFUTATION_CHARS} characters after collapsing whitespace; "
+        "a shorter or missing reason leaves the finding standing. For "
         "refine, text is the corrected statement; for concur, explain agreement. "
         "A refinement retains the finding's original severity. An unrefuted "
         "finding stands even if withdrawn by its author. New turn-2 findings "
@@ -3030,7 +3034,12 @@ def plan_schema_error(verdict, claims, own_ids=None, peer_ids=None):
                     return "own_findings requires boolean kept and string defense"
                 if not entry["kept"] and entry["defense"].strip():
                     return "a withdrawn finding cannot also have a defense"
-            elif (entry.get("response") not in ("concur", "refute", "refine")
+            elif entry.get("response") == "refute":
+                # Missing/short reasons are recorded as ineffective responses,
+                # rather than discarding the exchange and its standing findings.
+                if not isinstance(entry.get("text", ""), str):
+                    return "a refutation reason must be a string when supplied"
+            elif (entry.get("response") not in ("concur", "refine")
                   or not isinstance(entry.get("text"), str) or not entry["text"].strip()):
                 return "peer_responses requires concur/refute/refine and nonempty text"
     return None
@@ -3043,6 +3052,9 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
     against text. With simultaneous final turns it cannot answer an unseen
     refutation. An unresolved disagreement therefore stands conservatively.
     """
+    if (len(names) != 2 or len(set(names)) != 2
+            or set(first) != set(names) or set(second) != set(names)):
+        return "REVIEW_UNAVAILABLE", []
     table = []
     for author in names:
         peer = next(n for n in names if n != author)
@@ -3052,8 +3064,13 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
                                 first[author]["findings"]):
             position, response = own[fid], responses[fid]
             defended = position["kept"] and bool(position["defense"].strip())
-            outcome = ("refuted" if response["response"] == "refute" and not defended
-                       else "standing")
+            outcome = "standing"
+            if response["response"] == "refute":
+                reason = " ".join(response.get("text", "").split())
+                if len(reason) < MIN_PLAN_REFUTATION_CHARS:
+                    outcome = "refutation_too_short"
+                elif not defended:
+                    outcome = "refuted"
             table.append({"finding_id": fid, "finding": finding, "author": author,
                           "author_position": position, "other_seat": peer,
                           "response": response, "outcome": outcome})
@@ -3065,7 +3082,7 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
     # to support: an extra contradictory assessment cannot hide behind a match.
     upheld = all(all(norm(c["status"]) == "supported" for c in second[n]["claims"])
                  and not unassessed_claims(second[n]["claims"], claims) for n in names)
-    blocking = any(row["outcome"] == "standing"
+    blocking = any(row["outcome"] != "refuted"
                    and norm(row["finding"]["severity"]) in ("major", "critical")
                    for row in table)
     return ("PLAN_PASS" if upheld and not blocking and not truncated else "PLAN_FAIL"), table
@@ -3116,7 +3133,7 @@ def run_plan_exchange(members, prompt, claims, timeout, truncated=False):
     state, session["joint_table"] = joint_plan_verdict(names, first, second, claims, truncated)
     completed = [{**second[name], "name": name,
                   "findings": [row["finding"] for row in session["joint_table"]
-                               if row["author"] == name and row["outcome"] == "standing"]}
+                               if row["author"] == name and row["outcome"] != "refuted"]}
                  for name in names]
     return state, session, completed
 

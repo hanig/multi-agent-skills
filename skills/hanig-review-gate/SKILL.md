@@ -62,8 +62,12 @@ and may add new findings. There is no third turn and no `--round`.
 turn; turn 2 includes the preceding history and peer answer.
 
 Code computes the joint table and verdict from both turn-2 answers. A finding
-stands unless the peer refutes it and its author supplies no explicit defense
-while keeping it. A refinement retains the original severity. Withdrawal
+stands unless the peer refutes it with a reason of at least 40 characters after
+collapsing whitespace and its author supplies no explicit defense while keeping
+it. This is a length floor, not a judgment of whether the reason is concrete.
+A shorter or missing reason counts as no response: the finding stands, and the
+joint table records `refutation_too_short` with the verbatim response.
+A refinement retains the original severity. Withdrawal
 alone does not drop an unrefuted finding; new turn-2 findings stand as
 unrefuted. Because the final turns are simultaneous, a defense can address
 turn-1 contrary evidence but cannot answer an unseen turn-2 refutation.
@@ -71,11 +75,18 @@ Refuted findings remain in the table with the original finding, author
 position and peer response. A claim is upheld only if both seats mark it
 `supported` after turn 2.
 
+Declared limits: a seat that restates its own refuted turn-1 finding as a new
+turn-2 finding has defended it. The restatement stands; a major or critical
+restatement yields `PLAN_FAIL`. Code follows the response enum (`concur`,
+`refute`, `refine`), never the prose: a `concur` whose explanation contradicts
+it still counts as concurrence, and the explanation stays in the record.
+
 `PLAN_PASS` (exit 0) requires every claim upheld and no standing major or
 critical finding, irrespective of confidence or scope labels. Otherwise the
 result is `PLAN_FAIL` (exit 1); truncated input also cannot pass. Either seat
 failing in either turn, including an unusable or incomplete answer, gives
-`REVIEW_UNAVAILABLE` (exit 2). JSON and the journal retain both turns per seat,
+`REVIEW_UNAVAILABLE` (exit 2). The joint-verdict function itself also refuses
+unless exactly two seats completed both turns. JSON and the journal retain both turns per seat,
 the joint table and token usage; text output displays them too. Verbatim peer
 delivery happens before report/journal credential redaction. Implementation
 reviews retain their existing stateless behavior and confirmation filter.

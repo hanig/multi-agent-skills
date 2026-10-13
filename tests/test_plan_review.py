@@ -129,6 +129,57 @@ class TestPlanExchange(unittest.TestCase):
         self.assertEqual(row['outcome'], 'standing')
         self.assertIsNone(row['response'])
 
+    def test_vacuous_refutation_keeps_finding_and_reason(self):
+        self.finding()
+        self.second['beta']['peer_responses'][0]['text'] = 'No.'
+        code, report, _ = self.run_cli()
+        self.assertEqual((code, report['state']), (1, 'PLAN_FAIL'))
+        row = report['plan_exchange']['joint_table'][0]
+        self.assertEqual(row['outcome'], 'refutation_too_short')
+        self.assertEqual(row['response']['text'], 'No.')
+        self.assertEqual(report['results'][0]['findings'], [FINDING])
+        self.assertEqual(self.journal(report)['plan_exchange'], report['plan_exchange'])
+
+    def test_refutation_length_boundary_after_collapsing_whitespace(self):
+        for length, outcome, state, code in (
+                (39, 'refutation_too_short', 'PLAN_FAIL', 1),
+                (40, 'refuted', 'PLAN_PASS', 0)):
+            with self.subTest(length=length):
+                self.finding()
+                reason = '  \n' + 'x' * (length - 2) + '\t  \n y  '
+                self.assertEqual(len(' '.join(reason.split())), length)
+                self.second['beta']['peer_responses'][0]['text'] = reason
+                actual_code, report, _ = self.run_cli()
+                self.assertEqual((actual_code, report['state']), (code, state))
+                row = report['plan_exchange']['joint_table'][0]
+                self.assertEqual(row['outcome'], outcome)
+                self.assertEqual(row['response']['text'], reason)
+
+    def test_missing_or_blank_refutation_reason_keeps_finding(self):
+        for text in (None, '', ' \t\n '):
+            with self.subTest(text=text):
+                self.finding()
+                response = self.second['beta']['peer_responses'][0]
+                if text is None:
+                    del response['text']
+                else:
+                    response['text'] = text
+                code, report, _ = self.run_cli()
+                self.assertEqual((code, report['state']), (1, 'PLAN_FAIL'))
+                row = report['plan_exchange']['joint_table'][0]
+                self.assertEqual(row['outcome'], 'refutation_too_short')
+                self.assertEqual(row['response'], response)
+                self.assertEqual(report['results'][0]['findings'], [FINDING])
+
+    def test_restated_refuted_finding_stands_and_fails(self):
+        self.finding()
+        self.second['alpha']['findings'] = [copy.deepcopy(FINDING)]
+        code, report, _ = self.run_cli()
+        self.assertEqual((code, report['state']), (1, 'PLAN_FAIL'))
+        table = report['plan_exchange']['joint_table']
+        self.assertEqual([row['outcome'] for row in table], ['refuted', 'standing'])
+        self.assertEqual(table[1]['finding'], FINDING)
+
     def test_concurred_finding_stands(self):
         self.finding('concur', kept=True)
         code, report, _ = self.run_cli()
@@ -284,6 +335,30 @@ class TestPlanExchange(unittest.TestCase):
         for text in ('alpha TURN 1', 'alpha TURN 2', 'beta TURN 1', 'beta TURN 2',
                      'JOINT TABLE:', 'refuted', 'PLAN_PASS'):
             self.assertIn(text, output)
+
+
+class TestJointPlanPanel(unittest.TestCase):
+    def test_empty_panel_is_unavailable(self):
+        self.assertEqual(review.joint_plan_verdict([], {}, {}, [CLAIM]),
+                         ('REVIEW_UNAVAILABLE', []))
+
+    def test_one_seat_is_unavailable(self):
+        self.assertEqual(review.joint_plan_verdict(
+            ['alpha'], {'alpha': answer()},
+            {'alpha': dict(answer(), own_findings=[], peer_responses=[])}, [CLAIM]),
+            ('REVIEW_UNAVAILABLE', []))
+
+    def test_both_seats_must_complete_both_turns(self):
+        for turn in (1, 2):
+            for seat in ('alpha', 'beta'):
+                with self.subTest(turn=turn, seat=seat):
+                    first = {n: answer() for n in ('alpha', 'beta')}
+                    second = {n: dict(answer(), own_findings=[], peer_responses=[])
+                              for n in first}
+                    del (first if turn == 1 else second)[seat]
+                    self.assertEqual(review.joint_plan_verdict(
+                        ['alpha', 'beta'], first, second, [CLAIM]),
+                        ('REVIEW_UNAVAILABLE', []))
 
 
 if __name__ == '__main__':
