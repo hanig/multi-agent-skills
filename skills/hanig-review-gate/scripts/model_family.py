@@ -26,7 +26,8 @@ SCHEMA = 1
 STATE_DIR = ("hanig-review-gate", "routing")
 LISTINGS = ("openai", "openrouter", "anthropic")
 PASEO_PREFIX = "paseo:"
-FAMILY_FIELDS = ("listing", "vendor", "prefix", "separator", "suffix", "major")
+FAMILY_FIELDS = ("listing", "vendor", "prefix", "separator", "suffix", "major",
+                 "named_version")
 
 
 class FamilyError(ValueError):
@@ -59,6 +60,12 @@ def check_family(family):
     major = family.get("major")
     if not (isinstance(major, int) and not isinstance(major, bool) and major >= 0):
         raise FamilyError("family.major must be a non-negative integer")
+    if "named_version" in family:
+        named = family["named_version"]
+        if (not isinstance(named, str)
+                or re.fullmatch(r"[a-z][a-z0-9-]*", named) is None or major != 0):
+            raise FamilyError("family.named_version must be a lowercase name "
+                              "with family.major 0 (exact pin only)")
     return family
 
 
@@ -68,7 +75,8 @@ def version_of(model_id, family):
     In the family means: vendor path equals family.vendor exactly, and the
     name is exactly prefix + digits [+ separator + digits] + suffix. Nothing
     else is accepted, so -pro, :batch, dated snapshots and previews are simply
-    not in the family.
+    not in the family. An optional named_version admits only that exact core
+    at the sentinel version (0, 0); it never selects numeric or named upgrades.
     """
     # A leading or trailing "/" would leave an empty vendor or name; any other
     # malformed path leaves a vendor that equals no family's.
@@ -82,6 +90,8 @@ def version_of(model_id, family):
             and len(name) > len(prefix) + len(suffix)):
         return None
     core = name[len(prefix):len(name) - len(suffix)]
+    if "named_version" in family:
+        return (0, 0) if core == family["named_version"] else None
     sep = re.escape(family.get("separator", "."))
     # Bounded digit runs: an unbounded run from an external id would reach
     # int()'s digit limit on newer Pythons.

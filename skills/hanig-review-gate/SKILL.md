@@ -172,7 +172,7 @@ with `--stop-and-ask REASON`, which refuses without calling a provider and is
 retained in the session. Semantic classification otherwise rests on the model
 and an honest caller; a ruling supplies analysis, never additional authority.
 An unavailable, empty, truncated or malformed answer routes to OWNER (exit 1)
-with a persisted reason. Any Astra coauthor (`--author codex/gpt-6-astra`, also
+with a persisted reason. Any Sol coauthor (`--author codex/gpt-6.1-sol`, also
 recognized by its legacy bare model and configured aliases) refuses the
 tie-break using the same model exclusion rule as membership. Missing or conflicting author
 declarations also route to the owner; existing sessions can declare their author
@@ -299,9 +299,9 @@ walks toward `deep`, stopping at the first `REVIEW_FAIL` or
 tier did not run:
 
 ```
-fast      luna + sonnet-5.5
+fast      luna + haiku-5.5
   ↓ pass
-standard  + kimi-k2.7-code
+standard  + kimi-k2.7-code + sonnet-5.5
   ↓ pass
 deep      + sol @ xhigh
 ```
@@ -453,19 +453,26 @@ and availability is resolved live by `--list` rather than asserted in a file.
 
 | Name | Provider | Model | Needs |
 |---|---|---|---|
-| `luna` | OpenAI | `gpt-6-luna` (effort `high`) | `OPENAI_API_KEY` |
+| `luna` | OpenAI | `gpt-6-luna` (effort `max`) | `OPENAI_API_KEY` |
+| `haiku-5.5` | Anthropic | `claude-haiku-5-5` (effort `max`, fast) | `ANTHROPIC_API_KEY` |
 | `sonnet-5.5` | Anthropic | `claude-sonnet-5-5` (effort `high`) | `ANTHROPIC_API_KEY` |
 | `kimi-k2.7-code` | OpenRouter | `moonshotai/kimi-k2.7-code` | `OPENROUTER_API_KEY` |
-| `sol` | OpenAI | `gpt-6.1-sol` (effort `xhigh`, plan and deep) | `OPENAI_API_KEY` |
+| `astra` | OpenAI | `gpt-6-astra` (effort `xhigh`, plan) | `OPENAI_API_KEY` |
+| `kimi-k3` | OpenRouter | `moonshotai/kimi-k3` (effort `xhigh`, plan) | `OPENROUTER_API_KEY` |
+| `muse-wonder` | OpenRouter | `meta/muse-wonder` (effort `high`, committee) | `OPENROUTER_API_KEY` |
+| `deepseek-v4-pro` | OpenRouter | `deepseek/deepseek-v4-pro` (committee) | `OPENROUTER_API_KEY` |
+| `sol-tiebreak` | OpenAI | `gpt-6.1-sol` (effort `xhigh`, tiebreak) | `OPENAI_API_KEY` |
+| `sol` | OpenAI | `gpt-6.1-sol` (effort `xhigh`, deep) | `OPENAI_API_KEY` |
 
 All three provider keys are exported from `~/.zshrc`; a non-interactive shell does not source
 it, so run through `zsh -ic` or the gate reports `REVIEW_UNAVAILABLE`.
 
 **Point releases resolve per project** (`scripts/resolve_models.py`; README, "Model families").
 
-Plan review is Sol and Kimi, because a Claude orchestrator writes the plans.
-Astra drives code and is in no gate tier; its `high` seat remains available to
-an explicitly selected committee. DeepSeek V4 Pro is a committee member. Author exclusion applies to every selected panel. Reviewers run in parallel, so wall time is the slowest one.
+Owner decision 2026-10-12: plan review is Astra and Kimi K3, pairing OpenAI
+and Moonshot because a Claude orchestrator writes the plans. The committee
+is DeepSeek V4 Pro, Muse Wonder and Sonnet 5.5. Sonnet retains standard and
+deep; Sol retains deep and the separate tie-breaker seat stays unchanged. Author exclusion applies to every selected panel. Reviewers run in parallel, so wall time is the slowest one.
 
 Transient 5xx and 429 responses are retried with backoff — a gateway hiccup must
 not silently shrink the panel and make the gate weaker than it reports.

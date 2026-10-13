@@ -122,7 +122,8 @@ class TestEscalationOverAnEmptyLadderRefuses(unittest.TestCase):
 class TestShippedLadderAddsReviewers(unittest.TestCase):
     def test_upgraded_models_reach_the_openai_request_with_existing_limits(self):
         roster = {r["name"]: r for r in R.load_reviewers()}
-        for name, model, effort in (("luna", "gpt-6-luna", "high"),
+        for name, model, effort in (("luna", "gpt-6-luna", "max"),
+                                    ("astra", "gpt-6-astra", "xhigh"),
                                     ("sol", "gpt-6.1-sol", "xhigh")):
             with self.subTest(reviewer=name), \
                     patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), \
@@ -139,24 +140,69 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
                 self.assertEqual(request["reasoning"], {"effort": effort})
                 self.assertEqual(request["max_output_tokens"], 128000)
 
-    def test_each_enabled_tier_is_a_strict_superset_of_the_previous_tier(self):
-        import json
-        cfg = json.loads((REVIEW.parent.parent / "reviewers.json").read_text())
+    def test_owner_decision_profiles_are_exact(self):
+        roster = R.load_reviewers()
+        expected = {
+            "fast": {"luna", "haiku-5.5"},
+            "standard": {"luna", "kimi-k2.7-code", "sonnet-5.5"},
+            "deep": {"luna", "kimi-k2.7-code", "sonnet-5.5", "sol"},
+            "plan": {"astra", "kimi-k3"},
+            "committee": {"deepseek-v4-pro", "muse-wonder", "sonnet-5.5"},
+            "tiebreak": {"sol-tiebreak"},
+        }
+        for profile, names in expected.items():
+            with self.subTest(profile=profile):
+                self.assertEqual({r["name"] for r in roster
+                                  if r.get("enabled", True)
+                                  and R.in_profile(r, profile)}, names)
+        seen = set()
+        for tier in R.LADDER:
+            cumulative = seen | expected[tier]
+            self.assertLess(seen, cumulative, tier)
+            seen = cumulative
 
-        def enabled_members(profile):
-            return {
-                reviewer["name"]
-                for reviewer in cfg["reviewers"]
-                if reviewer.get("enabled", True)
-                and R.in_profile(reviewer, profile)
-            }
+    def test_owner_decision_efforts_and_transports_are_exact(self):
+        expected = {
+            "luna": ("openai", "gpt-6-luna", "max"),
+            "haiku-5.5": ("anthropic", "claude-haiku-5-5", "max"),
+            "astra": ("openai", "gpt-6-astra", "xhigh"),
+            "kimi-k3": ("openrouter", "moonshotai/kimi-k3", "xhigh"),
+            "muse-wonder": ("openrouter", "meta/muse-wonder", "high"),
+            "kimi-k2.7-code": ("openrouter", "moonshotai/kimi-k2.7-code", None),
+            "sonnet-5.5": ("anthropic", "claude-sonnet-5-5", "high"),
+            "deepseek-v4-pro": ("openrouter", "deepseek/deepseek-v4-pro", None),
+            "sol": ("openai", "gpt-6.1-sol", "xhigh"),
+            "sol-tiebreak": ("openai", "gpt-6.1-sol", "xhigh"),
+        }
+        self.assertEqual({r["name"]: (r["provider"], r["model"], r["effort"])
+                          for r in R.load_reviewers()}, expected)
 
-        for lower, upper in zip(R.LADDER, R.LADDER[1:]):
-            with self.subTest(lower=lower, upper=upper):
-                self.assertLess(
-                    enabled_members(lower), enabled_members(upper),
-                    "%s must add at least one enabled reviewer beyond %s"
-                    % (upper, lower))
+    def test_new_seats_reach_the_real_provider_payload_builders(self):
+        roster = {r["name"]: r for r in R.load_reviewers()}
+        for name in ("muse-wonder", "haiku-5.5", "kimi-k3"):
+            seat = roster[name]
+            with self.subTest(seat=name), patch.dict(os.environ, {
+                    "OPENROUTER_API_KEY": "test-key",
+                    "ANTHROPIC_API_KEY": "test-key"}), patch.object(
+                        R, "_post", return_value=(None, "transport stopped")) as post:
+                R.PROVIDERS[seat["provider"]](seat, "ping", 1)
+                payload = post.call_args.args[1]
+                self.assertEqual(payload["model"], seat["model"])
+                self.assertEqual(payload["max_tokens"], 128000)
+                if seat["provider"] == "anthropic":
+                    self.assertEqual(payload["output_config"], {"effort": "max"})
+                    self.assertEqual(payload["thinking"], {"type": "adaptive"})
+                else:
+                    self.assertEqual(payload["reasoning"], {"effort": seat["effort"]})
+
+    def test_default_committee_selects_three_independent_members(self):
+        import committee
+        members = committee.pick_members([], authors=["codex/gpt-6-astra"])
+        self.assertEqual({m["name"] for m in members},
+                         {"deepseek-v4-pro", "muse-wonder", "sonnet-5.5"})
+        self.assertEqual(len(members), 3)
+        self.assertEqual({m["provider"] for m in members},
+                         {"openrouter", "anthropic"})
 
 
 class TestChangedPathProfiles(unittest.TestCase):
@@ -226,7 +272,7 @@ class TestChangedPathProfiles(unittest.TestCase):
         self.write(self.doc)
         report, called = self.report("--diff")
         self.assertEqual(report["profile"], "fast")
-        self.assertEqual(set(called), {"luna", "sonnet-5.5"})
+        self.assertEqual(set(called), {"luna", "haiku-5.5"})
         self.write(self.code)
         report, called = self.report("--diff")
         self.assertEqual(report["profile"], "standard")
@@ -392,7 +438,11 @@ class TestChangedPathProfiles(unittest.TestCase):
             report, called = self.report("--diff", "--escalate", *flags)
             self.assertEqual(report["tiers_run"], expected)
             self.assertEqual(len(called), len(set(called)))
-            self.assertEqual(set(called), {"luna", "sonnet-5.5", "kimi-k2.7-code", "sol"})
+            wanted = {"luna", "sonnet-5.5", "kimi-k2.7-code", "sol"}
+            if expected[0] == "fast":
+                wanted.add("haiku-5.5")
+            self.assertEqual(set(called), wanted)
+            self.assertEqual({r["name"] for r in report["results"]}, wanted)
         self.write(self.code)
         report, _ = self.report("--diff", "--escalate")
         self.assertEqual(report["tiers_run"], ["standard", "deep"])
@@ -547,7 +597,7 @@ class TestAuthorExclusion(unittest.TestCase):
 
     def test_plan_cannot_drop_its_author_and_pass_with_one(self):
         code, output, _err, called = self.invoke(
-            "--author", "codex/gpt-6.1-sol", kind="plan")
+            "--author", "codex/gpt-6-astra", kind="plan")
         self.assertEqual(code, R.STATES["REVIEW_UNAVAILABLE"], output)
         self.assertIn("required quorum is 2", output)
         self.assertEqual(called, [])

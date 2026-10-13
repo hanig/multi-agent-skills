@@ -27,7 +27,7 @@
       ],
       "cost_tier": "plan-high",
       "quota": "codex plan; live rate-limit windows read from codex rollouts",
-      "notes": "Upgraded by owner decision on 2026-09-25. Deep-tier and plan review gate, committee tie-breaker and mandate concurrence party, all at xhigh; optional code dispatch at high. API budget acceptance is recorded in reviewers.json; Paseo dispatch of this release was not measured here. Prior-release scores and qualitative notes remain dated history, not measurements of this release.",
+      "notes": "Upgraded by owner decision on 2026-09-25. Deep-tier review gate (left plan by owner decision 2026-10-12), committee tie-breaker and mandate concurrence party, all at xhigh; optional code dispatch at high. API budget acceptance is recorded in reviewers.json; Paseo dispatch of this release was not measured here. Prior-release scores and qualitative notes remain dated history, not measurements of this release.",
       "_previous_release_measurements": {
         "id": "codex/gpt-5.6-sol",
         "date": "2026-08",
@@ -62,7 +62,7 @@
       ],
       "cost_tier": "plan-mid",
       "quota": "codex plan; live rate-limit windows read from codex rollouts",
-      "notes": "Upgraded by owner decision on 2026-09-25. Review gate at high; research/audit dispatch intent at xhigh. API budget acceptance is recorded in reviewers.json; Paseo dispatch of this release was not measured here. Prior-release scores and qualitative notes remain dated history, not measurements of this release.",
+      "notes": "Upgraded by owner decision on 2026-09-25. Review gate at max by owner decision 2026-10-12; research/audit dispatch intent at xhigh. API budget acceptance is recorded in reviewers.json; Paseo dispatch of this release was not measured here. Prior-release scores and qualitative notes remain dated history, not measurements of this release.",
       "_previous_release_measurements": {
         "id": "codex/gpt-5.6-luna",
         "date": "2026-08",
