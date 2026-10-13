@@ -104,6 +104,16 @@ class TestReviewWatchdog(unittest.TestCase):
                 arm.assert_not_called()
         self.assertEqual(self.observed, [])
 
+    def test_empty_escalation_panel_refuses_before_arming(self):
+        for seat in self.roster:
+            seat["profiles"] = []
+        arm = self.invoke(["--kind", "implementation", "--round", "1",
+                           "--profile", "fast", "--escalate", "--json",
+                           "--file", str(self.subject), "--claim", review.HONEST_RUN_CLAIM],
+                          expected_exit=4)
+        arm.assert_not_called()
+        self.assertEqual(self.observed, [])
+
     def test_provider_phase_retains_default_minimum_and_override_durations(self):
         for extra, duration in (([], 3600), (["--timeout", "10"], 1800),
                                 (["--timeout", "1300"], 3900),
