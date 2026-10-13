@@ -16,6 +16,7 @@ from unittest import mock
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'skills' / 'hanig-review-gate' / 'scripts'))
 import committee
+import plan_review
 import review
 
 CLAIM = 'The design preserves every input record in its original order.'
@@ -137,6 +138,21 @@ class TestPlanExchange(unittest.TestCase):
     def test_direct_duplicate_seat_names_refused_before_transport(self):
         self.assert_direct_panel_refused([
             MEMBERS[0], dict(MEMBERS[1], name=MEMBERS[0]['name'])])
+
+    def test_cli_uses_joint_verdict_in_plan_owner(self):
+        self.finding()
+        with mock.patch.object(plan_review, 'joint_plan_verdict',
+                               wraps=plan_review.joint_plan_verdict) as decide:
+            code, report, _ = self.run_cli()
+        self.assertEqual((code, report['state']), (0, 'PLAN_PASS'))
+        decide.assert_called_once()
+        names, first, second, claims, truncated = decide.call_args.args
+        self.assertEqual(names, ['alpha', 'beta'])
+        self.assertEqual(first, self.first)
+        self.assertEqual(second, self.second)
+        self.assertEqual(claims, [CLAIM])
+        self.assertFalse(truncated)
+        self.assertEqual(len(self.requests), 4)
 
     def test_refuted_finding_dropped_and_both_texts_recorded(self):
         self.finding()
@@ -498,6 +514,13 @@ class TestPlanExchange(unittest.TestCase):
 
 
 class TestJointPlanPanel(unittest.TestCase):
+    def test_review_reexports_plan_owner_names(self):
+        for name in ('MIN_PLAN_REFUTATION_CHARS', 'plan_finding_ids',
+                     'plan_finding_text', 'plan_cross_prompt', 'plan_schema_error',
+                     'joint_plan_verdict', 'run_plan_exchange', 'plan_panel_error'):
+            with self.subTest(name=name):
+                self.assertIs(getattr(review, name), getattr(plan_review, name))
+
     def test_empty_panel_is_unavailable(self):
         self.assertEqual(review.joint_plan_verdict([], {}, {}, [CLAIM]),
                          ('REVIEW_UNAVAILABLE', []))
