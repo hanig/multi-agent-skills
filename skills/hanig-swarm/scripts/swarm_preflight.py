@@ -1,7 +1,4 @@
-"""Workspace preflight and output claims for the swarm coordinator.
-
-Python 3.8+, standard library only. No coordinator or network dependency.
-"""
+"""Workspace preflight and output claims. Python 3.8+, stdlib only."""
 
 import hashlib
 import json
@@ -15,7 +12,7 @@ import worktree as W
 import swarm_routing as SR
 import swarm_plan_rules as SPR
 
-# Shared with the coordinator's dry-attempt bookkeeping.
+# Shared with coordinator dry-attempt bookkeeping.
 DRY_PREFIX = "dry-attempt-"
 
 

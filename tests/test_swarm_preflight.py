@@ -1,4 +1,4 @@
-"""Preflight extraction keeps public aliases and patch delivery intact."""
+"""Preflight extraction contracts."""
 
 import ast
 from pathlib import Path
@@ -13,7 +13,7 @@ sys.path.insert(0, str(SCRIPTS))
 import swarm as S
 import swarm_preflight as SP
 
-DEFINITIONS = (
+DEFS = (
     "_git", "_unattended_mode_example", "_workspace_policy",
     "_requires_clean_workspace", "_execution_workspace", "PreflightRefusal",
     "_plan_workspace", "_dirty_refusal", "_repeat_launch_preflight",
@@ -21,26 +21,26 @@ DEFINITIONS = (
     "_claim_refusal", "_claim_record", "_own_claim", "_take_output_claims",
     "_drop_claims", "_release_output_claims", "_note_claimed_attempt",
 )
-CONSTANTS = (
+CONSTS = (
     "OUTPUT_CLAIMS_DIRNAME", "CLAIM_FILE", "CLAIM_LIVE", "CLAIM_FREE",
     "CLAIM_UNKNOWN", "DRY_PREFIX",
 )
 
 
 class TestPreflightExtraction(unittest.TestCase):
-    def test_every_moved_definition_is_reexported_identically(self):
-        namespace = {}
-        exec("from swarm import " + ", ".join(DEFINITIONS + CONSTANTS), namespace)
-        for name in DEFINITIONS + CONSTANTS:
+    def test_identical_reexports(self):
+        ns = {}
+        exec("from swarm import " + ", ".join(DEFS + CONSTS), ns)
+        for name in DEFS + CONSTS:
             with self.subTest(name=name):
                 self.assertIs(getattr(S, name), getattr(SP, name))
-                self.assertIs(namespace[name], getattr(SP, name))
-                if name in DEFINITIONS:
+                self.assertIs(ns[name], getattr(SP, name))
+                if name in DEFS:
                     self.assertEqual(getattr(SP, name).__module__, SP.__name__)
                     if name != "PreflightRefusal":
                         self.assertIs(getattr(SP, name).__globals__, SP.__dict__)
 
-    def test_owner_workspace_patch_reaches_moved_preflight(self):
+    def test_workspace_patch_delivery(self):
         unit = {"id": "work"}
         with mock.patch.object(SP, "_plan_workspace",
                                return_value=(None, "fixture refusal")) as resolve:
@@ -48,17 +48,17 @@ class TestPreflightExtraction(unittest.TestCase):
                              ("fixture refusal", None))
         resolve.assert_called_once_with(unit)
 
-    def test_owner_git_patch_reaches_coordinator_stash_check(self):
+    def test_git_patch_delivery(self):
         with mock.patch.object(SP, "_git", return_value=(1, "", "fixture failure")) as git:
-            refusal = S._stash_preflight("work", "/fixture/repo")
+            refusal = S._stash_preflight("work", "/repo")
         self.assertIn("cannot be shown to be empty", refusal)
-        git.assert_called_once_with("/fixture/repo", "stash", "list")
+        git.assert_called_once_with("/repo", "stash", "list")
 
-    def test_coordinator_consumers_read_functions_from_owner(self):
+    def test_owner_lookups(self):
         tree = ast.parse(Path(S.__file__).read_text())
         bare = [(n.id, n.lineno) for n in ast.walk(tree)
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
-                and n.id in DEFINITIONS + CONSTANTS]
+                and n.id in DEFS + CONSTS]
         consumers = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
                      and isinstance(n.value, ast.Name) and n.value.id == "SP"}
         self.assertEqual(consumers, {
@@ -68,38 +68,33 @@ class TestPreflightExtraction(unittest.TestCase):
             "_repeat_launch_preflight", "_requires_clean_workspace",
             "_take_output_claims", "_unattended_mode_example",
         })
-        self.assertEqual(bare, [], "a cached facade read bypasses owner patches")
+        self.assertEqual(bare, [], "facade bypasses patches")
 
-    def test_tests_patch_preflight_owner(self):
-        # Maintenance lint for the suite's patch/object, setattr and assignment
-        # spellings, not arbitrary Python alias/dataflow analysis.
+    def test_patch_owners(self):
         offenders, owner_patches = [], set()
         for path in sorted((ROOT / "tests").glob("test_*.py")):
             tree = ast.parse(path.read_text())
-            aliases = {a.asname or a.name for n in ast.walk(tree)
-                       if isinstance(n, ast.Import) for a in n.names if a.name == "swarm"}
-            owners = {a.asname or a.name for n in ast.walk(tree)
-                      if isinstance(n, ast.Import) for a in n.names
-                      if a.name == "swarm_preflight"}
+            imports = {(a.name, a.asname or a.name) for n in ast.walk(tree)
+                       if isinstance(n, ast.Import) for a in n.names}
+            aliases = {a for m, a in imports if m == "swarm"}
+            owners = {a for m, a in imports if m == "swarm_preflight"}
             for node in ast.walk(tree):
                 target, name = None, None
                 if isinstance(node, ast.Call):
                     args = node.args
-                    if (isinstance(node.func, ast.Attribute) and node.func.attr == "addCleanup"
-                            and args and isinstance(args[0], ast.Name)
-                            and args[0].id == "setattr"):
+                    method = getattr(node.func, "attr", None)
+                    function = getattr(node.func, "id", None)
+                    if (method == "addCleanup" and args
+                            and getattr(args[0], "id", None) == "setattr"):
                         args = args[1:]
                     if (len(args) >= 2 and isinstance(args[1], ast.Constant)
-                            and ((isinstance(node.func, ast.Attribute)
-                                  and node.func.attr in {"object", "addCleanup"})
-                                 or (isinstance(node.func, ast.Name)
-                                     and node.func.id == "setattr"))):
+                            and (method in {"object", "addCleanup"} or function == "setattr")):
                         target, name = ast.unparse(args[0]), args[1].value
                     elif args and isinstance(args[0], ast.Constant) and isinstance(args[0].value, str):
                         target, _, name = args[0].value.rpartition(".")
                 elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
                     target, name = ast.unparse(node.value), node.attr
-                if name in DEFINITIONS + CONSTANTS:
+                if name in DEFS + CONSTS:
                     if target in aliases | {"swarm", "self.S"}:
                         offenders.append((path.name, node.lineno, target, name))
                     if target in owners | {"swarm_preflight", "S.SP", "self.S.SP"}:
@@ -107,21 +102,20 @@ class TestPreflightExtraction(unittest.TestCase):
         self.assertTrue({"_git", "_plan_workspace", "_release_output_claims"} <= owner_patches)
         self.assertEqual(offenders, [])
 
-    def test_new_module_imports_without_facade_or_network(self):
+    def test_standalone_offline_import(self):
         tree = ast.parse(Path(SP.__file__).read_text())
         found = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
-        self.assertEqual(found, set(DEFINITIONS))
+        self.assertEqual(found, set(DEFS))
         forbidden = {"swarm", "review", "committee", "resolve_models", "linear_api",
                      "linear_sync", "merge_unit", "urllib", "http", "socket", "ssl"}
         imports = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
         imports |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
                     for a in n.names}
         self.assertFalse({str(n).split(".")[0] for n in imports} & forbidden)
-        # pathlib may import urllib.parse; block its network client at runtime.
-        runtime_forbidden = (forbidden - {"urllib"}) | {"urllib.request"}
+        blocked = (forbidden - {"urllib"}) | {"urllib.request"}
         result = subprocess.run([sys.executable, "-c", (
             "import sys; sys.path.insert(0, sys.argv[1]); import swarm_preflight; "
-            "assert not set(sys.modules).intersection(" + repr(runtime_forbidden) + ")"
+            "assert not set(sys.modules).intersection(" + repr(blocked) + ")"
         ), str(SCRIPTS)], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
