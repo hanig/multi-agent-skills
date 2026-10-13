@@ -169,7 +169,7 @@ class SeedDispatchTests(unittest.TestCase):
 
     def test_unreachable_head_refuses_before_worktree_or_agent(self):
         self.unit["seed"] = dict(self.seed, ref="refs/heads/main")
-        with mock.patch.object(S, "_create_code_worktree") as create:
+        with mock.patch.object(S.SCL, "_create_code_worktree") as create:
             job, error = self.submit()
         self.assertIsNone(job)
         self.assertIn("seed", error)

@@ -672,7 +672,7 @@ class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
         the base was read back out of the agent-writable record and returned
         to be stored as trusted state."""
         import ast
-        src = (SCRIPTS / "swarm.py").read_text()
+        src = (SCRIPTS / "swarm_code_launch.py").read_text()
         fn = next(n for n in ast.walk(ast.parse(src))
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "_write_launch_record")
@@ -695,7 +695,7 @@ class TestTheBaseComesFromCoordinatorState(unittest.TestCase):
 
     def test_the_writer_returns_the_base_it_observed(self):
         import ast
-        src = (SCRIPTS / "swarm.py").read_text()
+        src = (SCRIPTS / "swarm_code_launch.py").read_text()
         fn = next(n for n in ast.walk(ast.parse(src))
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "_write_launch_record")
@@ -849,7 +849,7 @@ class TestOneWayToGetTheBase(unittest.TestCase):
     def test_nothing_else_reads_a_base_out_of_a_launch_record(self):
         import ast
         trees = [ast.parse((SCRIPTS / name).read_text())
-                 for name in ("swarm.py", "swarm_evidence.py")]
+                 for name in ("swarm.py", "swarm_evidence.py", "swarm_code_launch.py")]
         self.assertTrue({"trusted_base", "_write_launch_record"} <= {
             n.name for tree in trees for n in tree.body if isinstance(n, ast.FunctionDef)})
         offenders = []
@@ -872,7 +872,7 @@ class TestOneWayToGetTheBase(unittest.TestCase):
     def test_every_caller_goes_through_it(self):
         import ast
         trees = [ast.parse((SCRIPTS / name).read_text())
-                 for name in ("swarm.py", "swarm_evidence.py")]
+                 for name in ("swarm.py", "swarm_evidence.py", "swarm_code_launch.py")]
         self.assertTrue({"trusted_base", "_submit"} <= {
             n.name for tree in trees for n in tree.body if isinstance(n, ast.FunctionDef)})
         readers = []

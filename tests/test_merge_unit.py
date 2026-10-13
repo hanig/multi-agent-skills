@@ -1314,7 +1314,7 @@ class TestMergeUnit(unittest.TestCase):
     def test_coordinator_never_imports_network_operator(self):
         imports = []
         definitions = set()
-        for name in ("swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py"):
+        for name in ("swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py", "swarm_code_launch.py"):
             tree = ast.parse((SCRIPTS / name).read_text())
             definitions.update(n.name for n in tree.body
                                if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
@@ -1324,6 +1324,17 @@ class TestMergeUnit(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom):
                     imports.append(node.module)
         self.assertTrue({"cmd_merge", "load_agent_routing", "PlanError", "acquire_lease", "_fsync_append", "attested_receipt", "_intent_key"} <= definitions)
+        self.assertTrue({
+            "_capture_code_launch",
+            "_code_launch_intent_problem",
+            "_paseo_workspace_id",
+            "_code_launch_record_payload",
+            "_create_code_worktree",
+            "_register_code_workspace",
+            "_write_code_launch_record",
+            "_complete_code_launch",
+            "_write_launch_record",
+        } <= definitions)
         self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
                          "_dispatch_prompt", "_code_protocol_problem"} <= definitions)
         self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= definitions)

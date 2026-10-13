@@ -163,7 +163,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             with mock.patch.object(SR.json, "loads", side_effect=load) as loader:
                 spec.loader.exec_module(routing)
             loader.assert_called_once_with(original)
-            with mock.patch.object(S, "SR", routing):
+            with mock.patch.object(S, "SR", routing), \
+                 mock.patch.object(S.SCL, "SR", routing):
                 for split in (False, True):
                     uid = "route-%s-%s" % (index, split)
                     attempt = self.attempt(uid, uid)
@@ -188,6 +189,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
                     else:
                         self.assertNotIn("--model", argv)
                     self.assertEqual(argv[argv.index("--thinking") + 1], "high")
+                    intent = state["units"][uid]["attempt_launch_intents"][attempt.name]
+                    self.assertEqual(intent["provider"], unit.get("provider") or provider)
                     seen.append(actual_provider)
         self.assertEqual(len(set(seen)), 4)
 
@@ -1733,7 +1736,7 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
     def test_no_archive_call_escapes_a_dry_run_guard(self):
         import ast
         paths = sorted(SCRIPTS.glob("swarm*.py"))
-        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py"}
+        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py", "swarm_code_launch.py"}
                         <= {path.name for path in paths})
         unguarded, calls = [], []
         definitions = set()
@@ -1758,6 +1761,17 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
                     calls.append((path.name, node.lineno))
                     if not any(lo <= node.lineno <= hi for lo, hi in guarded):
                         unguarded.append((path.name, node.lineno))
+        self.assertTrue({
+            "_capture_code_launch",
+            "_code_launch_intent_problem",
+            "_paseo_workspace_id",
+            "_code_launch_record_payload",
+            "_create_code_worktree",
+            "_register_code_workspace",
+            "_write_code_launch_record",
+            "_complete_code_launch",
+            "_write_launch_record",
+        } <= definitions)
         self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
                          "_dispatch_prompt", "_code_protocol_problem"} <= definitions)
         self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= definitions)
