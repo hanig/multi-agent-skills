@@ -3065,6 +3065,7 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
     if (len(names) != 2 or len(set(names)) != 2
             or set(first) != set(names) or set(second) != set(names)):
         return "REVIEW_UNAVAILABLE", []
+    severity_order = {"minor": 0, "major": 1, "critical": 2}
     table = []
     for author in names:
         peer = next(n for n in names if n != author)
@@ -3091,6 +3092,10 @@ def joint_plan_verdict(names, first, second, claims, truncated=False):
         for i, finding in enumerate(second[author]["findings"]):
             original = originals.get(plan_finding_text(finding))
             if original is not None:
+                if (severity_order[norm(finding["severity"])]
+                        > severity_order[norm(original["finding"]["severity"])]):
+                    original["finding"] = {**original["finding"],
+                                           "severity": finding["severity"]}
                 table.append({**original, "finding_id": f"{author}:new:{i + 1}",
                               "finding": finding, "outcome": "restated",
                               "restated_finding_id": original["finding_id"],

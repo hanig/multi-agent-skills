@@ -218,6 +218,63 @@ class TestPlanExchange(unittest.TestCase):
         self.assertEqual(self.journal(report)['plan_exchange'], report['plan_exchange'])
         self.assertEqual(len(self.requests), 4)
 
+    def assert_restatement_severity(self, initial, restatements, expected,
+                                   response='concur'):
+        self.finding(response, kept=True)
+        original = dict(FINDING, severity=initial)
+        self.first['alpha']['findings'] = [original]
+        self.second['alpha']['findings'] = [dict(FINDING, severity=severity)
+                                            for severity in restatements]
+        code, report, _ = self.run_cli()
+        blocking = response != 'refute' and expected in ('major', 'critical')
+        self.assertEqual((code, report['state']),
+                         (1, 'PLAN_FAIL') if blocking else (0, 'PLAN_PASS'))
+        table = report['plan_exchange']['joint_table']
+        merged = dict(original, severity=expected)
+        self.assertEqual(table[0]['finding'], merged)
+        outcome = 'refuted' if response == 'refute' else 'standing'
+        self.assertEqual(table[0]['outcome'], outcome)
+        self.assertEqual(len(table), 1 + len(restatements))
+        for row, severity in zip(table[1:], restatements):
+            self.assertEqual(row['finding']['severity'], severity)
+            self.assertEqual(row['outcome'], 'restated')
+            self.assertEqual(row['restated_finding_id'], 'alpha:1')
+            self.assertEqual(row['response_outcome'], outcome)
+            self.assertEqual(row['response'], self.second['beta']['peer_responses'][0])
+        self.assertEqual(report['results'][0]['findings'],
+                         [] if response == 'refute' else [merged])
+        recorded = report['plan_exchange']['members']['alpha']['answers']
+        self.assertEqual(recorded[0]['verdict']['findings'], [original])
+        self.assertEqual(json.loads(recorded[0]['raw'])['findings'], [original])
+        self.assertEqual(recorded[1]['verdict']['findings'],
+                         self.second['alpha']['findings'])
+        self.assertEqual(self.journal(report)['plan_exchange'], report['plan_exchange'])
+        self.assertEqual(len(self.requests), 4)
+
+    def test_minor_restated_as_critical_fails_plan(self):
+        self.assert_restatement_severity('minor', ['critical'], 'critical')
+
+    def test_critical_restated_as_minor_stays_critical(self):
+        self.assert_restatement_severity('critical', ['minor'], 'critical')
+
+    def test_restatement_severity_order_and_repeated_merges(self):
+        for initial, restatements, expected in (
+                ('minor', ['minor'], 'minor'),
+                ('minor', ['major'], 'major'),
+                ('major', ['minor'], 'major'),
+                ('major', ['major'], 'major'),
+                ('major', ['critical'], 'critical'),
+                ('critical', ['major'], 'critical'),
+                ('critical', ['critical'], 'critical'),
+                ('minor', ['critical', 'major', 'minor'], 'critical'),
+                ('minor', ['major', 'critical'], 'critical')):
+            with self.subTest(initial=initial, restatements=restatements):
+                self.assert_restatement_severity(initial, restatements, expected)
+
+    def test_escalated_restatement_keeps_peer_refutation(self):
+        self.assert_restatement_severity('minor', ['critical'], 'critical',
+                                        response='refute')
+
     def test_restated_text_normalization_is_exact_and_closed(self):
         original = dict(FINDING, summary='Caf\u00e9 STRASSE sorts records.',
                         failure_scenario='Input B,A becomes A,B.')

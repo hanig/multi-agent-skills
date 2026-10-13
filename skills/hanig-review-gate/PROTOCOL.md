@@ -433,8 +433,12 @@ as an own turn-1 finding is merged into that original finding. Each text field
 is normalized by Unicode NFC, casefold, collapsing whitespace runs to one space,
 and stripping surrounding whitespace, in that order. Nothing else counts as
 equal. The first matching own turn-1 finding supplies the peer response and
-outcome; all original findings retain their independent responses. The joint
-table keeps the merged row with outcome `restated`, `restated_finding_id` and
+outcome; all original findings retain their independent responses. The merged
+finding keeps the higher severity, ordered minor < major < critical; a
+restatement can raise severity but never lower it. The recorded replies retain
+their original severities, and the peer response still decides whether the
+finding stands. The joint table keeps the merged row with outcome `restated`,
+`restated_finding_id` and
 `response_outcome`. It adds no finding to the verdict or final findings list.
 A paraphrase remains a new, unrefuted finding.
 
