@@ -24,7 +24,7 @@ from pathlib import Path
 
 SCHEMA = 1
 STATE_DIR = ("hanig-review-gate", "routing")
-LISTINGS = ("openai", "openrouter")
+LISTINGS = ("openai", "openrouter", "anthropic")
 PASEO_PREFIX = "paseo:"
 FAMILY_FIELDS = ("listing", "vendor", "prefix", "separator", "suffix", "major")
 
@@ -47,7 +47,7 @@ def check_family(family):
     if not (listing in LISTINGS or (isinstance(listing, str)
                                     and listing.startswith(PASEO_PREFIX)
                                     and len(listing) > len(PASEO_PREFIX))):
-        raise FamilyError("family.listing must be openai, openrouter or "
+        raise FamilyError("family.listing must be openai, openrouter, anthropic or "
                           "paseo:<provider>, got %r" % (listing,))
     for field in ("vendor", "prefix", "suffix"):
         if not isinstance(family.get(field, ""), str):

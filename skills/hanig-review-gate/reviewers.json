@@ -132,13 +132,13 @@
   },
   {
    "name": "sonnet-5.5",
-   "provider": "openrouter",
-   "model": "anthropic/claude-sonnet-5.5",
+   "provider": "anthropic",
+   "model": "claude-sonnet-5-5",
    "family": {
-    "listing": "openrouter",
-    "vendor": "anthropic",
+    "listing": "anthropic",
+    "vendor": "",
     "prefix": "claude-sonnet-",
-    "separator": ".",
+    "separator": "-",
     "suffix": "",
     "major": 5
    },
@@ -156,20 +156,35 @@
    },
    "_note": "Added 2026-09-28 by owner decision, taking kimi-k2.7-code's fast and committee seats, so no tier lacks a second model maker. Released the same day: no third-party code-review data yet, and AA-Omniscience rates it more likely than Opus 5.5 to state a wrong answer confidently. Every finding is reproduced before it is acted on, which bounds that cost. Kept off plan review because the orchestrator that writes plans is a Claude model.",
    "max_output_tokens": 128000,
-   "_max_output_tokens": "MEASURED through review._post's OpenRouter request shape at the configured effort and 128000 cap; completed with finish_reason stop. The minimal probe establishes budget acceptance, not capacity for every review.",
+   "_max_output_tokens": "MEASURED through the native Anthropic Messages API at the unchanged high effort and 128000 cap. Prior OpenRouter acceptance is retained in _max_output_tokens_history. The minimal probe establishes budget acceptance, not capacity for every review.",
    "_max_output_tokens_accepted": {
-    "date": "2026-09-28",
+    "date": "2026-10-12",
     "max_output_tokens": 128000,
-    "provider": "openrouter",
-    "model": "anthropic/claude-sonnet-5.5",
+    "provider": "anthropic",
+    "model": "claude-sonnet-5-5",
     "effort": "high",
     "outcome": "completed",
-    "input_tokens": 1386,
-    "output_tokens": 275,
-    "reasoning_tokens": 195,
-    "response_id": "gen-1790628085-TdT8M8abJuB19MqmRTvd",
-    "observed_in": "2026-09-28 routing change; review._post to OpenRouter chat/completions with review.SYSTEM and input: Reply with exactly OK.; returned an upheld empty verdict. Timestamp is UTC."
-   }
+    "input_tokens": 1378,
+    "output_tokens": 78,
+    "reasoning_tokens": 0,
+    "response_id": "msg_011CfxsXrL8fd7ev2kGZGvcS",
+    "observed_in": "2026-10-12 native routing change; review.probe_liveness through review._post to api.anthropic.com/v1/messages, review.SYSTEM, input ping; end_turn with usable text. Measures budget acceptance and response, not capacity for every review."
+   },
+   "_max_output_tokens_history": [
+    {
+     "date": "2026-09-28",
+     "max_output_tokens": 128000,
+     "provider": "openrouter",
+     "model": "anthropic/claude-sonnet-5.5",
+     "effort": "high",
+     "outcome": "completed",
+     "input_tokens": 1386,
+     "output_tokens": 275,
+     "reasoning_tokens": 195,
+     "response_id": "gen-1790628085-TdT8M8abJuB19MqmRTvd",
+     "observed_in": "2026-09-28 routing change; review._post to OpenRouter chat/completions with review.SYSTEM and input: Reply with exactly OK.; returned an upheld empty verdict. Timestamp is UTC."
+    }
+   ]
   },
   {
    "name": "astra",

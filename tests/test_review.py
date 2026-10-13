@@ -1020,6 +1020,7 @@ class TestRangeDivergence(unittest.TestCase):
         env = dict(os.environ)
         env.pop("OPENAI_API_KEY", None)
         env.pop("OPENROUTER_API_KEY", None)
+        env.pop("ANTHROPIC_API_KEY", None)
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--range", range_spec,
              "--kind", "implementation", "--round", "1",
@@ -1471,6 +1472,7 @@ class TestFailClosed(unittest.TestCase):
         env = dict(os.environ)
         env.pop("OPENAI_API_KEY", None)
         env.pop("OPENROUTER_API_KEY", None)
+        env.pop("ANTHROPIC_API_KEY", None)
         r = subprocess.run([sys.executable, str(SCRIPT), "--list"],
                            capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
@@ -2363,6 +2365,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
         env = dict(os.environ)
         env.pop("OPENAI_API_KEY", None)
         env.pop("OPENROUTER_API_KEY", None)
+        env.pop("ANTHROPIC_API_KEY", None)
         r = subprocess.run(
             [sys.executable, str(SCRIPT), "--file", str(SCRIPT), *argv],
             capture_output=True, text=True, timeout=120, env=env)

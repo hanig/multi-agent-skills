@@ -1186,6 +1186,18 @@ def _post(url, payload, headers, timeout, retries=3, deadline=None):
     return None, redact(f"{last} (after {retries} attempts)")
 
 
+def redact_provider_result(call):
+    """Scrub every returned string, including metadata, errors and usage.
+
+    All provider and committee transports share this return boundary. Keep
+    response classification inside the call, before redacting its values.
+    """
+    def scrubbed(*args, **kwargs):
+        return tuple(deep_redact(value) for value in call(*args, **kwargs))
+    return scrubbed
+
+
+@redact_provider_result
 def call_openai(rev, prompt, timeout, deadline=None):
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -1231,7 +1243,7 @@ def call_openai(rev, prompt, timeout, deadline=None):
         completion_tokens=usage.get("output_tokens"))
     if empty_error:
         return None, empty_error
-    return {"text": text,
+    return {"text": redact(text),
             "in_tokens": usage.get("input_tokens"),
             "out_tokens": usage.get("output_tokens"),
             "reasoning_tokens": detail.get("reasoning_tokens"),
@@ -1240,6 +1252,7 @@ def call_openai(rev, prompt, timeout, deadline=None):
             "response_id": data.get("id")}, None
 
 
+@redact_provider_result
 def call_openrouter(rev, prompt, timeout, deadline=None):
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
@@ -1272,7 +1285,7 @@ def call_openrouter(rev, prompt, timeout, deadline=None):
         completion_tokens=usage.get("completion_tokens"))
     if empty_error:
         return None, empty_error
-    return {"text": text,
+    return {"text": redact(text),
             "in_tokens": usage.get("prompt_tokens"),
             "out_tokens": usage.get("completion_tokens"),
             "reasoning_tokens": detail.get("reasoning_tokens"),
@@ -1282,7 +1295,60 @@ def call_openrouter(rev, prompt, timeout, deadline=None):
             "response_id": data.get("id")}, None
 
 
-PROVIDERS = {"openai": call_openai, "openrouter": call_openrouter}
+def anthropic_headers(key):
+    """Native Messages and Models API authentication; never a bearer token."""
+    return {"x-api-key": key, "anthropic-version": "2023-06-01",
+            "content-type": "application/json"}
+
+
+@redact_provider_result
+def anthropic_messages(rev, messages, system, timeout, deadline=None):
+    """Shared native transport for reviews and stateful committee turns."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return None, "ANTHROPIC_API_KEY not set"
+    payload = {"model": rev["model"], "system": system, "messages": messages,
+               "max_tokens": rev.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)}
+    if rev.get("effort"):
+        payload["thinking"] = {"type": "adaptive"}
+        payload["output_config"] = {"effort": rev["effort"]}
+    try:
+        data, err = _post("https://api.anthropic.com/v1/messages", payload,
+                          anthropic_headers(key), timeout, deadline=deadline)
+    except Exception as exc:
+        return None, redact(f"{type(exc).__name__}: {exc}")
+    if err:
+        return None, redact(err)
+    try:
+        text = "".join(block["text"] for block in data["content"]
+                       if isinstance(block, dict) and block.get("type") == "text")
+        usage = data.get("usage") or {}
+        detail = usage.get("output_tokens_details") or {}
+        reasoning = usage.get("reasoning_tokens", detail.get(
+            "reasoning_tokens", detail.get("thinking_tokens")))
+        stop = data.get("stop_reason")
+        result = {"text": redact(text), "in_tokens": usage.get("input_tokens"),
+                  "out_tokens": usage.get("output_tokens"),
+                  "reasoning_tokens": reasoning, "served_model": data.get("model"),
+                  "status": "completed" if stop == "end_turn" else stop,
+                  "response_id": data.get("id")}
+    except (AttributeError, KeyError, TypeError):
+        return None, redact(f"unexpected response shape: {data!r}")[:200]
+    empty_error = no_content_error(
+        rev, text, finish_reason="max_output_tokens" if stop == "max_tokens" else stop,
+        reasoning_tokens=reasoning, completion_tokens=result["out_tokens"])
+    if empty_error:
+        return None, redact(empty_error)
+    return result, None
+
+
+def call_anthropic(rev, prompt, timeout, deadline=None):
+    return anthropic_messages(rev, [{"role": "user", "content": prompt}],
+                              SYSTEM, timeout, deadline=deadline)
+
+
+PROVIDERS = {"openai": call_openai, "openrouter": call_openrouter,
+             "anthropic": call_anthropic}
 
 
 # --- parsing ----------------------------------------------------------------
@@ -2215,6 +2281,11 @@ def load_reviewers():
             if not isinstance(val, str) or not val.strip():
                 config_error(f"reviewer '{field}' must be a non-empty string, "
                              f"got {val!r}")
+        if (r["provider"] == "anthropic" and r.get("effort") is not None
+                and r["effort"] not in ("low", "medium", "high", "max")):
+            config_error(f"anthropic reviewer {r['name']!r} has unsupported "
+                         f"effort {r['effort']!r}; Pass low, medium, high, max "
+                         f"or omit effort")
         if r.get("effort") is not None and not isinstance(r["effort"], str):
             config_error(f"reviewer 'effort' must be a string or null, got "
                          f"{r['effort']!r}")
@@ -2274,7 +2345,8 @@ def availability(rev):
     """Why a reviewer cannot run, or None if it can."""
     if not rev.get("enabled", True):
         return "disabled in reviewers.json"
-    env = {"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+    env = {"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY",
+           "anthropic": "ANTHROPIC_API_KEY"}
     var = env.get(rev["provider"])
     if var and not os.environ.get(var):
         return f"{var} not set"
