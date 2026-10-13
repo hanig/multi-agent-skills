@@ -15,6 +15,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "hanig-swarm" / "scripts"))
+import swarm_preflight as SP
 import swarm as S
 import swarm_evidence as SE
 from tests.test_attempt_worktrees import FakePaseo
@@ -265,7 +266,7 @@ class CommitIdentityTests(unittest.TestCase):
                     "-p", self.target, "-m", "newer target")
         observations = []
         remote_query = S._git_push_destination
-        workspace = S._plan_workspace
+        workspace = SP._plan_workspace
 
         def moving_target(repo, raw, resolved, remote_index, *args, **kwargs):
             if args == ("ls-remote", "--exit-code", raw, "refs/heads/main"):
@@ -288,7 +289,7 @@ class CommitIdentityTests(unittest.TestCase):
             path.mkdir(parents=True)
             return str(path), None
 
-        with mock.patch.object(S, "_plan_workspace",
+        with mock.patch.object(SP, "_plan_workspace",
                                side_effect=workspace_spelling), \
                 mock.patch.object(S, "_git_push_destination",
                                   side_effect=moving_target), \

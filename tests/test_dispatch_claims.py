@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 SWARM = SCRIPTS / "swarm.py"
 sys.path.insert(0, str(SCRIPTS))
+import swarm_preflight as SP
 import swarm as S  # noqa: E402
 from tests.scheduler_fixture import isolated_module_path
 from tests.scheduler_fixture import cleanup_module_path as tearDownModule
@@ -890,7 +891,7 @@ class TestANonEmptyStashStackRefusesACodeDispatch(unittest.TestCase):
         self.assertIsInstance(err, S.PreflightRefusal)
 
     def test_an_unreadable_stack_is_not_read_as_empty(self):
-        with mock.patch.object(S, "_git", lambda repo, *a, **k: (
+        with mock.patch.object(SP, "_git", lambda repo, *a, **k: (
                 (1, "", "boom") if a[:1] == ("stash",) else (0, "x", ""))):
             problem = S._stash_preflight("code", str(self.repo))
         self.assertIn("cannot be shown to be empty", problem)

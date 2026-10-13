@@ -458,7 +458,7 @@ class TestTheLiftIsClosed(unittest.TestCase):
 
     FILES = (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
              SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_plan_rules.py",
-             SCRIPTS / "swarm_outbox.py")
+             SCRIPTS / "swarm_outbox.py", SCRIPTS / "swarm_preflight.py")
 
     def _assigned(self, tree):
         import ast
@@ -489,6 +489,9 @@ class TestTheLiftIsClosed(unittest.TestCase):
         import ast
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_preflight.py":
+                self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_plan_rules.py":
                 self.assertTrue({"declared_seed", "account_problems", "resolve_promote_to"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
@@ -516,6 +519,9 @@ class TestTheLiftIsClosed(unittest.TestCase):
                   "tempfile", "fnmatch", "pathlib"}
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_preflight.py":
+                self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_plan_rules.py":
                 self.assertTrue({"declared_seed", "account_problems", "resolve_promote_to"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
@@ -925,9 +931,12 @@ class TestClosureByExclusion(unittest.TestCase):
         import ast, builtins
         for f in (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
                   SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_plan_rules.py",
-                  SCRIPTS / "swarm_outbox.py",
+                  SCRIPTS / "swarm_outbox.py", SCRIPTS / "swarm_preflight.py",
                   SCRIPTS / "converge.py"):
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_preflight.py":
+                self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_plan_rules.py":
                 self.assertTrue({"declared_seed", "account_problems", "resolve_promote_to"} <= {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})

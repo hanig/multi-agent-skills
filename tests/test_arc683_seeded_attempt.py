@@ -12,6 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "hanig-swarm" / "scripts"))
+import swarm_preflight as SP
 import swarm as S
 from tests.test_attempt_worktrees import ENV, FakePaseo, git, repo_at, paseo_resolvable
 
@@ -313,7 +314,7 @@ class SeedDispatchTests(unittest.TestCase):
         self.assertEqual((Path(workspace) / "repair.txt").read_text(), "carried forward\n")
 
     def test_temporary_ref_cleanup_lock_does_not_change_reachability(self):
-        real_git = S._git
+        real_git = SP._git
 
         def locked_cleanup(repo, *args, **kwargs):
             if args[:2] == ("update-ref", "-d") and args[2].startswith(
@@ -325,7 +326,7 @@ class SeedDispatchTests(unittest.TestCase):
                 path.write_text("another Git operation\n")
             return real_git(repo, *args, **kwargs)
 
-        with mock.patch.object(S, "_git", locked_cleanup), \
+        with mock.patch.object(SP, "_git", locked_cleanup), \
                 mock.patch.object(S.sys, "stderr") as warnings:
             job, error = self.submit()
             self.assertIsNone(error)
@@ -461,10 +462,10 @@ class UnseededCompatibilityTests(unittest.TestCase):
                   "base_tree": "b" * 40,
                   "repository_remote_raw": "https://example.invalid/repo.git",
                   "repository_remote": "https://example.invalid/repo.git"}
-        with mock.patch.object(S, "_plan_workspace", return_value=(unit["repo"], None)), \
+        with mock.patch.object(SP, "_plan_workspace", return_value=(unit["repo"], None)), \
                 mock.patch.object(S, "_stash_preflight", return_value=None), \
                 mock.patch.object(S, "_git_push_destination", return_value=(2, "", "")), \
-                mock.patch.object(S, "_git", return_value=(1, "", "")), \
+                mock.patch.object(SP, "_git", return_value=(1, "", "")), \
                 mock.patch.object(S, "_installed_skill_snapshot",
                                   return_value={"skills": [], "errors": []}), \
                 mock.patch.object(S.os, "uname", return_value=SimpleNamespace(
