@@ -2974,9 +2974,7 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
 # plan_review object in sys.modules for the facade, committee and tests.
 sys.path.insert(0, str(HERE))
 from plan_review import (
-    MIN_PLAN_REFUTATION_CHARS, joint_plan_verdict, plan_cross_prompt,
-    plan_finding_ids, plan_finding_text, plan_panel_error, plan_schema_error,
-    run_plan_exchange,
+    _joint_plan_verdict, _plan_panel_error, _plan_schema_error, _run_plan_exchange,
 )
 
 PLAN_SYSTEM = SYSTEM + """
@@ -2991,7 +2989,8 @@ The final verdict is computed by code, not by either seat.
 
 
 def cmd_plan_review(args, members, prompt, label, truncated, profile_reason, excluded):
-    panel_error = plan_panel_error(members)
+    """The public plan-review entry; validate every answer before joint judgment."""
+    panel_error = _plan_panel_error(members)
     if panel_error:
         disarm_watchdog()
         print(f"error: {panel_error}", file=sys.stderr)
@@ -3004,8 +3003,16 @@ def cmd_plan_review(args, members, prompt, label, truncated, profile_reason, exc
         state, exchange, completed = "REVIEW_UNAVAILABLE", {
             "members": {}, "turns": [], "joint_table": []}, []
     else:
-        state, exchange, completed = run_plan_exchange(
-            members, prompt, args.claim, args.timeout, truncated)
+        exchange, first, second = _run_plan_exchange(
+            members, prompt, args.claim, args.timeout, validate=_plan_schema_error)
+        state, exchange["joint_table"] = _joint_plan_verdict(
+            members, first, second, args.claim, truncated)
+        completed = [] if state == "REVIEW_UNAVAILABLE" else [
+            {**second[m["name"]], "name": m["name"],
+             "findings": [row["finding"] for row in exchange["joint_table"]
+                          if row["author"] == m["name"]
+                          and row["outcome"] not in ("refuted", "restated")]}
+            for m in members]
     args.plan_exchange = exchange
     disarm_watchdog()
     journal = record_review_round(args, completed, state)
@@ -3303,7 +3310,7 @@ def _main():
     # state, and before any reviewer is called.
     if args.kind == "plan" and not args.list:
         runnable = [r for r in reviewers if r.get("enabled", True)]
-        panel_error = plan_panel_error(runnable)
+        panel_error = _plan_panel_error(runnable)
         if panel_error:
             config_error(panel_error)
         if args.quorum != 2:

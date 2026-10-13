@@ -407,7 +407,10 @@ cannot share a failure mode. `--plan` fixes the panel at two and refuses
 Plan review uses the committee's member conversations. Turn 1 independently
 reviews the plan against the claims in the existing verdict schema. Turn 2
 retains each seat's own history and supplies the other seat's turn-1 answer
-after shared secret redaction, otherwise verbatim. For every peer finding,
+after shared secret redaction, otherwise verbatim. Each peer block uses a fresh
+`secrets.token_hex(16)` nonce generated after redaction; if the nonce occurs in
+the redacted reply, it is regenerated until absent. The opening and closing
+tags contain this nonce, and the enclosed reply is unchanged. For every peer finding,
 each seat must `concur`, `refute` with a
 concrete reason or counterexample, or `refine` with a corrected statement.
 Each seat also marks its own findings kept or withdrawn, gives any defense,
@@ -456,8 +459,14 @@ it still counts as concurrence, and the explanation stays in the record.
 critical finding, irrespective of confidence or scope labels. Otherwise the
 result is `PLAN_FAIL` (exit 1); truncated input also cannot pass. Either seat
 failing in either turn, including an unusable or incomplete answer, gives
-`REVIEW_UNAVAILABLE` (exit 2). The joint-verdict function itself also refuses
-unless exactly two seats completed both turns. JSON and the journal retain both turns per seat,
+`REVIEW_UNAVAILABLE` (exit 2). `review.cmd_plan_review` is the sole public
+plan-review entry used by the CLI. It validates the panel and supplies the
+schema validator for every answer collected by the private exchange before
+computing a verdict. The exchange, verdict and helpers in `plan_review.py`
+are private; `review.py` imports only those it needs internally. The private
+verdict independently validates the panel, both turn-1 schemas and both
+turn-2 schemas (including finding-ID coverage), refusing incomplete input
+even if a caller omitted validation. JSON and the journal retain both turns per seat,
 the joint table and token usage; text output displays them too. Every provider
 reply passes through the shared secret redactor before entering conversation
 history or the peer's prompt; all other bytes remain unchanged. Reports and
