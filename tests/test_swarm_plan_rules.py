@@ -19,10 +19,17 @@ DEFINITIONS = (
     "partition_problems", "read_survey", "discover_survey", "_scheduler_facts",
     "surveyed_partition", "limit_state", "_account_names", "declared_memory",
     "memory_flag_problems", "account_problems", "resolve_promote_to",
+    "_unquoted_shell_syntax", "_isolation_command_argv", "isolation_problem",
+    "_ancestors", "resolve_runtime", "_looks_unresolved", "_runtime_identity",
+    "_validate_runtimes", "converge_problem", "_units_with_canary", "plan_digest",
 )
 CONSTANTS = (
     "_LOOK_IT_UP", "SURVEY_FILE", "LIMIT_SET", "LIMIT_OPEN", "LIMIT_UNKNOWN",
-    "MEM_FLAGS",
+    "MEM_FLAGS", "RESOLUTIONS", "ISOLATION_BACKENDS", "ISOLATION_KEYS",
+    "ISOLATION_ROOT_TOKENS", "ISOLATION_SHELL_EXECUTABLES",
+    "ISOLATION_MULTICALL_EXECUTABLES", "ISOLATION_LAUNCHER_EXECUTABLES",
+    "_NEEDS_RUNTIME", "_PLACEHOLDER_RE", "_PLACEHOLDER_EXACT",
+    "_PLACEHOLDER_PREFIX", "CONVERGE_UNIT_KEYS", "COSMETIC_FIELDS",
 )
 
 
@@ -53,6 +60,22 @@ class TestPlanRulesExtraction(unittest.TestCase):
                 S.validate_plan(plan)
         resolve.assert_called_once_with("/fixture/destination")
 
+    def test_owner_runtime_patch_reaches_coordinator_validation(self):
+        plan = {"units": [{"id": "work", "kind": "slurm", "command": "true",
+                           "runtime": "none", "outputs": ["out"]}]}
+        with mock.patch.object(SPR, "_validate_runtimes",
+                               side_effect=S.PlanError("fixture runtime refusal")) as validate:
+            with self.assertRaisesRegex(S.PlanError, "fixture runtime refusal"):
+                S.validate_plan(plan)
+        validate.assert_called_once_with(plan, plan["units"])
+
+    def test_owner_syntax_patch_reaches_moved_command_parser(self):
+        with mock.patch.object(SPR, "_unquoted_shell_syntax", return_value=";") as syntax:
+            argv, problem = S._isolation_command_argv("/bin/true")
+        self.assertIsNone(argv)
+        self.assertIn("shell syntax ';'", problem)
+        syntax.assert_called_once_with("/bin/true")
+
     def test_coordinator_consumers_read_functions_from_owner(self):
         tree = ast.parse(Path(S.__file__).read_text())
         bare = [(n.id, n.lineno) for n in ast.walk(tree)
@@ -61,10 +84,13 @@ class TestPlanRulesExtraction(unittest.TestCase):
         consumers = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
                      and isinstance(n.value, ast.Name) and n.value.id == "SPR"}
         self.assertEqual(consumers, {
-            "declared_account", "declared_partition", "declared_seed",
+            "declared_partition", "declared_seed",
             "declared_scope", "resolve_promote_to", "partition_problems",
             "_known_partitions", "memory_flag_problems", "account_problems",
             "_scopes_overlap", "discover_survey", "read_survey",
+            "_units_with_canary", "converge_problem", "isolation_problem",
+            "_validate_runtimes", "plan_digest", "resolve_runtime",
+            "_isolation_command_argv", "_ancestors", "_looks_unresolved",
         })
         self.assertEqual(bare, [], "a cached facade read bypasses owner patches")
 
@@ -102,7 +128,8 @@ class TestPlanRulesExtraction(unittest.TestCase):
                         offenders.append((path.name, node.lineno, target, name))
                     if target in owners | {"swarm_plan_rules", "S.SPR", "self.S.SPR"}:
                         owner_patches.add(name)
-        self.assertTrue({"_known_partitions", "resolve_promote_to"} <= owner_patches)
+        self.assertTrue({"_known_partitions", "resolve_promote_to",
+                         "_validate_runtimes", "_unquoted_shell_syntax"} <= owner_patches)
         self.assertEqual(offenders, [])
 
     def test_new_module_imports_without_facade_or_network(self):
