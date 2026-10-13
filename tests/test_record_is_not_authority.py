@@ -141,10 +141,10 @@ ALLOWED = {
         "uses the coordinator-created snapshot for dispatch",
     ("swarm.py", "_allocate"):
         "passes repository identity from the trusted plan into allocation",
-    ("swarm.py", "_resolve_dispatch_target"):
+    ("swarm_preflight.py", "_resolve_dispatch_target"):
         "resolves only the plan's repository and target into transient "
         "coordinator authority before dispatch",
-    ("swarm.py", "_dispatch_source_identity"):
+    ("swarm_preflight.py", "_dispatch_source_identity"):
         "compares the checkout to the coordinator-resolved target",
     ("swarm.py", "_capture_code_launch"):
         "pins the coordinator-created source observation before launch",

@@ -113,7 +113,7 @@ class TestInstalledSkillDrift(unittest.TestCase):
         self.assertIsNone(error)
         source, error = S._dispatch_source_identity(self.unit, target)
         self.assertIsNone(error)
-        with mock.patch.object(S, "_resolve_dispatch_target",
+        with mock.patch.object(SP, "_resolve_dispatch_target",
                                side_effect=AssertionError("must use cached source")):
             attempt, facts, warning = self.dispatch(dispatch_source=source)
         self.assertIn("installed skill drift", warning)
@@ -144,7 +144,7 @@ class TestInstalledSkillDrift(unittest.TestCase):
                     self.assertIsNone(error)
                     source, error = S._dispatch_source_identity(self.unit, target)
                     self.assertIsNone(error)
-                with mock.patch.object(S, "_installed_skill_snapshot",
+                with mock.patch.object(SP, "_installed_skill_snapshot",
                                        side_effect=AssertionError("must not resample")):
                     _attempt, facts, warning = self.dispatch(name, source)
                 self.assertIn("installed skill drift", warning)
@@ -534,7 +534,7 @@ class TestInstalledSkillDrift(unittest.TestCase):
         original = audit_path.read_bytes()
         self.state = S.load_state(self.state_dir)
         del self.state["units"]["code"]["attempt_launch_facts"]
-        with mock.patch.object(S, "_installed_skill_snapshot",
+        with mock.patch.object(SP, "_installed_skill_snapshot",
                                side_effect=AssertionError("must not resample")):
             error = S._complete_code_launch(
                 self.state, self.unit, str(attempt), facts["execution_workspace"],
