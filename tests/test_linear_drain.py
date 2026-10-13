@@ -651,6 +651,11 @@ class TestDrain(DrainCase):
         # Only the established seam owns network imports.
         for path in (*(ROOT / 'skills/hanig-swarm/scripts' / name for name in ('swarm.py', 'swarm_routing.py', 'swarm_types.py', 'swarm_state.py', 'swarm_journal.py', 'swarm_evidence.py', 'swarm_outbox.py')), PROJECT / 'tickets.py', PROJECT / 'drain_contract.py', PROJECT / 'linear_sync.py'):
             tree = ast.parse(path.read_text())
+            if path.name == "swarm_outbox.py":
+                self.assertTrue({"emit_intent", "load_outbox_contract", "record_receipt",
+                                 "acknowledgment_status"} <=
+                                {n.name for n in tree.body
+                                 if isinstance(n, ast.FunctionDef)})
             expected = {"swarm.py": "_submit", "swarm_routing.py": "load_agent_routing",
                         "swarm_types.py": "PlanError", "swarm_state.py": "acquire_lease",
                         "swarm_journal.py": "_fsync_append",

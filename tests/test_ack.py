@@ -24,6 +24,8 @@ SWARM = ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
 sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
 import swarm_journal as SJ  # noqa: E402
+import swarm_outbox as SO  # noqa: E402
+OUTBOX_SOURCE = Path(SO.__file__)
 
 
 _REAL_RECORD_RECEIPT = S.record_receipt
@@ -108,7 +110,7 @@ class TestStatusIsDerivedNotStored(unittest.TestCase):
             self.assertEqual([r["ref"] for r in st["k1"][1]], ["ARC-1"])
 
     def test_intents_no_longer_carry_the_misleading_applied_field(self):
-        src = SWARM.read_text()
+        src = OUTBOX_SOURCE.read_text()
         i = src.index("def emit_intent")
         j = src.index("def read_outbox")
         self.assertNotIn('"applied": False', src[i:j],
@@ -185,7 +187,7 @@ class TestJournalDurability(unittest.TestCase):
     def test_the_write_is_fsynced(self):
         seg = inspect.getsource(SJ._fsync_append) + inspect.getsource(SJ._RawJournal)
         # Keep the original scan's coverage of the following receipt parser.
-        src = SWARM.read_text()
+        src = OUTBOX_SOURCE.read_text()
         seg += src[src.index("def _parse_receipt_text"):src.index("def _read_receipts_raw")]
         self.assertIn("os.fsync", seg)
         self.assertIn("LOCK_EX", seg)
@@ -368,10 +370,11 @@ class TestTheWireValueCarriesTheWeakness(unittest.TestCase):
             self.assertEqual(st["k1"][0], S.ATTESTED_UNSPECIFIED)
 
     def test_no_output_path_ever_says_acknowledged(self):
-        src = SWARM.read_text()
+        src = OUTBOX_SOURCE.read_text()
         i = src.index("UNACKNOWLEDGED = ")
-        j = src.index("def _status_rows")
-        self.assertNotIn('"acknowledged"', src[i:j],
+        facade = SWARM.read_text()
+        j = facade.index("def _status_rows")
+        self.assertNotIn('"acknowledged"', src[i:] + facade[:j],
                          "a consumer reading 'acknowledged' would take an "
                          "attestation for verified tracker state")
 
@@ -551,7 +554,7 @@ class TestRoundThreeFindings(unittest.TestCase):
             self.assertEqual(S._read_receipts_raw(d).problems, [])
 
     def test_fatal_problems_is_structural_not_textual(self):
-        src = SWARM.read_text()
+        src = OUTBOX_SOURCE.read_text()
         i = src.index("def load_acknowledgments")
         j = src.index("def record_receipt")
         seg = inspect.getsource(SJ.fatal_problems) + src[i:j]
@@ -600,17 +603,23 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
         and forgets the gate.
         """
         import ast
-        tree = ast.parse(SWARM.read_text())
+        paths = sorted(SWARM.parent.glob("swarm*.py"))
+        self.assertTrue({"swarm.py", "swarm_outbox.py"} <= {p.name for p in paths})
+        trees = [(path, ast.parse(path.read_text())) for path in paths]
+        found = {n.name for _, tree in trees for n in tree.body
+                 if isinstance(n, ast.FunctionDef)}
+        self.assertTrue({self.CHOKEPOINT, self.RAW, self.WRITER,
+                         "acknowledgment_status", "cmd_outbox"} <= found)
         out = {}
         # Lambdas get their OWN entry. Excluding them from a parent's credits
         # without listing them separately meant a journal read inside a lambda
         # was attributed to nobody and the lint missed it entirely, which the
         # old whole-subtree walk did at least flag. glm-5.3 caught the
         # regression; it is small, and it is still a regression.
-        defs = [n for n in ast.walk(tree)
+        defs = [(path, n) for path, tree in trees for n in ast.walk(tree)
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
                                   ast.Lambda))]
-        for node in defs:
+        for path, node in defs:
             nested = set()
             for sub in ast.walk(node):
                 if sub is node:
@@ -622,7 +631,9 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
             for sub in ast.walk(node):
                 if id(sub) in nested:
                     continue
-                if isinstance(sub, ast.Name) and sub.id == "RECEIPTS":
+                if ((isinstance(sub, ast.Name) and sub.id == "RECEIPTS")
+                        or (isinstance(sub, ast.Attribute) and sub.attr == "RECEIPTS"
+                            and isinstance(sub.value, ast.Name) and sub.value.id == "SO")):
                     refs = True
                 elif isinstance(sub, ast.Call):
                     fn = sub.func
@@ -632,7 +643,7 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
                     elif name == self.RAW:
                         calls_raw = True
             name = getattr(node, "name", "<lambda>")
-            out[(name, node.lineno)] = (refs, calls_choke, calls_raw)
+            out[(name, (path.name, node.lineno))] = (refs, calls_choke, calls_raw)
         return out
 
     def test_every_journal_toucher_goes_through_the_chokepoint(self):
@@ -660,7 +671,7 @@ class TestTheRefusalCannotBeBypassed(unittest.TestCase):
     def test_atomic_writer_is_the_only_admission_exception(self):
         """The writer must inspect and append while holding one lock."""
         import ast
-        fn = next(node for node in ast.parse(SWARM.read_text()).body
+        fn = next(node for node in ast.parse(OUTBOX_SOURCE.read_text()).body
                   if isinstance(node, ast.FunctionDef)
                   and node.name == self.WRITER)
         calls = {}
