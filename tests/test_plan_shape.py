@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / "skills" / "hanig-swarm" / "scripts" / "swarm.py"
 sys.path.insert(0, str(SWARM.parent))
 import swarm as S  # noqa: E402
+import swarm_code_protocol as SCP
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -422,13 +423,13 @@ class TestACodePromptIsAPrompt(CodeUnitCase):
 
     def test_validate_refuses_if_assembled_code_prompt_lacks_protocol(self):
         """Validation exercises the dispatch builder, not plan-authored prose."""
-        real = S._dispatch_prompt
-        S._dispatch_prompt = lambda u, intent=None: str(u.get("prompt") or "")
+        real = SCP._dispatch_prompt
+        SCP._dispatch_prompt = lambda u, intent=None: str(u.get("prompt") or "")
         try:
             with self.assertRaises(S.PlanError) as c:
                 S.validate_plan(self._plan("fix the parser"))
         finally:
-            S._dispatch_prompt = real
+            SCP._dispatch_prompt = real
         self.assertIn("without the required completion protocol",
                       str(c.exception))
 

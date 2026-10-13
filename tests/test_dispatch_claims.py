@@ -30,6 +30,7 @@ SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 SWARM = SCRIPTS / "swarm.py"
 sys.path.insert(0, str(SCRIPTS))
 import swarm_preflight as SP
+import swarm_code_protocol as SCP
 import swarm as S  # noqa: E402
 from tests.scheduler_fixture import isolated_module_path
 from tests.scheduler_fixture import cleanup_module_path as tearDownModule
@@ -458,7 +459,7 @@ class TestTheProtocolForbidsGitStash(unittest.TestCase):
         because a plan cannot reach this text: the coordinator owns it."""
         for substitute in SUBSTITUTES:
             stripped = self.protocol().replace(substitute, "")
-            with mock.patch.object(S, "_code_completion_protocol",
+            with mock.patch.object(SCP, "_code_completion_protocol",
                                    lambda _i, t=stripped: t):
                 problem = S._code_protocol_problem("task\n\n" + stripped,
                                                    INTENT)
@@ -469,7 +470,7 @@ class TestTheProtocolForbidsGitStash(unittest.TestCase):
 
     def test_a_protocol_that_lost_the_porcelain_rule_is_refused(self):
         stripped = self.protocol().replace("git status --porcelain", "")
-        with mock.patch.object(S, "_code_completion_protocol",
+        with mock.patch.object(SCP, "_code_completion_protocol",
                                lambda _i, t=stripped: t):
             problem = S._code_protocol_problem("task\n\n" + stripped, INTENT)
         self.assertIn("foreign path check", problem or "")
@@ -523,7 +524,7 @@ class TestTheProtocolReservesMergingForTheOrchestrator(unittest.TestCase):
                 self.assertNotEqual(protocol, stripped)
                 # Patch the builder too: suffix equality alone must not let
                 # a future builder omission pass the structural check.
-                with mock.patch.object(S, "_code_completion_protocol",
+                with mock.patch.object(SCP, "_code_completion_protocol",
                                        return_value=stripped):
                     prompt = S._dispatch_prompt(
                         {"kind": "code", "prompt": "work"}, INTENT)
@@ -603,7 +604,7 @@ class TestTheProtocolRequiresReviewAndPush(unittest.TestCase):
                     self.assertIn(clause, protocol)
                     return protocol.replace(clause, "")
                 with fake_bin(paseo="exit 99\n"), mock.patch.object(
-                        S, "_code_completion_protocol", side_effect=missing):
+                        SCP, "_code_completion_protocol", side_effect=missing):
                     with self.assertRaisesRegex(S.PlanError, name):
                         S.validate_plan(plan_of(unit))
 
@@ -656,7 +657,7 @@ class TestReviewAndPushBeforeAgentCreation(unittest.TestCase):
 
         # Patch the builder too, so suffix equality cannot mask a missing
         # required-set check. The real _submit must refuse before U.run.
-        with mock.patch.object(S, "_code_completion_protocol", side_effect=missing):
+        with mock.patch.object(SCP, "_code_completion_protocol", side_effect=missing):
             job, error = self.submit()
         self.assertEqual(self.launches, [], "missing clause reached agent creation")
         self.assertIsNone(job)

@@ -73,10 +73,10 @@ ALLOWED = {
     ("swarm.py", "_code_launch_intent_problem"):
         "validates the coordinator-state intent, including that its generated "
         "source branch differs from its plan-declared pull-request target",
-    ("swarm.py", "_code_completion_protocol"):
+    ("swarm_code_protocol.py", "_code_completion_protocol"):
         "renders repository, branch and base from the coordinator-state "
         "launch intent into instructions; it never reads the audit record",
-    ("swarm.py", "_code_protocol_problem"):
+    ("swarm_code_protocol.py", "_code_protocol_problem"):
         "checks an assembled prompt against the coordinator-state launch "
         "intent (or validate_plan's fixed canary intent)",
     ("swarm.py", "_register_code_workspace"):
@@ -273,11 +273,15 @@ class TestNoOneReadsAuthorityOutOfTheRecord(unittest.TestCase):
 
     def test_every_use_of_an_authority_key_is_declared(self):
         offenders = []
+        found = set()
         for path in authority_scripts():
             for func, key, line in _key_uses(path):
+                found.add((path.name, func))
                 if (path.name, func) not in ALLOWED:
                     offenders.append(f"{path.name}:{line} {func}() uses "
                                      f"{key!r}")
+        self.assertTrue({("swarm_code_protocol.py", "_code_completion_protocol"),
+                         ("swarm_code_protocol.py", "_code_protocol_problem")} <= found)
         self.assertEqual(
             offenders, [],
             "These sites name a field whose value decides something. Take it "
