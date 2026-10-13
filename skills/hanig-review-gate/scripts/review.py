@@ -85,8 +85,10 @@ from pathlib import Path
 # Exit 5 remains reserved. The adjudication ledger introduces no review verdict.
 STATES = {"REVIEW_PASS": 0, "REVIEW_FAIL": 1, "REVIEW_UNAVAILABLE": 2,
           "REVIEW_PARTIAL": 3, "REVIEW_ERROR": 4,
-          "REVIEW_INCOMPLETE": 6, "REVIEW_CLAIMS_REFUTED": 7,
-          "PLAN_PASS": 0, "PLAN_FAIL": 1}
+          "REVIEW_INCOMPLETE": 6, "REVIEW_CLAIMS_REFUTED": 7}
+PLAN_STATES = {"PLAN_PASS": STATES["REVIEW_PASS"],
+               "PLAN_FAIL": STATES["REVIEW_FAIL"],
+               "REVIEW_UNAVAILABLE": STATES["REVIEW_UNAVAILABLE"]}
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE.parent / "reviewers.json"
@@ -1014,7 +1016,7 @@ def valid_ledger_field(field, value):
         "type": lambda v: isinstance(v, str) and v in ("review_round", "adjudication"),
         "kind": lambda v: isinstance(v, str) and v in ("plan", "implementation"),
         "decision": lambda v: isinstance(v, str) and v in ADJUDICATION_DECISIONS,
-        "verdict": lambda v: isinstance(v, str) and v in STATES,
+        "verdict": lambda v: isinstance(v, str) and (v in STATES or v in PLAN_STATES),
         "confirmed": lambda v: type(v) is bool,
     }
     return validators[field](value)
@@ -1777,7 +1779,7 @@ def prior_decision(text, offset=0):
     if not all(isinstance(receipt.get(field), kind)
                for field, kind in envelope.items()):
         return None
-    if receipt["state"] not in STATES:
+    if receipt["state"] not in STATES and receipt["state"] not in PLAN_STATES:
         return None
     report_fields = {"reviewed": str, "unavailable": list,
                      "panel_policy": dict, "journal": dict}
@@ -3152,7 +3154,7 @@ def cmd_plan_review(args, members, prompt, label, truncated, profile_reason, exc
         for entry in unavailable:
             print(redact(f"{entry['name']}: {entry['reason']}"))
         print(f"\n{state} — two seats, two turns; a pass is not proof.")
-    return STATES[state]
+    return PLAN_STATES[state]
 
 
 def build_parser():
