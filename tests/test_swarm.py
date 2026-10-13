@@ -1159,7 +1159,7 @@ class TestSafeUnattendedAdvance(Base):
         """It must consult squeue/sacct -- the only party that knows whether a
         submission landed. Reading our own state would beg the question."""
         import ast
-        tree = ast.parse(SWARM.read_text())
+        tree = ast.parse(SWARM.with_name("swarm_workspaces.py").read_text())
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "reconcile_orphan")

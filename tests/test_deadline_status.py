@@ -264,7 +264,7 @@ class TestDeadlineBreach(unittest.TestCase):
                 "a deadline crossed during recovery must retain its attempt"))
             with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
                     mock.patch.object(S.SS, "renew_lease", return_value=True), \
-                    mock.patch.object(S, "reconcile_orphan",
+                    mock.patch.object(S.SW, "reconcile_orphan",
                                       side_effect=reconcile), \
                     mock.patch.object(S, "_allocate", allocate), \
                     mock.patch.object(SP, "_release_output_claims"):
@@ -303,7 +303,7 @@ class TestDeadlineBreach(unittest.TestCase):
             check = mock.Mock(return_value=(S.RUNNING, "", "", ""))
             with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
                     mock.patch.object(S.SS, "renew_lease", return_value=True), \
-                    mock.patch.object(S, "_recover_code_launch",
+                    mock.patch.object(S.SW, "_recover_code_launch",
                                       side_effect=recover), \
                     mock.patch.object(SE, "_check", check), \
                     mock.patch.object(SP, "_release_output_claims"):
@@ -349,7 +349,7 @@ class TestDeadlineBreach(unittest.TestCase):
                 "a crossed recovery failure must stop before checking"))
             with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
                     mock.patch.object(S.SS, "renew_lease", return_value=True), \
-                    mock.patch.object(S, "_recover_code_launch",
+                    mock.patch.object(S.SW, "_recover_code_launch",
                                       side_effect=recover), \
                     mock.patch.object(SE, "_check", check), \
                     mock.patch.object(SP, "_release_output_claims"):
@@ -396,7 +396,7 @@ class TestDeadlineBreach(unittest.TestCase):
                 "missing launch authority must stop before checking"))
             with mock.patch.object(S.time, "time", side_effect=lambda: clock[0]), \
                     mock.patch.object(S.SS, "renew_lease", return_value=True), \
-                    mock.patch.object(S, "_recover_code_launch",
+                    mock.patch.object(S.SW, "_recover_code_launch",
                                       side_effect=recover), \
                     mock.patch.object(SE, "_check", check), \
                     mock.patch.object(SP, "_release_output_claims"):

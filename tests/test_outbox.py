@@ -585,9 +585,9 @@ class TestTheWedges(unittest.TestCase):
     def test_reconcile_asks_sacct_for_a_window(self):
         """sacct WITHOUT -S defaults to today. A crash at 23:50 whose job
         finished at 23:55 is invisible to a 00:10 reconcile."""
-        src = SWARM.read_text()
-        seg = src[src.index("def reconcile_orphan"):]
-        seg = seg[:seg.index("\ndef ")]
+        import inspect
+        seg = inspect.getsource(S.reconcile_orphan)
+        self.assertIn("def reconcile_orphan(", seg)
         self.assertIn('"-S", start', seg,
                       "reconcile must bound the sacct window explicitly")
 
@@ -1792,7 +1792,7 @@ class TestRound2ReviewFindings(unittest.TestCase):
         # reappear in the matcher. Anchoring on the name cannot drift, and it
         # names the one function whose shape is being constrained.
         import ast
-        fn = next(n for n in ast.parse(SWARM.read_text()).body
+        fn = next(n for n in ast.parse(SWARM.with_name("swarm_workspaces.py").read_text()).body
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "reconcile_orphan")
         contained = [ast.unparse(n) for n in ast.walk(fn)

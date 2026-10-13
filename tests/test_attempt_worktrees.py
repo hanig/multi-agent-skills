@@ -1027,7 +1027,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             "produced_head": produced, "receipt_sha256": "f" * 64,
         }, sort_keys=True, separators=(",", ":"))
         real_check = SE._check
-        real_archive = S._archive_code_worktree
+        real_archive = S.SW._archive_code_worktree
 
         def check(*_args, **_kwargs):
             return S.DONE, "DONE", "", result_line
@@ -1043,9 +1043,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             raise Crash()
 
         SE._check = check
-        S._archive_code_worktree = archive_then_crash
+        S.SW._archive_code_worktree = archive_then_crash
         self.addCleanup(setattr, SE, "_check", real_check)
-        self.addCleanup(setattr, S, "_archive_code_worktree", real_archive)
+        self.addCleanup(setattr, S.SW, "_archive_code_worktree", real_archive)
         ok, why = S.acquire_lease(str(state_dir))
         self.assertTrue(ok, why)
         self.addCleanup(S.release_lease, str(state_dir))
@@ -1726,7 +1726,8 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
     a dry run, and the property worth pinning is "every archive site is
     guarded", not "this one is".
 
-    This catches direct calls spelled `_archive_code_worktree` under a lexical
+    This catches direct calls spelled `_archive_code_worktree` or
+    `SW._archive_code_worktree` under a lexical
     `dry_run` condition. An alias, wrapper, computed call, or rebinding can
     evade it; proving that arbitrary Python reaches no archive operation is
     not statically decidable. The behavioural dry-run test remains the actual
@@ -1736,7 +1737,7 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
     def test_no_archive_call_escapes_a_dry_run_guard(self):
         import ast
         paths = sorted(SCRIPTS.glob("swarm*.py"))
-        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py", "swarm_code_launch.py"}
+        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py", "swarm_code_launch.py", "swarm_workspaces.py"}
                         <= {path.name for path in paths})
         unguarded, calls = [], []
         definitions = set()
@@ -1756,8 +1757,11 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
 
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call)
-                        and getattr(node.func, "id", None)
-                        == "_archive_code_worktree"):
+                        and (getattr(node.func, "id", None) == "_archive_code_worktree"
+                             or (isinstance(node.func, ast.Attribute)
+                                 and isinstance(node.func.value, ast.Name)
+                                 and node.func.value.id == "SW"
+                                 and node.func.attr == "_archive_code_worktree"))):
                     calls.append((path.name, node.lineno))
                     if not any(lo <= node.lineno <= hi for lo, hi in guarded):
                         unguarded.append((path.name, node.lineno))
@@ -1780,7 +1784,8 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
                          "acknowledgment_status"} <= definitions)
         self.assertIn("_intent_key", definitions)
         self.assertIn("attested_receipt", definitions)
-        self.assertIn("_archive_code_worktree", definitions)
+        self.assertTrue({"_paseo_json", "_archive_code_worktree",
+                         "_preserve_and_archive_code_worktree", "reconcile_orphan"} <= definitions)
         self.assertIn("apply_agent_resolution", definitions)
         self.assertIn("acquire_lease", definitions)
         self.assertIn("_fsync_append", definitions)
