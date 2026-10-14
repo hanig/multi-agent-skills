@@ -8,6 +8,7 @@ a strong one.
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -67,6 +68,89 @@ def _project(tmp, units=None, receipts=None, findings=None, outbox=None,
         with open(os.path.join(tmp, "tickets.json"), "w") as fh:
             json.dump(tickets, fh)
     return tmp
+
+
+class TestExternalReportPaths(unittest.TestCase):
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.tmp = Path(temporary.name)
+        self.project = self.tmp / "project"
+        _project(str(self.project), receipts={"a": {
+            "state": "DONE", "outputs": {"out.txt": {"sha256": "a" * 64}}}})
+        self.external = self.tmp / "external"
+        (self.project / ".swarm").rename(self.external)
+        self.state = self.external / "state"
+        self.runs = self.external / "runs"
+        self.env = dict(os.environ, XDG_STATE_HOME=str(self.tmp / "defaults"),
+                        HOME=str(self.tmp))
+
+    def cli(self, *args):
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / "report.py"), str(self.project),
+             "--json", *map(str, args)], cwd=str(self.tmp), env=self.env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def test_explicit_state_and_root_report_done_with_attested_receipt(self):
+        result = self.cli("--state-dir", self.state, "--root", self.runs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["verdict"], "COMPLETE")
+        row, = data["units"]
+        self.assertEqual(row["state"], "DONE")
+        self.assertTrue(row["has_receipt"])
+        self.assertTrue(row["receipt_attested"])
+        self.assertEqual(row["outputs"]["out.txt"]["sha256"], "a" * 64)
+
+    def test_without_options_external_run_remains_not_started(self):
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        row, = data["units"]
+        self.assertEqual(row["state"], "NOT STARTED")
+        self.assertFalse(row["has_receipt"])
+        self.assertEqual(data["verdict"], "IN FLIGHT")
+
+    def test_relative_home_and_symlink_overrides_use_shared_resolution(self):
+        (self.tmp / "linked").symlink_to(self.external, target_is_directory=True)
+        for prefix in ("external", "~/external", "linked"):
+            with self.subTest(prefix=prefix):
+                result = self.cli("--state-dir", prefix + "/state",
+                                  "--root", prefix + "/runs")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                row, = json.loads(result.stdout)["units"]
+                self.assertEqual(row["state"], "DONE")
+                self.assertTrue(row["receipt_attested"])
+
+    def test_explicit_state_does_not_migrate_legacy_into_empty_destination(self):
+        self.external.rename(self.project / ".swarm")
+        result = self.cli("--state-dir", self.state, "--root", self.runs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row, = json.loads(result.stdout)["units"]
+        self.assertEqual(row["state"], "NOT STARTED")
+        self.assertFalse(row["has_receipt"])
+        self.assertFalse(self.external.exists())
+
+    def test_explicit_root_does_not_migrate_legacy_receipts_into_destination(self):
+        self.external.rename(self.project / ".swarm")
+        result = self.cli("--root", self.runs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row, = json.loads(result.stdout)["units"]
+        self.assertFalse(row["has_receipt"])
+        self.assertFalse(self.external.exists())
+
+    def test_cli_refuses_internal_state_or_root_without_creating_them(self):
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for option in ("--state-dir", "--root"):
+            with self.subTest(option=option):
+                destination = self.project / "forbidden" / option[2:]
+                result = self.cli(option, destination)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("resolves inside operated Git worktree", result.stderr)
+                self.assertFalse(destination.parent.exists())
+                self.assertFalse(result.stdout)
 
 
 class TestBuiltFromEvidence(unittest.TestCase):
