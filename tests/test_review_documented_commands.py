@@ -18,6 +18,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'skills/hanig-review-gate/scripts/review.py'
+sys.path.insert(0, str(SCRIPT.parent))
+import committee
+
 SPEC = importlib.util.spec_from_file_location('documented_review', SCRIPT)
 review = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review)
@@ -94,9 +97,22 @@ class TestDocumentedReviewCommands(unittest.TestCase):
             return dict(ok=True, name=reviewer['name'], verdict='upheld',
                         findings=[], claims=[], elapsed_s=0)
 
+        def plan_transport(url, payload, headers, timeout, **kwargs):
+            calls.append(payload['model'])
+            raw = json.dumps(dict(verdict='upheld', findings=[], claims=[],
+                                  own_findings=[], peer_responses=[]))
+            if 'input' in payload:
+                return dict(status='completed', output=[dict(
+                    type='message', content=[dict(text=raw)])]), None
+            return dict(choices=[dict(finish_reason='stop',
+                                      message=dict(content=raw))]), None
+
         out, err = io.StringIO(), io.StringIO()
         with ExitStack() as stack:
-            stack.enter_context(patch.dict(os.environ, {'XDG_STATE_HOME': str(state)}))
+            stack.enter_context(patch.dict(os.environ, {
+                'XDG_STATE_HOME': str(state), 'OPENAI_API_KEY': 'offline-openai-key',
+                'OPENROUTER_API_KEY': 'offline-openrouter-key'}))
+            stack.enter_context(patch.object(committee.R, '_post', side_effect=plan_transport))
             stack.enter_context(patch.object(sys, 'argv', [str(SCRIPT)] + argv))
             for name, replacement in [('load_effective_reviewers', lambda: roster),
                                       ('availability', lambda _r: None),
@@ -144,6 +160,8 @@ class TestDocumentedReviewCommands(unittest.TestCase):
                         sources.add('staged' if args.staged else 'range' if args.range else 'other')
                     else:
                         self.assertEqual(markers, [])
+                        if args.kind == 'plan' and not args.size:
+                            self.assertEqual(sorted(calls), ['a', 'a', 'b', 'b'])
         self.assertTrue({'README.md', 'CLAUDE.md', 'skills/hanig-review-gate/SKILL.md',
                          'skills/hanig-project/SKILL.md'} <= covered, covered)
         self.assertTrue({'staged', 'range'} <= sources, sources)

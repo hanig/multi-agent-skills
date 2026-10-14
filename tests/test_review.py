@@ -44,6 +44,12 @@ review = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(review)
 
 
+def copy_review_script(destination):
+    """Copy the entry point and its eager shipped dependency as fixture data."""
+    for name in ("review.py", "plan_review.py"):
+        (destination.parent / name).write_bytes((SCRIPT.parent / name).read_bytes())
+
+
 _MODULE_STATE_HOME = None
 _SAVED_MODULE_ENV = None
 _ORIGINAL_APPEND_REVIEW_JOURNAL = review.append_review_journal
@@ -543,7 +549,7 @@ class TestConfigErrors(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         (tmp / "scripts").mkdir()
         script = tmp / "scripts" / "review.py"
-        script.write_text(SCRIPT.read_text())
+        copy_review_script(script)
         if content is not None:
             (tmp / "reviewers.json").write_text(content)
         return subprocess.run([sys.executable, str(script), "--list"],
@@ -775,7 +781,7 @@ class TestJointReviewRegressions(unittest.TestCase):
             with self.subTest(provider=bad):
                 tmp = Path(_tf.mkdtemp())
                 (tmp / "scripts").mkdir()
-                (tmp / "scripts" / "review.py").write_text(SCRIPT.read_text())
+                copy_review_script(tmp / "scripts" / "review.py")
                 (tmp / "reviewers.json").write_text(
                     '{"reviewers":[{"name":"x","provider":' + bad +
                     ',"model":"m"}]}')
@@ -789,7 +795,7 @@ class TestJointReviewRegressions(unittest.TestCase):
         import tempfile as _tf
         tmp = Path(_tf.mkdtemp())
         (tmp / "scripts").mkdir()
-        (tmp / "scripts" / "review.py").write_text(SCRIPT.read_text())
+        copy_review_script(tmp / "scripts" / "review.py")
         (tmp / "reviewers.json").write_text(
             '{"reviewers":[{"name":"x","provider":"openai","model":"m",'
             '"profiles":"fast"}]}')
@@ -924,7 +930,7 @@ class TestConfigFifo(unittest.TestCase):
         import tempfile as _tf, os as _os
         tmp = Path(_tf.mkdtemp())
         (tmp / "scripts").mkdir()
-        (tmp / "scripts" / "review.py").write_text(SCRIPT.read_text())
+        copy_review_script(tmp / "scripts" / "review.py")
         _os.mkfifo(tmp / "reviewers.json")
         pr = subprocess.Popen(
             [sys.executable, str(tmp / "scripts" / "review.py"), "--list"],
@@ -1487,7 +1493,7 @@ class TestFailClosed(unittest.TestCase):
 class TestPortability(unittest.TestCase):
     def test_stdlib_only(self):
         allowed = {"argparse", "concurrent", "datetime", "errno", "fcntl", "hashlib", "json", "os", "re", "signal", "stat",
-                   "subprocess", "sys", "tempfile", "time", "urllib", "pathlib"}
+                   "subprocess", "sys", "tempfile", "time", "unicodedata", "urllib", "pathlib", "importlib"}
         # Repo-local modules that ship in review.py's own scripts directory
         # and are themselves stdlib-only (tests/test_stdlib_imports.py).
         local = {path.stem for path in SCRIPT.parent.glob("*.py")}
@@ -2447,6 +2453,9 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                 dir=_ensure_module_state_home())).resolve()
             self.addCleanup(shutil.rmtree, self.cycle_root)
             (self.cycle_root / "dispositions.json").write_text("{}")
+        # Protocol checks need complete input, independent of review.py's size.
+        subject = self.cycle_root / "subject.py"
+        subject.write_text("def identity(value):\n    return value\n")
         roster = roster if roster is not None else [
             {"name": "a", "profiles": ["fast", "standard", "deep"]},
             {"name": "b", "profiles": ["fast", "standard", "deep"]},
@@ -2464,7 +2473,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
                         "status": "refuted" if failing else "supported",
                         "why": "offline assessment for the panel regression"}]}
 
-        argv = [str(SCRIPT), "--file", str(SCRIPT), "--kind", "implementation",
+        argv = [str(SCRIPT), "--file", str(subject), "--kind", "implementation",
                 "--round", "1", "--claim", review.HONEST_RUN_CLAIM,
                 "--dispositions", str(self.cycle_root / "dispositions.json"),
                 *flags]
@@ -2709,6 +2718,8 @@ class TestFindingDispositions(unittest.TestCase):
     def test_cli_wires_not_reproduced_finding_into_reviewer_prompt(self):
         digest, entry = self.entry()
         path = self.write_dispositions({digest: entry})
+        subject = path.parent / "subject.py"
+        subject.write_text("def identity(value):\n    return value\n")
         captured = []
         original = {
             "argv": sys.argv,
@@ -2719,7 +2730,7 @@ class TestFindingDispositions(unittest.TestCase):
         reviewer = {"name": "offline", "provider": "offline", "model": "m",
                     "profiles": ["standard"], "enabled": True}
         try:
-            sys.argv = [str(SCRIPT), "--file", str(SCRIPT),
+            sys.argv = [str(SCRIPT), "--file", str(subject),
                         "--kind", "implementation", "--round", "2",
                         "--claim", review.HONEST_RUN_CLAIM,
                         "--dispositions", str(path), "--quorum", "1",

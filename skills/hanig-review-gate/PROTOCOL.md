@@ -394,3 +394,41 @@ whether its residual is complete: the panel found two gaps the author's own
 The system prompt says so explicitly, and findings carry no remediation field.
 Do not ask the panel for a plan. The author writes the plan; the panel attacks
 it.
+
+## Collaborative plan review
+
+`--plan`: two unique seats, different supported providers/families, quorum 2,
+no escalation or `--round`. Invalid panels return `REVIEW_ERROR` (4) before
+transport. Committee conversations: two parallel turns (four requests, no third),
+independent verdict-schema review then cross-examination retaining history. Peer replies: shared secret redaction, otherwise verbatim, inside tags using `secrets.token_hex(16)`, regenerated until absent
+from the reply. All providers redact before history/delivery and in reports/journals.
+
+Turn 2: final claims, new findings, own kept/withdrawn positions/defenses, and `concur`, `refute` or `refine` per peer finding. The enum governs despite contradictory recorded explanations. A finding
+drops on refutation with at least 40 whitespace-collapsed characters unless
+its author both keeps and explicitly defends it. This measures length, not
+substance. Short/missing reasons retain finding, verbatim response and
+`refutation_too_short`. Refinement retains severity; withdrawal alone cannot
+drop findings. Simultaneous defenses address turn 1, never unseen turn-2 responses. Refuted rows retain finding, author position and peer response.
+New/paraphrased findings stand without peer responses.
+
+Own restatements merge only with the first own turn-1 summary/failure_scenario
+matching after NFC, casefold, whitespace collapse and stripping, in order. Originals retain independent responses;
+the original supplies merged response/outcome. Severity retains the higher
+of minor < major < critical; recorded replies preserve original severities.
+Restatements record `restated`, `restated_finding_id`, `response_outcome`,
+adding nothing to verdict or final findings.
+
+`PLAN_PASS` (0): both seats support every final claim, no standing major/critical
+finding, regardless of confidence/scope. Otherwise `PLAN_FAIL` (1), including
+truncated input. False standing findings can fail sound plans. Any seat failure
+or incomplete/unusable answer in either turn gives `REVIEW_UNAVAILABLE` (2).
+Public entry `review.cmd_plan_review` checks the panel and supplies the exchange's
+schema validator before judgment. The private verdict independently checks panel,
+both turn schemas and finding-ID coverage.
+JSON, journal and text show both turns, joint table and token usage.
+
+The shared loader lazily loads `plan_review.py` by path as
+`_hanig_review_gate_plan_review`, refusing a private cache entry from another
+path. It injects its own helpers/PROVIDERS once; plan_review refuses unconfigured
+use, never importing its owner. Private panels require registered providers. Implementation reviews retain stateless behavior
+and their confirmation filter.

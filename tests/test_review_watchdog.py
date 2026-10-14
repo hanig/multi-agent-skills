@@ -18,6 +18,8 @@ from tests.watchdog_guard import guarded_main
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/hanig-review-gate/scripts/review.py"
+sys.path.insert(0, str(SCRIPT.parent))
+import committee
 SPEC = importlib.util.spec_from_file_location("watchdog_review", SCRIPT)
 review = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review)
@@ -43,9 +45,9 @@ class TestReviewWatchdog(unittest.TestCase):
             {"claim_index": 0, "status": "supported",
              "claim": review.HONEST_RUN_CLAIM,
              "why": "The offline fixture retains its declared behavior."}],
-            "notes": "Offline transport."})
+            "notes": "Offline transport.", "own_findings": [], "peer_responses": []})
         if "input" in payload:
-            return {"output": [{"type": "message", "content": [
+            return {"status": "completed", "output": [{"type": "message", "content": [
                 {"type": "output_text", "text": answer}]}]}, None
         return {"choices": [{"message": {"content": answer},
                              "finish_reason": "stop"}]}, None
@@ -60,6 +62,8 @@ class TestReviewWatchdog(unittest.TestCase):
                 stack.enter_context(patch.object(review, "load_reviewers",
                                                 return_value=self.roster))
             stack.enter_context(patch.object(review, "_post",
+                                            side_effect=transport or self.transport))
+            stack.enter_context(patch.object(committee.R, "_post",
                                             side_effect=transport or self.transport))
             stack.enter_context(patch.object(review.urllib.request, "urlopen",
                                             side_effect=AssertionError("real network")))
@@ -121,7 +125,7 @@ class TestReviewWatchdog(unittest.TestCase):
             with self.subTest(extra=extra):
                 self.observed = []
                 arm = self.invoke(self.review_flags(extra))
-                self.assertEqual(len(self.observed), 2)
+                self.assertEqual(len(self.observed), 4)
                 self.assert_provider_bound(duration)
                 arm.assert_called_once_with(duration)
 
@@ -148,7 +152,7 @@ class TestReviewWatchdog(unittest.TestCase):
 
     def test_explicit_disable_remains_supported(self):
         self.invoke(self.review_flags(["--watchdog", "0"]))
-        self.assertEqual(self.observed, [0, 0])
+        self.assertEqual(self.observed, [0, 0, 0, 0])
 
     def test_system_exit_from_provider_disarms(self):
         def exiting_transport(*args, **kwargs):
@@ -168,7 +172,8 @@ class TestReviewWatchdog(unittest.TestCase):
         self.assert_provider_bound(3600)
 
     def test_exception_before_verdict_disarms(self):
-        with patch.object(review, "decide_state", side_effect=RuntimeError("fixture")):
+        with patch.object(review._load_plan_review(), "_joint_plan_verdict",
+                          side_effect=RuntimeError("fixture")):
             with self.assertRaisesRegex(RuntimeError, "fixture"):
                 self.invoke(self.review_flags())
         self.assert_provider_bound(3600)

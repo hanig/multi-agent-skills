@@ -39,17 +39,14 @@ because these rules were written down once and drifted from anyway.
 | | plan review | implementation review |
 |---|---|---|
 | when | before code exists | after the change is written |
-| panel | **two contrasting models** | fixed profile or cheapest-first ladder |
+| panel | **two contrasting models, two turns** | fixed profile or cheapest-first ladder |
 | escalation | **never** | optional; `--escalate` starts at the selected tier |
 | flag | `--kind plan` | `--kind implementation --round N [--escalate]` |
 | judged against | do these criteria hold together | does the code meet them |
 
-**Two contrasting models for a plan, never escalated.** A third adds agreement,
-not insight. Measured, not assumed: a four-model panel on one design proposal
-had one reviewer uphold every claim and add nothing, while the other two found
-all five defects. Contrasting means a different provider and family, so the two
-cannot share a failure mode. `--plan` fixes the panel at two and refuses
-`--escalate` or a quorum above 2.
+Plan review uses two contrasting seats and two turns, with the final verdict
+computed in code. See [Collaborative plan review](PROTOCOL.md)
+for the exchange, joint table, refutation floor, declared limits and cost.
 
 **Plan review is Phase 1 and it is where the value is.** Three plan reviews cost
 about ten cents and twelve minutes and rejected two designs before any code
@@ -419,9 +416,9 @@ These rounds count toward the same round bound.
 
 | Exit | State | Meaning |
 |---|---|---|
-| 0 | `REVIEW_PASS` | Quorum reviewed; no confirmed defect, no refuted claim |
-| 1 | `REVIEW_FAIL` | Quorum reviewed; a confirmed defect, with or without refuted claims |
-| 2 | `REVIEW_UNAVAILABLE` | No reviewer ran — **not a pass** |
+| 0 | `REVIEW_PASS` / `PLAN_PASS` | Implementation quorum passed, or both plan seats completed and the joint criteria passed |
+| 1 | `REVIEW_FAIL` / `PLAN_FAIL` | Implementation has a confirmed defect, or the plan's joint criteria failed |
+| 2 | `REVIEW_UNAVAILABLE` | No implementation reviewer ran, or either plan seat failed in either turn — **not a pass** |
 | 3 | `REVIEW_PARTIAL` | Some ran, quorum unmet — degraded, caller decides |
 | 4 | `REVIEW_ERROR` | Usage or configuration error |
 | 6 | `REVIEW_INCOMPLETE` | A required reviewer returned no usable content |
@@ -432,7 +429,7 @@ Exit 5 remains reserved; adjudication introduces no review verdict.
 Every nonzero state is non-success. Incomplete review is not an implementation
 failure, but it supplies no judgment and cannot satisfy required coverage.
 
-A finding counts against the gate only if it is critical or major, at high or
+A finding counts against the implementation gate only if it is critical or major, at high or
 medium confidence, **and** carries a concrete failure scenario. That filter
 exists to keep speculative and stylistic noise from blocking real work.
 
