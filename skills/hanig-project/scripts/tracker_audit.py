@@ -124,10 +124,14 @@ def render(record, current_inputs, now=None, max_age=900):
         finish = validate(record)
     except (ValueError, TypeError, KeyError, AttributeError):
         return 'Tracker: INVALID'
-    if set(record['inputs']) != set(current_inputs):
+    # Aliases identify the same source, but every captured digest must agree.
+    current_by_source = {}
+    for path, digest in current_inputs.items():
+        current_by_source.setdefault(os.path.realpath(path), set()).add(digest)
+    if {os.path.realpath(path) for path in record['inputs']} != set(current_by_source):
         return 'Tracker: STALE: input sources changed'
     for path, digest in record['inputs'].items():
-        if current_inputs[path] != digest:
+        if current_by_source[os.path.realpath(path)] != {digest}:
             return 'Tracker: STALE: %s changed' % path
     now = now or dt.datetime.now(dt.timezone.utc)
     age = (now - finish).total_seconds()

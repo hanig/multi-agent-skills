@@ -1319,5 +1319,116 @@ class TestConsumers(AuditCase):
             MU.run([sys.executable, MU.SWARM, 'status'])
 
 
+class TestAuditInputFreshness(unittest.TestCase):
+    """Exercise saved audits and both offline consumers using real input files."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.project = self.root / 'project'
+        self.project.mkdir()
+        (self.project / 'plan.json').write_text('{"name":"sample","units":[]}')
+        (self.project / 'tickets.json').write_text('{}')
+        self.state = self.root / 'state'
+        self.state.mkdir()
+        (self.state / 'swarm-state.json').write_text('{}')
+        # The other state sources are absent; aliases must preserve None digests.
+        self.alias = self.root / 'alias'
+        self.alias.symlink_to(self.root, target_is_directory=True)
+        env = mock.patch.dict(os.environ, {
+            'HANIG_LINEAR_OPS_DIR': str(self.root / 'operations'),
+            'XDG_STATE_HOME': str(self.root / 'defaults')})
+        env.start()
+        self.addCleanup(env.stop)
+        transport = mock.patch.object(API, 'transport',
+                                      side_effect=AssertionError('offline consumer used network'))
+        transport.start()
+        self.addCleanup(transport.stop)
+        stamp = dt.datetime.now(dt.timezone.utc).isoformat()
+        self.record = {
+            'schema_version': 1, 'read_started': stamp, 'read_finished': stamp,
+            'scope': {'workspace': 'workspace', 'team': 'team', 'project': 'project',
+                      'repository': None, 'plan': 'sample'},
+            'inputs': TA.current_inputs(**self.sources(self.root)),
+            'coverage': {'complete': True, 'pages': 1, 'issues': 0},
+            'checks': [{'id': name, 'verdict': 'CLEAN', 'evidence': []}
+                       for name in sorted(TA.CHECKS | {'plan_edges'})],
+            'verdict': 'CLEAN'}
+        self.audit = self.root / 'audit.json'
+        self.audit.write_text(json.dumps(self.record))
+
+    def sources(self, root):
+        return {'draft': root / 'project/tickets.json',
+                'plan': root / 'project/plan.json', 'state_dir': root / 'state'}
+
+    def test_symlink_alias_inputs_are_fresh_in_both_directions(self):
+        original = self.record['inputs']
+        aliased = TA.current_inputs(**self.sources(self.alias))
+        self.assertNotEqual(set(original), set(aliased))
+        for saved, current in ((original, aliased), (aliased, original)):
+            with self.subTest(saved=list(saved)):
+                record = dict(self.record, inputs=saved)
+                self.assertIn('Linear consistent', TA.render(record, current))
+
+    def test_distinct_same_named_file_with_identical_bytes_is_stale(self):
+        other = self.root / 'other'
+        other.mkdir()
+        source = self.project / 'plan.json'
+        replacement = other / source.name
+        replacement.write_bytes(source.read_bytes())
+        sources = dict(self.sources(self.root), plan=replacement)
+        self.assertEqual(TA.section(self.audit, **sources),
+                         'Tracker: STALE: input sources changed')
+
+    def test_same_path_with_changed_digest_is_stale(self):
+        (self.project / 'plan.json').write_text('{"name":"changed","units":[]}')
+        self.assertEqual(TA.section(self.audit, **self.sources(self.root)),
+                         'Tracker: STALE: %s changed' % (self.project / 'plan.json'))
+
+    def test_aliases_cannot_hide_a_conflicting_digest(self):
+        original = self.record['inputs']
+        alias_path = str(self.alias / 'project/plan.json')
+        for side in ('saved', 'current'):
+            for conflict_first in (False, True):
+                with self.subTest(side=side, conflict_first=conflict_first):
+                    conflicting = {alias_path: '0' * 64}
+                    combined = (dict(conflicting, **original) if conflict_first
+                                else dict(original, **conflicting))
+                    saved = combined if side == 'saved' else original
+                    current = combined if side == 'current' else original
+                    self.assertIn('STALE', TA.render(dict(self.record, inputs=saved), current))
+
+    def test_linear_section_and_report_share_freshness_through_cli(self):
+        # Persist alias spellings too: the report resolves its state directory.
+        self.record['inputs'] = TA.current_inputs(**self.sources(self.alias))
+        self.audit.write_text(json.dumps(self.record))
+        other = self.root / 'other'
+        other.mkdir()
+        (other / 'swarm-state.json').write_bytes((self.state / 'swarm-state.json').read_bytes())
+        for state, changed, expected in ((self.alias / 'state', False, 'Linear consistent'),
+                                         (other, False, 'Tracker: STALE: input sources changed'),
+                                         (self.alias / 'state', True, 'Tracker: STALE:')):
+            with self.subTest(state=state, changed=changed):
+                if changed:
+                    (self.state / 'swarm-state.json').write_text('{"units":{}}')
+                out = io.StringIO()
+                sources = self.sources(self.root)
+                with contextlib.redirect_stdout(out):
+                    rc = LS.main(['section', '--audit', str(self.audit),
+                                  '--draft', str(sources['draft']), '--plan', str(sources['plan']),
+                                  '--state-dir', os.path.realpath(state)])
+                self.assertEqual(rc, 0)
+                section = out.getvalue().strip()
+                self.assertIn(expected, section)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = report.main([str(self.alias / 'project'), '--json',
+                                      '--state-dir', str(state), '--root', str(self.root / 'runs'),
+                                      '--tracker-audit', str(self.audit)])
+                self.assertEqual(rc, 0)
+                self.assertEqual(json.loads(out.getvalue())['tracker_section'], section)
+
+
 if __name__ == '__main__':
     unittest.main()
