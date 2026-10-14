@@ -17,7 +17,7 @@ import swarm_dispatch as SD
 
 DEFINITIONS = (
     "_allocate", "_dep_env", "_isolation_submission", "_record_isolation_facts",
-    "_clear_isolation_marker", "_slurm_exit_trap", "_submit", "_bind",
+    "_clear_isolation_marker", "_slurm_exit_trap", "_bind",
 )
 CONSTANTS = ("_CONTAINER_BIND_ENV",)
 
@@ -34,12 +34,12 @@ class TestDispatchExtraction(unittest.TestCase):
                     self.assertEqual(getattr(SD, name).__module__, SD.__name__)
                     self.assertIs(getattr(SD, name).__globals__, SD.__dict__)
 
-    def test_dependency_patch_reaches_reexported_submit(self):
+    def test_dependency_patch_reaches_coordinator_submit(self):
         with tempfile.TemporaryDirectory(prefix="dispatch-env-") as directory:
             unit = {"id": "unit", "kind": "slurm", "command": "true"}
-            with mock.patch.object(SD.U, "slurm_record_policy",
+            with mock.patch.object(S.U, "slurm_record_policy",
                                    return_value=(False, None)), \
-                    mock.patch.object(SD.U, "run", return_value=(0, "42", "")), \
+                    mock.patch.object(S.U, "run", return_value=(0, "42", "")), \
                     mock.patch.object(SD, "_dep_env", return_value=[
                         ("SWARM_DEP_INPUT", "/fixture-input")]) as dependencies:
                 job, error = S._submit(unit, directory, False, {}, directory)
@@ -58,7 +58,7 @@ class TestDispatchExtraction(unittest.TestCase):
                 and n.id in DEFINITIONS + CONSTANTS]
         consumers = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
                      and isinstance(n.value, ast.Name) and n.value.id == "SD"}
-        self.assertEqual(consumers, {"_allocate", "_submit", "_bind"})
+        self.assertEqual(consumers, set(DEFINITIONS))
         self.assertEqual(bare, [], "facade bypasses owner patches")
 
     def test_patch_owners(self):
@@ -93,7 +93,7 @@ class TestDispatchExtraction(unittest.TestCase):
                     if target in owners | {"swarm_dispatch", "S.SD", "self.S.SD"}:
                         owner_patches.add(name)
         self.assertEqual(owner_patches, {
-            "_allocate", "_submit", "_bind", "_slurm_exit_trap", "_dep_env"})
+            "_allocate", "_bind", "_slurm_exit_trap", "_dep_env"})
         self.assertEqual(offenders, [])
 
     def test_standalone_offline_import(self):

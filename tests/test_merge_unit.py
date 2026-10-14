@@ -1338,7 +1338,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertTrue({
                     "_allocate", "_dep_env", "_isolation_submission",
                     "_record_isolation_facts", "_clear_isolation_marker",
-                    "_slurm_exit_trap", "_submit", "_bind"} <= definitions)
+                    "_slurm_exit_trap", "_bind"} <= definitions)
         self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
                          "_dispatch_prompt", "_code_protocol_problem"} <= definitions)
         self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= definitions)

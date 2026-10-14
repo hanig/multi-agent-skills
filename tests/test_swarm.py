@@ -495,7 +495,7 @@ class TestTheLiftIsClosed(unittest.TestCase):
                 self.assertEqual({
                     "_allocate", "_dep_env", "_isolation_submission",
                     "_record_isolation_facts", "_clear_isolation_marker",
-                    "_slurm_exit_trap", "_submit", "_bind"}, {
+                    "_slurm_exit_trap", "_bind"}, {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_code_protocol.py":
                 self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
@@ -535,7 +535,7 @@ class TestTheLiftIsClosed(unittest.TestCase):
                 self.assertEqual({
                     "_allocate", "_dep_env", "_isolation_submission",
                     "_record_isolation_facts", "_clear_isolation_marker",
-                    "_slurm_exit_trap", "_submit", "_bind"}, {
+                    "_slurm_exit_trap", "_bind"}, {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_code_protocol.py":
                 self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
@@ -961,7 +961,7 @@ class TestClosureByExclusion(unittest.TestCase):
                 self.assertEqual({
                     "_allocate", "_dep_env", "_isolation_submission",
                     "_record_isolation_facts", "_clear_isolation_marker",
-                    "_slurm_exit_trap", "_submit", "_bind"}, {
+                    "_slurm_exit_trap", "_bind"}, {
                     n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_code_protocol.py":
                 self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",

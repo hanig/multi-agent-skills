@@ -102,13 +102,7 @@ class TestStateExtraction(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_coordinator_consumers_read_state_helpers_from_owner(self):
-        trees = []
-        for module, expected in ((S, "advance"), (S.SD, "_submit")):
-            part = ast.parse(Path(module.__file__).read_text())
-            self.assertIn(expected, {n.name for n in part.body
-                                     if isinstance(n, ast.FunctionDef)})
-            trees.extend(part.body)
-        tree = ast.Module(body=trees, type_ignores=[])
+        tree = ast.parse(Path(S.__file__).read_text())
         moved = set(DEFINITIONS) - {
             "_holds_the_path", "_StateSnapshot", "_read_state_epoch",
         }

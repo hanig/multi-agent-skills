@@ -945,7 +945,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             "id": "u", "kind": "slurm", "command": "true",
             "outputs": [], "write_scopes": ["u/"]}]}
         real_allocate, real_submit, real_bind = (
-            S.SD._allocate, S.SD._submit, S.SD._bind)
+            S.SD._allocate, S._submit, S.SD._bind)
 
         def allocate(*_args, **_kwargs):
             return str(attempt), None
@@ -953,16 +953,19 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         def submit(*_args, **_kwargs):
             return "job-1", None
 
+        bind_calls = []
+
         def bind(unit_dir, job_id):
+            bind_calls.append((unit_dir, job_id))
             durable = S.load_state(str(state_dir))["units"]["u"]
             self.assertEqual(durable["job_id"], job_id)
             self.assertTrue(durable["bind_pending"])
             self.assertEqual(durable["state"], "SUBMITTED")
             return None
 
-        S.SD._allocate, S.SD._submit, S.SD._bind = allocate, submit, bind
+        S.SD._allocate, S._submit, S.SD._bind = allocate, submit, bind
         self.addCleanup(setattr, S.SD, "_allocate", real_allocate)
-        self.addCleanup(setattr, S.SD, "_submit", real_submit)
+        self.addCleanup(setattr, S, "_submit", real_submit)
         self.addCleanup(setattr, S.SD, "_bind", real_bind)
         ok, why = S.acquire_lease(str(state_dir))
         self.assertTrue(ok, why)
@@ -971,6 +974,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             plan, state, str(state_dir), str(self.tmp / "runs"),
             False, max_new=1)
         self.assertEqual(dispatched, 1, report)
+        self.assertEqual(bind_calls, [(str(attempt), "job-1")])
 
     def test_terminal_cleanup_preserves_then_removes_worktree_and_keeps_branch(self):
         attempt = self.attempt("code", "cleanup")
@@ -1779,7 +1783,7 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
         self.assertTrue({
                     "_allocate", "_dep_env", "_isolation_submission",
                     "_record_isolation_facts", "_clear_isolation_marker",
-                    "_slurm_exit_trap", "_submit", "_bind"} <= definitions)
+                    "_slurm_exit_trap", "_bind"} <= definitions)
         self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
                          "_dispatch_prompt", "_code_protocol_problem"} <= definitions)
         self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= definitions)

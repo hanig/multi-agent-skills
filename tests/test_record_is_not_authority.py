@@ -137,7 +137,7 @@ ALLOWED = {
         "checks the live directory against coordinator-state identity",
     ("worktree.py", "validate_pinned_head"):
         "checks immutable objects named by coordinator state",
-    ("swarm_dispatch.py", "_submit"):
+    ("swarm.py", "_submit"):
         "uses the coordinator-created snapshot for dispatch",
     ("swarm_dispatch.py", "_allocate"):
         "passes repository identity from the trusted plan into allocation",

@@ -1065,7 +1065,7 @@ class TestAudit(AuditCase):
                                  "acknowledgment_status"} <=
                                 {n.name for n in tree_boundary.body
                                  if isinstance(n, ast.FunctionDef)})
-            expected = {"swarm.py": "advance", "swarm_dispatch.py": "_submit", "swarm_routing.py": "load_agent_routing",
+            expected = {"swarm.py": "_submit", "swarm_dispatch.py": "_allocate", "swarm_routing.py": "load_agent_routing",
                         "swarm_types.py": "PlanError", "swarm_state.py": "acquire_lease",
                         "swarm_journal.py": "_fsync_append",
                         "swarm_evidence.py": "attested_receipt",
