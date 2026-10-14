@@ -649,7 +649,7 @@ class TestDrain(DrainCase):
         with mock.patch.object(API, 'load_key', return_value=None):
             self.assertEqual(self.drain(), 2)
         # Only the established seam owns network imports.
-        for path in (*(ROOT / 'skills/hanig-swarm/scripts' / name for name in ('swarm.py', 'swarm_routing.py', 'swarm_types.py', 'swarm_state.py', 'swarm_journal.py', 'swarm_evidence.py', 'swarm_outbox.py', 'swarm_plan_rules.py', 'swarm_preflight.py', 'swarm_code_protocol.py', 'swarm_code_launch.py')), PROJECT / 'tickets.py', PROJECT / 'drain_contract.py', PROJECT / 'linear_sync.py'):
+        for path in (*(ROOT / 'skills/hanig-swarm/scripts' / name for name in ('swarm.py', 'swarm_routing.py', 'swarm_types.py', 'swarm_state.py', 'swarm_journal.py', 'swarm_evidence.py', 'swarm_outbox.py', 'swarm_plan_rules.py', 'swarm_preflight.py', 'swarm_code_protocol.py', 'swarm_code_launch.py', 'swarm_workspaces.py')), PROJECT / 'tickets.py', PROJECT / 'drain_contract.py', PROJECT / 'linear_sync.py'):
             tree = ast.parse(path.read_text())
             if path.name == "swarm_outbox.py":
                 self.assertTrue({"emit_intent", "load_outbox_contract", "record_receipt",
@@ -664,7 +664,8 @@ class TestDrain(DrainCase):
                         "swarm_plan_rules.py": "declared_seed",
                         "swarm_preflight.py": "_note_claimed_attempt",
                         "swarm_code_protocol.py": "_code_completion_protocol",
-                        "swarm_code_launch.py": "_capture_code_launch"}.get(path.name)
+                        "swarm_code_launch.py": "_capture_code_launch",
+                        "swarm_workspaces.py": "_archive_code_worktree"}.get(path.name)
             if expected:
                 self.assertIn(expected, {n.name for n in tree.body
                                          if isinstance(n, (ast.FunctionDef, ast.ClassDef))})

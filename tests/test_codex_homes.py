@@ -731,7 +731,7 @@ class TestCodexHomes(unittest.TestCase):
         S.save_state(str(self.state_dir), state)
         durable = S.load_state(str(self.state_dir))
         self.assertNotIn("attempt_workspaces", durable["units"]["code"])
-        with mock.patch.object(S, "reconcile_orphan", return_value=(None, None)):
+        with mock.patch.object(S.SW, "reconcile_orphan", return_value=(None, None)):
             report, count, _halted = S.advance(
                 {"units": [unit]}, durable, str(self.state_dir),
                 str(self.tmp / "runs"), False, max_new=0)
@@ -915,7 +915,7 @@ class TestCodexHomes(unittest.TestCase):
         other = F.code_unit(self.repo, "other")
         other["outputs"] = ["out"]
         # Persisted refusal must not prevent another unit from launching.
-        with mock.patch.object(S, "_preserve_and_archive_code_worktree",
+        with mock.patch.object(S.SW, "_preserve_and_archive_code_worktree",
                                side_effect=AssertionError("home retry must not re-enter worktree cleanup")):
             with mock.patch.object(CH, "remove", side_effect=RuntimeError("fixture removal failure")) as remove:
                 report, count, _halted = S.advance({"units": [unit, other]}, durable,

@@ -103,7 +103,7 @@ class TestNoProducedChange(unittest.TestCase):
 
     def advance(self):
         # Cleanup is a separate unit's region. Do not exercise teardown here.
-        with mock.patch.object(S, "_archive_code_worktree"), \
+        with mock.patch.object(S.SW, "_archive_code_worktree"), \
              mock.patch.object(S, "maybe_continue", wraps=S.maybe_continue) as cont:
             report, dispatched, halted = S.advance(
                 {"name": "arc750", "units": [self.unit]}, self.state,

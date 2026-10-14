@@ -84,11 +84,11 @@ ALLOWED = {
     ("swarm_code_launch.py", "_create_code_worktree"):
         "creates the coordinator-owned worktree from the coordinator-state "
         "launch intent before Paseo starts",
-    ("swarm.py", "_registered_attempt_workspace"):
+    ("swarm_workspaces.py", "_registered_attempt_workspace"):
         "matches Paseo's registry against the coordinator-state intent",
-    ("swarm.py", "_recover_code_launch"):
+    ("swarm_workspaces.py", "_recover_code_launch"):
         "binds recovered Paseo state to coordinator-state workspace identity",
-    ("swarm.py", "_preserve_and_archive_code_worktree"):
+    ("swarm_workspaces.py", "_preserve_and_archive_code_worktree"):
         "reads coordinator-state workspace identity, base and repository "
         "metadata only for preservation and cleanup, never from worker files",
     ("swarm_preflight.py", "_execution_workspace"):
