@@ -6,7 +6,7 @@
   "fast": "luna and haiku-5.5; cheapest implementation panel, the first tier of --escalate (owner decision 2026-10-12).",
   "standard": "luna, kimi-k2.7-code and sonnet-5.5; the usual fixed implementation panel. Escalating from fast retains its verdicts and adds kimi-k2.7-code and sonnet-5.5.",
   "deep": "standard + sol. Final --escalate tier, or a fixed --profile deep panel. astra is NOT here since 2026-09-24: it writes the code now, and an author does not review itself.",
-  "committee": "committee.py members, separate from gate profiles. Owner decision 2026-10-12: deepseek-v4-pro, muse-wonder and sonnet-5.5, three model makers. DeepSeek sits in no gate profile.",
+  "committee": "committee.py members, separate from gate profiles. Owner decision 2026-10-13: deepseek-v4-pro, gemini-argon and sonnet-5.5, three model makers. DeepSeek sits in no gate profile.",
   "tiebreak": "Committee divergence only: the ONE enabled reviewer whose only profile is tiebreak rules on existing positions. committee.py selects it by this profile, never by name or model. Not a gate tier or a committee membership profile. sol-tiebreak since 2026-09-28, replacing astra-xhigh because astra authors the code it would rule on (ARC-755)."
  },
  "reviewers": [
@@ -341,10 +341,10 @@
    }
   },
   {
-   "name": "muse-wonder",
+   "name": "gemini-argon",
    "provider": "openrouter",
-   "model": "meta/muse-wonder",
-   "effort": "high",
+   "model": "google/gemini-4-argon",
+   "effort": "xhigh",
    "max_output_tokens": 128000,
    "enabled": true,
    "profiles": [
@@ -352,31 +352,31 @@
    ],
    "family": {
     "listing": "openrouter",
-    "vendor": "meta",
-    "prefix": "muse-",
+    "vendor": "google",
+    "prefix": "gemini-4-",
     "separator": ".",
     "suffix": "",
     "major": 0,
-    "named_version": "wonder"
+    "named_version": "argon"
    },
    "_cost": {
-    "in": 4.0,
-    "out": 20.0
+    "in": 2.0,
+    "out": 10.0
    },
-   "_note": "Owner decision 2026-10-12: replaces luna in committee at high effort. The named family stays on its exact pin; it has no ordered point releases.",
+   "_note": "Owner decision 2026-10-13: replaces Muse Wonder at xhigh because the coordinator benchmark through review.build_prompt and review.run_one on three historical diffs matched its major a1c redaction catch, missed all three r3 ledger defects and raised no false positive on clean s2, with faster answers at $0.07-0.14 versus $0.28-0.44 per review, while high upheld every claim including both defective diffs; this named version stays on its exact pin with no automatic point-release adoption.",
    "_max_output_tokens": "MEASURED through review.PROVIDERS with review.SYSTEM and input ping at the configured effort and 128000 cap. Establishes budget acceptance and usable output, not capacity for every review.",
    "_max_output_tokens_accepted": {
     "date": "2026-10-13",
     "max_output_tokens": 128000,
     "provider": "openrouter",
-    "model": "meta/muse-wonder",
-    "effort": "high",
+    "model": "google/gemini-4-argon",
+    "effort": "xhigh",
     "outcome": "completed",
-    "input_tokens": 921,
-    "output_tokens": 505,
-    "reasoning_tokens": 388,
-    "response_id": "gen-1791859784-moqDm3UGRH6r6yslWqtT",
-    "observed_in": "g1-panel-roster live preflight via zsh -ic and review.PROVIDERS; observed 2026-10-13T02:49:48.390464+00:00"
+    "input_tokens": 961,
+    "output_tokens": 206,
+    "reasoning_tokens": 176,
+    "response_id": "gen-1791912024-m0Yq0pRcYFcPPHy62ILo",
+    "observed_in": "g2-committee-argon live preflight via zsh -ic and review.PROVIDERS; observed 2026-10-13T17:20:28.134896+00:00"
    }
   },
   {
