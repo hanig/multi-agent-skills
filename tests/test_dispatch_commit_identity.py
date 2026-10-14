@@ -223,12 +223,12 @@ class CommitIdentityTests(unittest.TestCase):
             path.mkdir(parents=True)
             return str(path), None
 
-        with mock.patch.object(S, "_allocate", side_effect=allocate), \
+        with mock.patch.object(S.SD, "_allocate", side_effect=allocate), \
                 mock.patch.object(
                     SP, "_resolve_dispatch_target",
                     wraps=S._resolve_dispatch_target) as resolve, \
                 mock.patch.object(S.SS, "renew_lease", return_value=True), \
-                mock.patch.object(S, "_bind", return_value=None), \
+                mock.patch.object(S.SD, "_bind", return_value=None), \
                 mock.patch.object(
                     SP, "_git_push_destination",
                     wraps=S._git_push_destination) as remote_query:
@@ -293,9 +293,9 @@ class CommitIdentityTests(unittest.TestCase):
                                side_effect=workspace_spelling), \
                 mock.patch.object(SP, "_git_push_destination",
                                   side_effect=moving_target), \
-                mock.patch.object(S, "_allocate", side_effect=allocate), \
+                mock.patch.object(S.SD, "_allocate", side_effect=allocate), \
                 mock.patch.object(S.SS, "renew_lease", return_value=True), \
-                mock.patch.object(S, "_bind", return_value=None):
+                mock.patch.object(S.SD, "_bind", return_value=None):
             result = S.advance(plan, state, state_dir,
                                str(self.tmp / "alias-runs"), False)
 
@@ -498,8 +498,8 @@ class CommitIdentityTests(unittest.TestCase):
             return str(allocated), None
 
         with mock.patch.object(
-                S, "_allocate", side_effect=allocate or default_allocate), \
-                mock.patch.object(S, "_bind", return_value=None), \
+                S.SD, "_allocate", side_effect=allocate or default_allocate), \
+                mock.patch.object(S.SD, "_bind", return_value=None), \
                 mock.patch.object(S.SS, "renew_lease", return_value=True):
             result = S.advance(
                 self.plan, state, str(self.tmp / "state"),

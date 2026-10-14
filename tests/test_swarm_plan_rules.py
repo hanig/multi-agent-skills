@@ -78,7 +78,8 @@ class TestPlanRulesExtraction(unittest.TestCase):
 
     def test_coordinator_consumers_read_functions_from_owner(self):
         trees = []
-        for module, expected in ((S, "_submit"), (S.SCL, "_capture_code_launch")):
+        for module, expected in ((S, "advance"), (S.SD, "_allocate"),
+                                 (S.SCL, "_capture_code_launch")):
             tree = ast.parse(Path(module.__file__).read_text())
             self.assertIn(expected, {n.name for n in tree.body
                                      if isinstance(n, ast.FunctionDef)})

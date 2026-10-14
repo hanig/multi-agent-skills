@@ -945,7 +945,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             "id": "u", "kind": "slurm", "command": "true",
             "outputs": [], "write_scopes": ["u/"]}]}
         real_allocate, real_submit, real_bind = (
-            S._allocate, S._submit, S._bind)
+            S.SD._allocate, S._submit, S.SD._bind)
 
         def allocate(*_args, **_kwargs):
             return str(attempt), None
@@ -953,17 +953,20 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         def submit(*_args, **_kwargs):
             return "job-1", None
 
+        bind_calls = []
+
         def bind(unit_dir, job_id):
+            bind_calls.append((unit_dir, job_id))
             durable = S.load_state(str(state_dir))["units"]["u"]
             self.assertEqual(durable["job_id"], job_id)
             self.assertTrue(durable["bind_pending"])
             self.assertEqual(durable["state"], "SUBMITTED")
             return None
 
-        S._allocate, S._submit, S._bind = allocate, submit, bind
-        self.addCleanup(setattr, S, "_allocate", real_allocate)
+        S.SD._allocate, S._submit, S.SD._bind = allocate, submit, bind
+        self.addCleanup(setattr, S.SD, "_allocate", real_allocate)
         self.addCleanup(setattr, S, "_submit", real_submit)
-        self.addCleanup(setattr, S, "_bind", real_bind)
+        self.addCleanup(setattr, S.SD, "_bind", real_bind)
         ok, why = S.acquire_lease(str(state_dir))
         self.assertTrue(ok, why)
         self.addCleanup(S.release_lease, str(state_dir))
@@ -971,6 +974,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             plan, state, str(state_dir), str(self.tmp / "runs"),
             False, max_new=1)
         self.assertEqual(dispatched, 1, report)
+        self.assertEqual(bind_calls, [(str(attempt), "job-1")])
 
     def test_terminal_cleanup_preserves_then_removes_worktree_and_keeps_branch(self):
         attempt = self.attempt("code", "cleanup")
@@ -1451,9 +1455,9 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         })
         state_dir = self.tmp / "reuse-state"
         S.save_state(str(state_dir), state)
-        real_bind = S._bind
-        S._bind = lambda unit_dir, job_id: None
-        self.addCleanup(setattr, S, "_bind", real_bind)
+        real_bind = S.SD._bind
+        S.SD._bind = lambda unit_dir, job_id: None
+        self.addCleanup(setattr, S.SD, "_bind", real_bind)
 
         report, _dispatched, _halted = S.advance(
             {"name": "p", "units": [unit]}, state, str(state_dir),
@@ -1737,7 +1741,7 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
     def test_no_archive_call_escapes_a_dry_run_guard(self):
         import ast
         paths = sorted(SCRIPTS.glob("swarm*.py"))
-        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py", "swarm_code_launch.py", "swarm_workspaces.py"}
+        self.assertTrue({"swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py", "swarm_code_launch.py", "swarm_workspaces.py", "swarm_dispatch.py"}
                         <= {path.name for path in paths})
         unguarded, calls = [], []
         definitions = set()
@@ -1776,6 +1780,10 @@ class TestEveryArchiveSiteIsDryRunGuarded(unittest.TestCase):
             "_complete_code_launch",
             "_write_launch_record",
         } <= definitions)
+        self.assertTrue({
+                    "_allocate", "_dep_env", "_isolation_submission",
+                    "_record_isolation_facts", "_clear_isolation_marker",
+                    "_slurm_exit_trap", "_bind"} <= definitions)
         self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
                          "_dispatch_prompt", "_code_protocol_problem"} <= definitions)
         self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= definitions)
