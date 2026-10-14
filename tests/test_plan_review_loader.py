@@ -97,6 +97,76 @@ print('implementation and requested plan transport completed')
     def test_implementation_never_loads_plan_module(self):
         self.run_implementation(False)
 
+    def test_foreign_review_helpers_cannot_pass_incomplete_answers(self):
+        self.run_process('''
+import importlib.util, io, json, sys, types
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
+repo = Path(sys.argv[1])
+sys.path.insert(0, str(repo))
+from tests.test_plan_review import TestPlanExchange, MEMBERS, CLAIM, committee
+foreign = types.ModuleType('review')
+foreign.PLAN_SYSTEM = 'weaker prompt'
+foreign.PROVIDERS = dict.fromkeys(('openai', 'openrouter'))
+for name, function in {
+    'verdict_schema_error': lambda *a: None,
+    'parse_verdict': lambda raw: (json.loads(raw), None),
+    'norm': lambda value: str(value).strip().lower(),
+    'unassessed_claims': lambda *a: [],
+    'config_error': lambda *a: None,
+}.items():
+    setattr(foreign, name, mock.Mock(side_effect=function))
+sys.modules['review'] = foreign
+del sys.modules['_hanig_review_gate_plan_review']
+script = repo / 'skills/hanig-review-gate/scripts/review.py'
+spec = importlib.util.spec_from_file_location('embedded_review', script)
+subject = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(subject)
+case = TestPlanExchange()
+case.setUp()
+try:
+    for answers in (case.first, case.second):
+        for value in answers.values():
+            del value['verdict']
+    args = types.SimpleNamespace(claim=[CLAIM], timeout=1, json=True,
+                                 panel_policy={}, input_redactions=[])
+    output = io.StringIO()
+    with mock.patch.object(committee.R, '_post', side_effect=case.transport), \\
+            mock.patch.object(subject, 'record_review_round', return_value={}), \\
+            redirect_stdout(output):
+        result = subject.cmd_plan_review(args, MEMBERS, 'Review this plan.',
+                                         'plan.md', False, 'plan review', [])
+    report = json.loads(output.getvalue())
+    assert (result, report['state']) == (2, 'REVIEW_UNAVAILABLE'), (result, report)
+    assert len(case.requests) == 2, case.requests
+    for value in vars(foreign).values():
+        if isinstance(value, mock.Mock):
+            value.assert_not_called()
+    assert sys.modules['review'] is foreign
+finally:
+    case.doCleanups()
+''')
+
+    def test_unconfigured_plan_review_refuses(self):
+        self.run_process('''
+import runpy, sys
+from pathlib import Path
+script = Path(sys.argv[1]) / 'skills/hanig-review-gate/scripts/plan_review.py'
+subject = runpy.run_path(str(script))
+for name, args in (('_plan_schema_error', ({}, [])),
+                   ('_plan_panel_error', ([],)),
+                   ('_joint_plan_verdict', ([], {}, {}, [])),
+                   ('_run_plan_exchange', ([], '', [], 1, None))):
+    try:
+        subject[name](*args)
+    except RuntimeError as error:
+        assert 'plan review helpers have not been configured' in str(error), error
+    else:
+        raise AssertionError('unconfigured call succeeded: ' + name)
+assert 'review' not in sys.modules
+''')
+
     def test_private_cache_reuses_only_the_shipped_path(self):
         self.run_process('''
 import importlib.util, sys, types

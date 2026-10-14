@@ -3,9 +3,26 @@
 import json
 import secrets
 import unicodedata
+from types import SimpleNamespace
 
 
 _MIN_PLAN_REFUTATION_CHARS = 40
+_helpers = None
+
+
+def _configure(*, verdict_schema_error, norm, unassessed_claims, PLAN_SYSTEM,
+               config_error, parse_verdict, PROVIDERS):
+    """Bind the owning loader's helpers once; never resolve a module name."""
+    global _helpers
+    if _helpers is not None:
+        raise RuntimeError("plan review helpers are already configured")
+    _helpers = SimpleNamespace(**locals())
+
+
+def _configured_helpers():
+    if _helpers is None:
+        raise RuntimeError("plan review helpers have not been configured")
+    return _helpers
 
 
 def _plan_finding_ids(seat, verdict):
@@ -55,7 +72,7 @@ def _plan_cross_prompt(own, peer, own_ids, peer_ids, peer_text):
 
 
 def _plan_schema_error(verdict, claims, own_ids=None, peer_ids=None):
-    from review import verdict_schema_error
+    verdict_schema_error = _configured_helpers().verdict_schema_error
 
     error = verdict_schema_error(verdict, len(claims), claims)
     if error or own_ids is None:
@@ -93,7 +110,8 @@ def _joint_plan_verdict(members, first, second, claims, truncated=False):
     against text. With simultaneous final turns it cannot answer an unseen
     refutation. An unresolved disagreement therefore stands conservatively.
     """
-    from review import norm, unassessed_claims
+    helpers = _configured_helpers()
+    norm, unassessed_claims = helpers.norm, helpers.unassessed_claims
 
     if _plan_panel_error(members):
         return "REVIEW_UNAVAILABLE", []
@@ -161,12 +179,12 @@ def _joint_plan_verdict(members, first, second, claims, truncated=False):
 
 def _run_plan_exchange(members, prompt, claims, timeout, validate):
     """Collect two turns using the command's validator, without deciding a verdict."""
-    from review import PLAN_SYSTEM, config_error, parse_verdict
+    helpers = _configured_helpers()
     import committee
 
     panel_error = _plan_panel_error(members)
     if panel_error:
-        config_error(panel_error)
+        helpers.config_error(panel_error)
     names = [m["name"] for m in members]
     session = {"members": {m["name"]: {"provider": m["provider"], "model": m["model"],
                                        "history": [], "answers": []} for m in members},
@@ -176,14 +194,14 @@ def _run_plan_exchange(members, prompt, claims, timeout, validate):
                + committee.NO_EDITS)
     for turn in (1, 2):
         results = committee.run_turn(members, session, prompts, timeout, f"turn-{turn}",
-                                     system=PLAN_SYSTEM, require_complete=True,
+                                     system=helpers.PLAN_SYSTEM, require_complete=True,
                                      preserve_reply=True)
         failed = False
         for name in names:
             raw, error, usage = results[name]
             verdict = None
             if not error:
-                verdict, error = parse_verdict(raw)
+                verdict, error = helpers.parse_verdict(raw)
             if not error:
                 peer = next(n for n in names if n != name)
                 error = validate(
@@ -210,12 +228,15 @@ def _run_plan_exchange(members, prompt, claims, timeout, validate):
 
 def _plan_panel_error(members):
     """Check the effective plan seats after selection and author exclusion."""
+    providers = _configured_helpers().PROVIDERS
     if not isinstance(members, (list, tuple)):
         return "plan reviewers must be a sequence of seat definitions."
     if any(not isinstance(m, dict)
            or any(not isinstance(m.get(key), str) or not m[key]
                   for key in ("name", "provider")) for m in members):
         return "plan reviewers require nonempty name and provider strings."
+    if any(m["provider"] not in providers for m in members):
+        return "plan reviewers require supported providers."
     names = ", ".join(sorted(r["name"] for r in members)) or "none"
     if len(members) != 2:
         return (

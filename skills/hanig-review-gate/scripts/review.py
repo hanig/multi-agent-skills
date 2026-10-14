@@ -2957,7 +2957,7 @@ def decide_state(n_completed, n_failed, confirmed, refuted_claims,
     return "REVIEW_PASS"
 
 
-# --- bounded collaborative plan review -------------------------------------
+# --- plan review ---
 def _load_plan_review():
     import importlib.util
 
@@ -2971,6 +2971,9 @@ def _load_plan_review():
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    module._configure(**{k: globals()[k] for k in (
+        "verdict_schema_error", "norm", "unassessed_claims", "PLAN_SYSTEM",
+        "config_error", "parse_verdict", "PROVIDERS")})
     sys.modules[name] = module
     sys.path.insert(0, str(path.parent))
     return module
@@ -2987,7 +2990,7 @@ The final verdict is computed by code, not by either seat.
 
 
 def cmd_plan_review(args, members, prompt, label, truncated, profile_reason, excluded):
-    """The public plan-review entry; validate every answer before joint judgment."""
+    """Public plan-review entry."""
     plan = _load_plan_review()
     panel_error = plan._plan_panel_error(members)
     if panel_error:
