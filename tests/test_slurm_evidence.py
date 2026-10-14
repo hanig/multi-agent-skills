@@ -1127,11 +1127,11 @@ class SlurmEvidence(unittest.TestCase):
         startup.write_text('trap \'builtin printf "%s|%s|%s|%s\\n" '
                            '"$SWARM_UNIT_ID" "$SWARM_UNIT_DIR" "$SWARM_DEP_INPUT" "$PWD"\' CHLD\n')
         self.plan_unit["command"] = "test ! -s slurm-exit.json; /bin/true; printf produced > output"
-        original_hook = S._slurm_exit_trap
+        original_hook = S.SD._slurm_exit_trap
         prerequisite = ('test "$SWARM_UNIT_DIR" = "$PWD"\n'
                         'test -n "$SWARM_UNIT_ID"\ntest -n "$SWARM_DEP_INPUT"\n')
         with mock.patch.object(U, "run", return_value=(0, "42", "")), \
-                mock.patch.object(S, "_slurm_exit_trap", side_effect=lambda directory: prerequisite + original_hook(directory)):
+                mock.patch.object(S.SD, "_slurm_exit_trap", side_effect=lambda directory: prerequisite + original_hook(directory)):
             S._submit(self.plan_unit, self.attempt, False,
                       state=self.state, state_dir=self.root / "state")
         (self.attempt / "output").unlink()

@@ -457,6 +457,7 @@ class TestTheLiftIsClosed(unittest.TestCase):
     `A, B = 0, 1` has a Tuple target, not a Name."""
 
     FILES = (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
+                  SCRIPTS / "swarm_dispatch.py",
              SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_plan_rules.py",
              SCRIPTS / "swarm_outbox.py", SCRIPTS / "swarm_preflight.py",
              SCRIPTS / "swarm_code_protocol.py")
@@ -490,6 +491,12 @@ class TestTheLiftIsClosed(unittest.TestCase):
         import ast
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_dispatch.py":
+                self.assertEqual({
+                    "_allocate", "_dep_env", "_isolation_submission",
+                    "_record_isolation_facts", "_clear_isolation_marker",
+                    "_slurm_exit_trap", "_submit", "_bind"}, {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_code_protocol.py":
                 self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
                                  "_dispatch_prompt", "_code_protocol_problem"} <= {
@@ -524,6 +531,12 @@ class TestTheLiftIsClosed(unittest.TestCase):
                   "tempfile", "fnmatch", "pathlib"}
         for f in self.FILES:
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_dispatch.py":
+                self.assertEqual({
+                    "_allocate", "_dep_env", "_isolation_submission",
+                    "_record_isolation_facts", "_clear_isolation_marker",
+                    "_slurm_exit_trap", "_submit", "_bind"}, {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_code_protocol.py":
                 self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
                                  "_dispatch_prompt", "_code_protocol_problem"} <= {
@@ -939,10 +952,17 @@ class TestClosureByExclusion(unittest.TestCase):
     def test_no_module_loads_an_undefined_name(self):
         import ast, builtins
         for f in (SCRIPTS / "unit.py", SCRIPTS / "swarm.py",
+                  SCRIPTS / "swarm_dispatch.py",
                   SCRIPTS / "swarm_evidence.py", SCRIPTS / "swarm_plan_rules.py",
                   SCRIPTS / "swarm_outbox.py", SCRIPTS / "swarm_preflight.py",
                   SCRIPTS / "swarm_code_protocol.py", SCRIPTS / "converge.py"):
             tree = ast.parse(f.read_text())
+            if f.name == "swarm_dispatch.py":
+                self.assertEqual({
+                    "_allocate", "_dep_env", "_isolation_submission",
+                    "_record_isolation_facts", "_clear_isolation_marker",
+                    "_slurm_exit_trap", "_submit", "_bind"}, {
+                    n.name for n in tree.body if isinstance(n, ast.FunctionDef)})
             if f.name == "swarm_code_protocol.py":
                 self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
                                  "_dispatch_prompt", "_code_protocol_problem"} <= {

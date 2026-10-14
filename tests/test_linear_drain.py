@@ -649,14 +649,14 @@ class TestDrain(DrainCase):
         with mock.patch.object(API, 'load_key', return_value=None):
             self.assertEqual(self.drain(), 2)
         # Only the established seam owns network imports.
-        for path in (*(ROOT / 'skills/hanig-swarm/scripts' / name for name in ('swarm.py', 'swarm_routing.py', 'swarm_types.py', 'swarm_state.py', 'swarm_journal.py', 'swarm_evidence.py', 'swarm_outbox.py', 'swarm_plan_rules.py', 'swarm_preflight.py', 'swarm_code_protocol.py', 'swarm_code_launch.py', 'swarm_workspaces.py')), PROJECT / 'tickets.py', PROJECT / 'drain_contract.py', PROJECT / 'linear_sync.py'):
+        for path in (*(ROOT / 'skills/hanig-swarm/scripts' / name for name in ('swarm.py', 'swarm_routing.py', 'swarm_types.py', 'swarm_state.py', 'swarm_journal.py', 'swarm_evidence.py', 'swarm_outbox.py', 'swarm_plan_rules.py', 'swarm_preflight.py', 'swarm_code_protocol.py', 'swarm_code_launch.py', 'swarm_workspaces.py', 'swarm_dispatch.py')), PROJECT / 'tickets.py', PROJECT / 'drain_contract.py', PROJECT / 'linear_sync.py'):
             tree = ast.parse(path.read_text())
             if path.name == "swarm_outbox.py":
                 self.assertTrue({"emit_intent", "load_outbox_contract", "record_receipt",
                                  "acknowledgment_status"} <=
                                 {n.name for n in tree.body
                                  if isinstance(n, ast.FunctionDef)})
-            expected = {"swarm.py": "_submit", "swarm_routing.py": "load_agent_routing",
+            expected = {"swarm.py": "advance", "swarm_dispatch.py": "_submit", "swarm_routing.py": "load_agent_routing",
                         "swarm_types.py": "PlanError", "swarm_state.py": "acquire_lease",
                         "swarm_journal.py": "_fsync_append",
                         "swarm_evidence.py": "attested_receipt",

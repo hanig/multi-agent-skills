@@ -1314,7 +1314,7 @@ class TestMergeUnit(unittest.TestCase):
     def test_coordinator_never_imports_network_operator(self):
         imports = []
         definitions = set()
-        for name in ("swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py", "swarm_code_launch.py", "swarm_workspaces.py"):
+        for name in ("swarm.py", "swarm_routing.py", "swarm_types.py", "swarm_state.py", "swarm_journal.py", "swarm_evidence.py", "swarm_outbox.py", "swarm_plan_rules.py", "swarm_preflight.py", "swarm_code_protocol.py", "swarm_code_launch.py", "swarm_workspaces.py", "swarm_dispatch.py"):
             tree = ast.parse((SCRIPTS / name).read_text())
             definitions.update(n.name for n in tree.body
                                if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
@@ -1335,6 +1335,10 @@ class TestMergeUnit(unittest.TestCase):
             "_complete_code_launch",
             "_write_launch_record",
         } <= definitions)
+        self.assertTrue({
+                    "_allocate", "_dep_env", "_isolation_submission",
+                    "_record_isolation_facts", "_clear_isolation_marker",
+                    "_slurm_exit_trap", "_submit", "_bind"} <= definitions)
         self.assertTrue({"_seed_carry_forward", "_code_completion_protocol",
                          "_dispatch_prompt", "_code_protocol_problem"} <= definitions)
         self.assertTrue({"_git", "_execution_workspace", "_note_claimed_attempt"} <= definitions)

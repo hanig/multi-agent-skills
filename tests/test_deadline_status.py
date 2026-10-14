@@ -140,7 +140,7 @@ class TestDeadlineBreach(unittest.TestCase):
                 mock.patch.object(S.SS, "renew_lease", return_value=True), \
                 mock.patch.object(SE, "_check", check), \
                 mock.patch.object(SP, "_release_output_claims", release), \
-                mock.patch.object(S, "_allocate", allocate):
+                mock.patch.object(S.SD, "_allocate", allocate):
             report, dispatched, halted = S.advance(
                 plan, S.load_state(str(state_dir)), str(state_dir),
                 str(root / "runs"), False)
@@ -266,7 +266,7 @@ class TestDeadlineBreach(unittest.TestCase):
                     mock.patch.object(S.SS, "renew_lease", return_value=True), \
                     mock.patch.object(S.SW, "reconcile_orphan",
                                       side_effect=reconcile), \
-                    mock.patch.object(S, "_allocate", allocate), \
+                    mock.patch.object(S.SD, "_allocate", allocate), \
                     mock.patch.object(SP, "_release_output_claims"):
                 S.advance(plan, S.load_state(str(state_dir)), str(state_dir),
                           str(root / "runs"), False)

@@ -542,8 +542,8 @@ class TestRefusalIsCarriedNotRederived(unittest.TestCase):
         plan = {"name": "p", "units": [unit]}
         state = {"schema_version": 1, "units": {}, "halted": None}
         state_dir, runs = self.tmp / "state", self.tmp / "runs"
-        real_submit = S._submit
-        S._submit = stub
+        real_submit = S.SD._submit
+        S.SD._submit = stub
         try:
             locked, why = S.acquire_lease(str(state_dir))
             self.assertTrue(locked, why)
@@ -551,7 +551,7 @@ class TestRefusalIsCarriedNotRederived(unittest.TestCase):
                 plan, state, str(state_dir), str(runs), False)
         finally:
             S.release_lease(str(state_dir))
-            S._submit = real_submit
+            S.SD._submit = real_submit
         return state["units"]["code"], report, dispatched
 
     def test_advance_believes_the_observation_over_the_record(self):
