@@ -1,11 +1,13 @@
 """ARC-1786: approver dispositions through CLI, outbox, fake drain and audit."""
 import copy
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from tests.test_linear_drain import DrainCase, DC, LS
@@ -243,6 +245,24 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                     self.assert_refused(self.stop(command, by='old'), 'conflicting')
                 self.assertEqual({p: p.read_bytes() for p in paths}, before)
 
+    def test_identical_command_repairs_missing_append_without_state_or_epoch_change(self):
+        for command in ('abandon', 'supersede'):
+            with self.subTest(command=command):
+                self.setup_stop()
+                self.assert_ok(self.stop(command))
+                outbox = self.state / SO.OUTBOX
+                intent = outbox.read_bytes()
+                paths = [self.state / name for name in (SS.STATE_FILE, SS.STATE_EPOCH_FILE)]
+                before = {p: p.read_bytes() for p in paths}
+                outbox.unlink()
+                self.assert_ok(self.stop(command))
+                self.assertEqual(len(self.intents()), 1)
+                self.assertEqual(outbox.read_bytes(), intent)
+                self.assertEqual({p: p.read_bytes() for p in paths}, before)
+                self.assert_ok(self.stop(command))
+                self.assertEqual(outbox.read_bytes(), intent)
+                self.assertEqual({p: p.read_bytes() for p in paths}, before)
+
     def test_dependent_held_and_no_redispatch_or_cleanup_through_run_and_advance(self):
         for command in ('abandon', 'supersede'):
             for retained_attempt in (True, False):
@@ -370,6 +390,57 @@ class TestStoppedDrain(StopFixture, DrainCase):
         self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
         self.assertEqual(self.fake.issues['1']['state']['type'], 'started')
 
+    def shared_issue(self):
+        plan = json.loads(self.plan.read_text())
+        plan['units'][1]['tracker'] = 'ARC-1'
+        self.plan.write_text(json.dumps(plan))
+        state = self.load()
+        state['plan_digest'] = S.SPR.plan_digest(plan)
+        state['units']['successor'] = {'state': 'WAITING', 'attempt_dir': None,
+                                       'attempts': [], 'gpu_hours': 0}
+        self.save(state)
+
+    def assert_drained(self, expected, repeat=False):
+        before = copy.deepcopy(self.fake.mutations)
+        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.fake.issues['1']['state']['type'], expected)
+        if repeat:
+            self.assertEqual(self.fake.mutations, before)
+        self.assertEqual(self.audit(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.checks['intent_order'], 'CLEAN')
+
+    def test_shared_issue_live_start_then_all_abandoned(self):
+        self.shared_issue()
+        self.assert_ok(self.stop())
+        self.assert_drained('canceled')
+        # Emission uses whole seconds; ensure this start follows the decision.
+        time.sleep(1.01)
+        state = self.load()
+        state['units']['successor']['state'] = 'SUBMITTED'
+        self.save(state)
+        self.assert_ok(self.swarm('advance', '--root', str(self.runs), '--max-new-dispatches', '0'))
+        self.assertTrue(any(i['unit'] == 'successor' and i['verb'] == 'start' for i in self.intents()))
+        self.assert_drained('started')
+        self.assert_ok(self.stop(unit='successor'))
+        self.assert_drained('canceled')
+        self.assert_drained('canceled', repeat=True)
+
+    def test_shared_issue_cancel_never_replaces_done_close(self):
+        self.shared_issue()
+        state = self.load()
+        raw = json.dumps({'state': 'DONE', 'kind': 'slurm',
+                          'task_id': 'old', 'attempt_id': 'attempt1'}).encode()
+        (self.attempt / 'receipt.json').write_bytes(raw)
+        state['units']['old'].update(state='DONE', job_id='finished',
+                                    attempt_receipt_seals={'attempt1': hashlib.sha256(raw).hexdigest()})
+        self.save(state)
+        self.assert_ok(self.swarm('advance', '--root', str(self.runs), '--max-new-dispatches', '0'))
+        self.assertTrue(any(i['unit'] == 'old' and i['verb'] == 'close' for i in self.intents()))
+        self.assert_drained('completed')
+        self.assert_ok(self.stop(unit='successor'))
+        self.assert_drained('completed')
+        self.assert_drained('completed', repeat=True)
+
     def test_two_drains_then_audit_have_no_intent_order_drift(self):
         self.history()
         self.assert_ok(self.stop())
@@ -400,15 +471,15 @@ class TestStoppedDrain(StopFixture, DrainCase):
             self.assertIn(text, body)
 
     def test_cli_and_close_intent_consumers_share_receipt_admission(self):
-        # Bind every candidate to coordinator state, so only receipt admission
-        # varies. Exercise emit_intent and the real offline drain collector too.
+        # Keep the coordinator binding fixed as receipt shape and identity vary.
         variants = [(None, None, True)]
         variants += [(field, value, False) for field, value in (
             ('attested', False), ('attested', None), ('attested', 1),
             ('merged', False), ('merged', None), ('merged', 1),
             ('unit', 'another'), ('repo', ''), ('pr', ''), ('target', ''),
             ('head', ''), ('merged_as', ''), ('method', 'unknown'),
-            ('target_commit', 'invalid'))]
+            ('target_commit', 'invalid'), ('head', 'c' * 40),
+            ('pr', 'https://github.com/owner/repo/pull/99'), ('merged_as', 'c' * 40))]
         for field, value, accepted in variants:
             with self.subTest(field=field, value=value):
                 self.setup_stop()
@@ -420,9 +491,7 @@ class TestStoppedDrain(StopFixture, DrainCase):
                         receipt[field] = value
                 state = self.load()
                 successor = state['units']['successor']
-                successor.update(merge_receipt=receipt, merge_pr=receipt.get('pr'),
-                                 merged_as=receipt.get('merged_as'),
-                                 attempt_produced_heads={'attempt2': receipt.get('head')})
+                successor['merge_receipt'] = receipt
                 self.save(state)
                 result = self.stop('supersede')
                 if accepted:
@@ -437,6 +506,7 @@ class TestStoppedDrain(StopFixture, DrainCase):
                 stopped = dict(state='SUPERSEDED', terminal_decision=decision)
                 directory = self.root / 'consumer'
                 directory.mkdir(exist_ok=True)
+                (directory / SS.STATE_FILE).write_text(json.dumps(state))
                 outbox = directory / SO.OUTBOX
                 outbox.unlink(missing_ok=True)
                 key = SO.emit_intent(directory, 'stop-test', 'old', 'SUPERSEDED', stopped)
@@ -446,8 +516,12 @@ class TestStoppedDrain(StopFixture, DrainCase):
                 valid = copy.deepcopy(stopped)
                 valid['terminal_decision']['merge_receipt'] = self.receipt
                 outbox.unlink(missing_ok=True)
+                bound = copy.deepcopy(state)
+                bound['units']['successor']['merge_receipt'] = self.receipt
+                (directory / SS.STATE_FILE).write_text(json.dumps(bound))
                 SO.emit_intent(directory, 'stop-test', 'old', 'SUPERSEDED', valid)
                 intent = SO.read_outbox(directory)[0]
+                (directory / SS.STATE_FILE).write_text(json.dumps(state))
                 intent['evidence']['receipt'] = receipt
                 intent.pop('envelope')
                 outbox.write_text(json.dumps(SO.normalize_intent(intent)) + '\n')

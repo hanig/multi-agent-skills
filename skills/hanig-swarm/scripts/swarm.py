@@ -3024,7 +3024,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         evidence = None
         kind = (units.get(uid) or {}).get("kind")
         if now == "SUPERSEDED":
-            evidence = SO.superseded_evidence(us)
+            evidence = SO.superseded_evidence(us, state_dir)
         if now == "DONE" and us.get("attempt_dir"):
             # The verdict itself, so a drain never closes on a self-report.
             # Attested, or it is a self-report by the other party: an
