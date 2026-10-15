@@ -63,6 +63,7 @@ SCHEMA = 1
 SURVEY_SCHEMA = 4
 
 TERMINAL_OK = ("DONE",)
+OPERATOR_TERMINAL = ("ABANDONED", "SUPERSEDED")
 # FAILED_EVIDENCE is terminal in the coordinator: `advance` skips it
 # alongside DONE and FAILED, so it never re-dispatches. Leaving it out made a
 # finished run report UNKNOWN, which reads as "this report is confused" when
@@ -291,6 +292,8 @@ def unit_rows(data):
             "kind": pu.get("kind") or rc.get("kind") or "?",
             "state": _state_of(su, rc, attested),
             "state_conflict": _state_conflict(su, rc, attested),
+            "reason": (su.get("terminal_decision") or {}).get("reason"),
+            "successor": (su.get("terminal_decision") or {}).get("successor"),
             "receipt_attested": attested,
             "receipt_attestation": attestation,
             "receipt_claimed_state": rc.get("state"),
@@ -323,10 +326,10 @@ def unit_rows(data):
             # evidence status, not by pretending it is a mismatch.
             "missing_outputs": sorted(
                 set(pu.get("outputs") or []) - set(rc.get("outputs") or {})
-            ) if rc else [],
+            ) if rc and su.get("state") not in OPERATOR_TERMINAL else [],
             "undeclared_outputs": sorted(
                 set(rc.get("outputs") or {}) - set(pu.get("outputs") or [])
-            ) if rc else [],
+            ) if rc and su.get("state") not in OPERATOR_TERMINAL else [],
         })
     return rows
 
@@ -372,6 +375,8 @@ def _state_of(su, rc, attested=True):
     recorded for a check it ran was produced by that check. One that does not
     is a claim by whoever wrote the file, and does not outrank state.
     """
+    if su.get("state") in OPERATOR_TERMINAL:
+        return su["state"]  # an approver disposition is not an execution verdict
     if rc.get("state") and attested:
         return rc["state"]
     return su.get("state") or "NOT STARTED"
@@ -384,6 +389,8 @@ def _state_conflict(su, rc, attested=True):
     thing `_state_of` decided. Describing an unattributable receipt as "it
     judged the artifacts" asserted the very thing in doubt.
     """
+    if su.get("state") in OPERATOR_TERMINAL:
+        return None  # the preserved attempt receipt describes the prior attempt
     a, b = su.get("state"), rc.get("state")
     if not (a and b and a != b):
         return None
@@ -537,7 +544,8 @@ def verdict(rows):
         return "NO UNITS", "A plan with no units cannot have produced anything."
 
     blind = [r for r in rows
-             if r["evidence"].get("status") in ("unreadable", "unavailable")]
+             if r["state"] not in OPERATOR_TERMINAL
+             and r["evidence"].get("status") in ("unreadable", "unavailable")]
     if blind:
         return "NO VERDICT", (
             "%d unit(s) have evidence this report could not read, so their "
@@ -545,7 +553,8 @@ def verdict(rows):
             "stored state is a self-report." % len(blind))
 
     unattributable = [r for r in rows
-                      if r["receipt_attestation"] == UNATTRIBUTABLE]
+                      if r["state"] not in OPERATOR_TERMINAL
+                      and r["receipt_attestation"] == UNATTRIBUTABLE]
     if unattributable:
         return "NO VERDICT", (
             "%d unit(s) have a receipt that nothing attributes to a check "
@@ -555,7 +564,8 @@ def verdict(rows):
             "records causing the result." % len(unattributable))
 
     unknown = [r for r in rows if r["state"] not in TERMINAL_BAD
-               and r["state"] not in TERMINAL_OK and r["state"] not in LIVE]
+               and r["state"] not in TERMINAL_OK and r["state"] not in LIVE
+               and r["state"] not in OPERATOR_TERMINAL]
     if unknown:
         names = ", ".join(sorted({r["state"] for r in unknown}))
         return "UNKNOWN", (
@@ -596,6 +606,11 @@ def verdict(rows):
             "judged their artifacts. A stored state is a self-report."
             % len(unevidenced))
 
+    stopped = [r for r in rows if r["state"] in OPERATOR_TERMINAL]
+    if stopped:
+        return "STOPPED", ("%d unit(s) terminated by an approver; %d DONE. "
+                           "Abandoned and superseded units do not satisfy needs."
+                           % (len(stopped), len(done)))
     return "COMPLETE", ("All %d unit(s) closed on evidence." % len(rows))
 
 
@@ -962,10 +977,15 @@ def render(data, title=None):
         a("<tr>")
         a('<td class="mono">%s</td>' % e(r["id"]))
         a("<td>%s</td>" % e(r["kind"]))
-        a("<td>%s%s</td>" % (
+        disposition = r["reason"] or ""
+        if r["successor"]:
+            disposition += " (successor: %s)" % r["successor"]
+        a("<td>%s%s%s</td>" % (
             _pill(r["state"]),
             ('<br><span class="digest">%s</span>' % e(r["state_conflict"]))
-            if r["state_conflict"] else ""))
+            if r["state_conflict"] else "",
+            ('<br><span class="digest">%s</span>' % e(disposition))
+            if disposition else ""))
         a('<td class="mono">%s</td>' % e(r["job_id"] or "-"))
         a('<td class="mono">%s</td>' % e(att))
         rt = r["runtime"] or {}
@@ -978,7 +998,8 @@ def render(data, title=None):
     a("</tbody></table></div></section>")
 
     blind = [r for r in rows
-             if r["evidence"].get("status") in ("unreadable", "unavailable")]
+             if r["state"] not in OPERATOR_TERMINAL
+             and r["evidence"].get("status") in ("unreadable", "unavailable")]
     unevidenced = [r for r in rows if r["state"] in TERMINAL_OK
                    and not r["has_receipt"]]
     mismatch = [r for r in rows if r["has_receipt"]
@@ -1014,7 +1035,8 @@ def render(data, title=None):
                   "attribute it.</li>" % (e(r["id"]), e(str(claimed))))
         a("</ul></div></section>")
 
-    refused = [r for r in rows if r["preflight_refusals"]]
+    refused = [r for r in rows if r["preflight_refusals"]
+               and r["state"] not in OPERATOR_TERMINAL]
     if refused:
         a("<section>")
         a('<div class="sec-head"><h2>Blocked before launch</h2>'
