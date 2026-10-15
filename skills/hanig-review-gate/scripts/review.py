@@ -1039,7 +1039,8 @@ def redact_ledger(obj, path=()):
     for prefix in (("results", "[]", "findings", "[]"), ("open_findings", "[]")):
         for field in ("finding_digest", "confirmed"):
             typed_paths[prefix + (field,)] = field
-    for prefix in (("open_findings", "[]"), ("unattributable_records", "[]")):
+    for prefix in (("open_findings", "[]"), ("unattributable_records", "[]"),
+                   ("unreadable_records", "[]")):
         for field in ("reviewed_head", "round"):
             typed_paths[prefix + (field,)] = field
     field = typed_paths.get(path)
@@ -1051,7 +1052,7 @@ def redact_ledger(obj, path=()):
              "claim_digests", "claims", "results", "refuted_claims",
              "rejecting_reviewers", "panel_policy", "finding_digest",
              "decision", "accepted_by", "reason", "author", "timestamp",
-             "state", "open_findings", "unattributable_records", "journal",
+             "state", "open_findings", "unattributable_records", "unreadable_records", "journal",
              "review_verdict_changed", "input_redactions", "plan_exchange"},
         ("input_redactions", "[]"): {"source", "kind", "start_char", "end_char",
                                     "removed_chars"},
@@ -1061,6 +1062,8 @@ def redact_ledger(obj, path=()):
                                    "confirmed"},
         ("unattributable_records", "[]"): {"record_path", "problems",
                                            "reviewed_head", "type", "round"},
+        ("unreadable_records", "[]"): {"record_path", "problems",
+                                       "reviewed_head", "type", "round"},
         ("journal",): {"path", "written", "status", "error"},
     }
     schema_tokens = {
@@ -1933,10 +1936,10 @@ def adjudicator_is_author(accepted_by, authors):
 
 
 def journal_identity_problems(record, allow_unbound=False):
-    """Check every persisted identity before filtering history by head.
+    """Check every persisted identity without inferring or repairing it.
 
-    Old redaction is irreversible here. Missing or damaged identities stay
-    unattributable; neither another head nor an adjudication can hide them.
+    Old redaction is irreversible here. The query separately attributes
+    problems by recorded head; an adjudication cannot repair damaged fields.
     """
     problems = []
 
@@ -2000,18 +2003,27 @@ def validate_journal_record(record, allow_unbound=False):
 
 
 def journal_findings(records, head):
-    """Return head-bound findings/dispositions and all unattributable records."""
-    findings, adjudicated, unattributable = {}, set(), []
+    """Attribute decoded records only by their exact, valid recorded head.
+
+    Missing or invalid heads are diagnostic-only unreadable_records, never
+    rebound by recency. Structural journal read errors are handled by the reader.
+    """
+    findings, adjudicated, unattributable, unreadable = {}, set(), [], []
     for record_path, record in records:
+        recorded_head = record.get("reviewed_head")
+        if valid_head(recorded_head) and recorded_head != head:
+            continue
         problems = journal_identity_problems(record)
         if problems:
-            unattributable.append({
+            damaged = {
                 "record_path": str(record_path), "problems": problems,
-                "reviewed_head": record.get("reviewed_head"),
+                "reviewed_head": recorded_head,
                 "type": record.get("type"), "round": record.get("round"),
-            })
-            continue
-        if record.get("reviewed_head") != head:
+            }
+            if valid_head(recorded_head):
+                unattributable.append(damaged)
+            else:
+                unreadable.append(damaged)
             continue
         round_no = record["round"]
         if record["type"] == "adjudication":
@@ -2026,7 +2038,7 @@ def journal_findings(records, head):
                     **finding, "round": round_no, "reviewed_head": head,
                     "reviewer": result.get("name"),
                 }
-    return findings, adjudicated, unattributable
+    return findings, adjudicated, unattributable, unreadable
 
 
 def record_adjudication(args, round_no):
@@ -2071,7 +2083,7 @@ def cmd_ledger(args):
         config_error("Drop adjudication fields when querying --open-findings.")
     try:
         records = read_review_journal(review_journal_path(args.file))
-        findings, adjudicated, unattributable = journal_findings(records, args.head)
+        findings, adjudicated, unattributable, unreadable = journal_findings(records, args.head)
     except (OSError, ValueError, argparse.ArgumentTypeError) as exc:
         config_error(redact(f"cannot read adjudication history: {exc}. "
                             "Pass the original state home after repairing its journal."))
@@ -2083,6 +2095,7 @@ def cmd_ledger(args):
                       "OPEN_FINDINGS" if opened else "NO_OPEN_FINDINGS"),
             "reviewed_head": args.head, "open_findings": opened,
             "unattributable_records": unattributable,
+            "unreadable_records": unreadable,
         }), indent=2))
         return 1 if opened or unattributable else 0
     selected_round = None if args.round == "plan" else args.round
