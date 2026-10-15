@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 
-from tests.test_linear_drain import DrainCase
+from tests.test_linear_drain import DrainCase, DC, LS
 from tests.scheduler_fixture import isolated_module_path, cleanup_module_path as tearDownModule
 
 
@@ -46,7 +46,8 @@ class StopFixture:
                   'outputs': ['result'], 'needs': [], 'tracker': 'ARC-' + str(n)}
                  for n, uid in enumerate(('old', 'successor'), 1)]
         self.plan.write_text(json.dumps({'name': 'stop-test', 'units': units}))
-        state = {'schema_version': 1, 'halted': None, 'units': {
+        state = {'schema_version': 1, 'halted': None,
+                 'plan_digest': S.SPR.plan_digest(json.loads(self.plan.read_text())), 'units': {
             'old': {'state': 'FAILED', 'attempt_dir': str(self.attempt),
                     'attempts': [str(self.attempt)], 'gpu_hours': 0,
                     'attempt_workspaces': {'attempt1': {'cleanup_pending': True}},
@@ -65,13 +66,17 @@ class StopFixture:
         (self.state / SS.STATE_FILE).write_text(json.dumps(state))
 
     def swarm(self, command, *args):
+        # Execute the real entrypoint: main() parses argv and selects the handler.
         return subprocess.run([sys.executable, str(SWARM / 'swarm.py'), command,
                                str(self.plan), '--state-dir', str(self.state), *args],
                               cwd=str(self.root), capture_output=True, text=True, timeout=60)
 
     def stop(self, command='abandon', unit='old', approver='owner', reason='No longer needed', by='successor'):
-        args = ['--unit', unit, '--approver', approver, '--reason', reason]
-        if command == 'supersede':
+        args = []
+        for flag, value in (('--unit', unit), ('--approver', approver), ('--reason', reason)):
+            if value is not None:
+                args += [flag, value]
+        if command == 'supersede' and by is not None:
             args += ['--by', by]
         return self.swarm(command, *args)
 
@@ -129,12 +134,14 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
     def test_cli_refusals_are_usage_errors_and_leave_state_unchanged(self):
         original = (self.state / SS.STATE_FILE).read_bytes()
         for command in ('abandon', 'supersede'):
-            cases = [({'unit': 'absent'}, 'unknown unit'),
+            cases = [({'unit': 'absent'}, 'unknown unit'), ({'unit': None}, 'unknown unit'),
+                     ({'approver': None}, 'approver'), ({'reason': None}, 'reason'),
                      ({'approver': ''}, 'approver'), ({'approver': '  \t'}, 'approver'),
                      ({'reason': ''}, 'reason'), ({'reason': '  \t'}, 'reason'),
                      ({'unit': 'successor'}, 'DONE')]
             if command == 'supersede':
                 cases += [({'by': 'elsewhere'}, 'unknown successor'),
+                          ({'by': None}, 'unknown successor'),
                           ({'by': 'old'}, 'not DONE')]
             for values, reason in cases:
                 with self.subTest(command=command, values=values):
@@ -142,6 +149,36 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                     self.assertEqual((self.state / SS.STATE_FILE).read_bytes(), original)
         self.assertFalse((self.state / SO.OUTBOX).exists())
         self.assertFalse((self.state / SS.STATE_EPOCH_FILE).exists())
+
+    def test_cli_refuses_unreadable_or_malformed_plans_without_mutation(self):
+        for command in ('abandon', 'supersede'):
+            for plan in (None, '{', '[]', '{}', '{"units": "old"}',
+                         '{"units": [null]}', '{"units": [{"id": " "}]}',
+                         '{"units": [{"id": "old"}, {"id": "old"}]}'):
+                with self.subTest(command=command, plan=plan):
+                    self.setup_stop()
+                    before = (self.state / SS.STATE_FILE).read_bytes()
+                    if plan is None:
+                        self.plan.unlink()
+                    else:
+                        self.plan.write_text(plan)
+                    self.assert_refused(self.stop(command), 'error:')
+                    self.assertEqual((self.state / SS.STATE_FILE).read_bytes(), before)
+                    self.assertFalse((self.state / SO.OUTBOX).exists())
+                    self.assertFalse((self.state / SS.STATE_EPOCH_FILE).exists())
+
+    def test_cli_refuses_a_held_coordinator_lock_without_mutation(self):
+        ok, holder = SS.acquire_lease(self.state, bump_epoch=False)
+        self.assertTrue(ok, holder)
+        try:
+            before = (self.state / SS.STATE_FILE).read_bytes()
+            for command in ('abandon', 'supersede'):
+                self.assert_refused(self.stop(command), "cannot take this project's lock")
+                self.assertEqual((self.state / SS.STATE_FILE).read_bytes(), before)
+                self.assertFalse((self.state / SO.OUTBOX).exists())
+                self.assertFalse((self.state / SS.STATE_EPOCH_FILE).exists())
+        finally:
+            SS.release_lease(self.state)
 
     def test_refuses_a_plan_that_is_not_the_coordinators_recorded_plan(self):
         state = self.load()
@@ -153,6 +190,22 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
         for command in ('abandon', 'supersede'):
             self.assert_refused(self.stop(command), 'plan differs')
             self.assertEqual(self.load(), state)
+
+    def test_missing_plan_digest_refuses_both_commands_without_mutation(self):
+        for command in ('abandon', 'supersede'):
+            for missing in ('absent', 'null', 'empty'):
+                with self.subTest(command=command, missing=missing):
+                    self.setup_stop()
+                    state = self.load()
+                    state.pop('plan_digest')
+                    if missing != 'absent':
+                        state['plan_digest'] = None if missing == 'null' else ''
+                    self.save(state)
+                    before = (self.state / SS.STATE_FILE).read_bytes()
+                    self.assert_refused(self.stop(command), 'missing plan_digest')
+                    self.assertEqual((self.state / SS.STATE_FILE).read_bytes(), before)
+                    self.assertFalse((self.state / SO.OUTBOX).exists())
+                    self.assertFalse((self.state / SS.STATE_EPOCH_FILE).exists())
 
     def test_supersede_requires_successor_done_and_bound_merge_receipt(self):
         original = self.load()
@@ -203,6 +256,8 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                     plan['units'].append({'id': 'dependent', 'kind': 'slurm', 'command': 'true',
                                           'runtime': 'none', 'needs': ['old'], 'outputs': ['result']})
                     self.plan.write_text(json.dumps(plan))
+                    state['plan_digest'] = S.SPR.plan_digest(plan)
+                    self.save(state)
                     self.assert_ok(self.stop(command))
                     saved = self.load()['units']['old']
                     for entry in ('run', 'advance', 'advance'):
@@ -242,6 +297,7 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
         plan['units'][0].update(kind='code', repo=str(self.root / 'repo'), task='fix it')
         self.plan.write_text(json.dumps(plan))
         state = self.load()
+        state['plan_digest'] = S.SPR.plan_digest(plan)
         state['units']['old']['attempt_produced_heads'] = {'attempt1': 'c' * 40}
         self.save(state)
         self.assert_ok(self.stop('supersede'))
@@ -262,6 +318,7 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
         plan['units'][0]['deadline_s'] = 1
         self.plan.write_text(json.dumps(plan))
         state = self.load()
+        state['plan_digest'] = S.SPR.plan_digest(plan)
         state['units']['old'].update(state='RUNNING', allocated_at=1, reason='deadline_exceeded',
                                      deadline_breach_active=True)
         self.save(state)
@@ -341,6 +398,63 @@ class TestStoppedDrain(StopFixture, DrainCase):
         body = '\n'.join(c['body'] for c in self.fake.comments.values())
         for text in ('No longer needed', 'successor', self.receipt['pr'], self.receipt['head']):
             self.assertIn(text, body)
+
+    def test_cli_and_close_intent_consumers_share_receipt_admission(self):
+        # Bind every candidate to coordinator state, so only receipt admission
+        # varies. Exercise emit_intent and the real offline drain collector too.
+        variants = [(None, None, True)]
+        variants += [(field, value, False) for field, value in (
+            ('attested', False), ('attested', None), ('attested', 1),
+            ('merged', False), ('merged', None), ('merged', 1),
+            ('unit', 'another'), ('repo', ''), ('pr', ''), ('target', ''),
+            ('head', ''), ('merged_as', ''), ('method', 'unknown'),
+            ('target_commit', 'invalid'))]
+        for field, value, accepted in variants:
+            with self.subTest(field=field, value=value):
+                self.setup_stop()
+                receipt = dict(self.receipt)
+                if field:
+                    if value is None:
+                        receipt.pop(field)
+                    else:
+                        receipt[field] = value
+                state = self.load()
+                successor = state['units']['successor']
+                successor.update(merge_receipt=receipt, merge_pr=receipt.get('pr'),
+                                 merged_as=receipt.get('merged_as'),
+                                 attempt_produced_heads={'attempt2': receipt.get('head')})
+                self.save(state)
+                result = self.stop('supersede')
+                if accepted:
+                    self.assert_ok(result)
+                else:
+                    self.assert_refused(result, 'bound merge receipt')
+                    self.assertEqual(self.load(), state)
+                    self.assertFalse((self.state / SO.OUTBOX).exists())
+                decision = dict(state='SUPERSEDED', approver='owner', reason='replacement',
+                                at='2026-10-15T20:00:00+00:00',
+                                successor='successor', merge_receipt=receipt)
+                stopped = dict(state='SUPERSEDED', terminal_decision=decision)
+                directory = self.root / 'consumer'
+                directory.mkdir(exist_ok=True)
+                outbox = directory / SO.OUTBOX
+                outbox.unlink(missing_ok=True)
+                key = SO.emit_intent(directory, 'stop-test', 'old', 'SUPERSEDED', stopped)
+                self.assertEqual(key is not None, accepted)
+                # Also feed the collector an invalid candidate directly; an
+                # emission refusal alone must not mask a lax drain consumer.
+                valid = copy.deepcopy(stopped)
+                valid['terminal_decision']['merge_receipt'] = self.receipt
+                outbox.unlink(missing_ok=True)
+                SO.emit_intent(directory, 'stop-test', 'old', 'SUPERSEDED', valid)
+                intent = SO.read_outbox(directory)[0]
+                intent['evidence']['receipt'] = receipt
+                intent.pop('envelope')
+                outbox.write_text(json.dumps(SO.normalize_intent(intent)) + '\n')
+                problems = []
+                entries = LS.collect_intents([str(directory)], DC, problems.append)
+                self.assertEqual(len(entries), 1 if accepted else 0, problems)
+                self.assertEqual(bool(problems), not accepted)
 
     def test_section_lists_stopped_units_separately_from_running(self):
         self.assert_ok(self.stop())

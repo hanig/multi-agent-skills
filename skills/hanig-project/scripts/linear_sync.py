@@ -825,16 +825,17 @@ def collect_intents(directories, contract, report):
                     if not isinstance(receipt, dict) or not receipt:
                         raise ValueError('close evidence carries no receipt')
                     if intent.get('closing_evidence') == 'merged_pr':
-                        problem = contract.contract._merge_shape_problem(receipt)
                         subject = intent['unit']
                         if intent.get('unit_state') == 'SUPERSEDED':
                             subject = evidence.get('successor')
                             if not subject or subject == intent['unit']:
                                 raise ValueError('superseded close names no distinct successor')
-                            if receipt.get('merged') is not True or receipt.get('attested') is not True:
-                                raise ValueError('successor receipt is not an attested merge')
-                        if problem or receipt.get('unit') != subject:
-                            raise ValueError('merge receipt: ' + (problem or 'names another unit'))
+                            if not contract.contract.SO._has_attested_merge_receipt(subject, receipt):
+                                raise ValueError('successor receipt is not an attested merge for the successor')
+                        else:
+                            problem = contract.contract._merge_shape_problem(receipt)
+                            if problem or receipt.get('unit') != subject:
+                                raise ValueError('merge receipt: ' + (problem or 'names another unit'))
                 grade = status.get(intent['key'], (contract.contract.UNACKNOWLEDGED, []))[0]
                 if grade == contract.contract.CONFLICT:
                     raise ValueError('conflicting acknowledgments')
