@@ -549,7 +549,8 @@ def audit(args, client, filing=None):
                         continue
                     issue_state = mapped[row['id']]['state']['type']
                     state = row['state']
-                    mismatch = ((state == 'DONE' and issue_state != 'completed') or
+                    mismatch = ((state in ('DONE', 'SUPERSEDED') and issue_state != 'completed') or
+                                (state == 'ABANDONED' and issue_state != 'canceled') or
                                 (state in ('RUNNING', 'SUBMITTED') and issue_state != 'started') or
                                 (state in ('FAILED', 'FAILED_EVIDENCE', 'HELD', 'NEEDS_HUMAN') and issue_state == 'completed'))
                     if mismatch:
@@ -589,7 +590,8 @@ def audit(args, client, filing=None):
 
 # State is reconciled once per issue. Comments, including those from other
 # hosts, are the eventually visible ordering journal; there is no CAS or loop.
-STATE_TYPE = {'start': 'started', 'close': 'completed', 'reopen': 'unstarted'}
+STATE_TYPE = {'start': 'started', 'close': 'completed', 'reopen': 'unstarted',
+              'cancel': 'canceled'}
 OPERATIONS = set(STATE_TYPE) | {'note', 'block', 'open_pr'}
 COMMENT_FIELDS = 'id body issue { id }'
 DRAIN_ISSUE_FIELDS = 'id identifier state { type } project { id } team { id }'
@@ -633,6 +635,12 @@ def comment_body(intent):
              '', '- unit state: `%s`' % intent.get('unit_state'),
              '- attempt: `%s`' % intent['envelope']['attempt']['id'],
              '- evidence digest: `%s`' % intent['envelope']['evidence_digest'], '']
+    if intent.get('unit_state') == 'SUPERSEDED':
+        evidence = intent.get('evidence') or {}
+        receipt = evidence.get('receipt') or {}
+        lines += ['- successor: `%s`' % evidence.get('successor'),
+                  '- successor PR: %s' % receipt.get('pr'),
+                  '- merged head: `%s`' % receipt.get('head'), '']
     lines.extend('`swarm-%s: %s`' % pair for pair in intent_markers(intent).items())
     return '\n'.join(lines)
 
@@ -837,7 +845,14 @@ def collect_intents(directories, contract, report):
                         raise ValueError('close evidence carries no receipt')
                     if intent.get('closing_evidence') == 'merged_pr':
                         problem = contract.contract._merge_shape_problem(receipt)
-                        if problem or receipt.get('unit') != intent['unit']:
+                        subject = intent['unit']
+                        if intent.get('unit_state') == 'SUPERSEDED':
+                            subject = evidence.get('successor')
+                            if not subject or subject == intent['unit']:
+                                raise ValueError('superseded close names no distinct successor')
+                            if receipt.get('merged') is not True or receipt.get('attested') is not True:
+                                raise ValueError('successor receipt is not an attested merge')
+                        if problem or receipt.get('unit') != subject:
                             raise ValueError('merge receipt: ' + (problem or 'names another unit'))
                 grade = status.get(intent['key'], (contract.contract.UNACKNOWLEDGED, []))[0]
                 if grade == contract.contract.CONFLICT:
@@ -1041,6 +1056,35 @@ def sources(args):
     return {k: getattr(args, k, None) for k in ('binding', 'draft', 'plan', 'state_dir')}
 
 
+def section(args):
+    """Audit summary plus separately labelled current coordinator dispositions."""
+    summary = TA.section(args.audit, **sources(args))
+    if not args.state_dir:
+        return summary
+    try:
+        state = json.loads((Path(args.state_dir) / 'swarm-state.json').read_text())
+        units = state['units']
+        groups = {name: [] for name in ('ABANDONED', 'SUPERSEDED', 'RUNNING')}
+        for uid, us in sorted(units.items()):
+            name = us.get('state')
+            if name in ('ALLOCATED', 'SUBMITTED'):
+                name = 'RUNNING'
+            if name not in groups:
+                continue
+            decision = us.get('terminal_decision') or {}
+            detail = uid
+            if name != 'RUNNING':
+                detail += ': ' + str(decision.get('reason') or us.get('reason') or '')
+                if decision.get('successor'):
+                    detail += ' (successor: %s)' % decision['successor']
+            groups[name].append(detail)
+        return summary + '\nCurrent coordinator units:\n' + '\n'.join(
+            '%s: %s' % (name, '; '.join(values) or 'none')
+            for name, values in groups.items())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return summary + '\nCurrent coordinator units: UNKNOWN (state unreadable)'
+
+
 def parse_args(argv=None):
     """Parse and validate command syntax without credentials, I/O or dispatch."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1077,7 +1121,7 @@ def main(argv=None):
     key = None  # Validation can refuse before credentials are loaded.
     try:
         if args.command == 'section':
-            print(TA.section(args.audit, **sources(args)))
+            print(section(args))
             return 0
         if args.command == 'issue':
             LI.validate_request(args)
