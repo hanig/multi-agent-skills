@@ -129,6 +129,94 @@ class TestCommitteeTokenUsage(unittest.TestCase):
         self.assertIn("  token usage: 900in/128000out", output.splitlines())
 
 
+class TestCommitteeQuorum(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.roster = [
+            {"name": "alpha", "provider": "openai", "model": "test-alpha",
+             "profiles": ["committee"], "enabled": True},
+            {"name": "beta", "provider": "openrouter", "model": "test-beta",
+             "profiles": ["committee"], "enabled": True},
+            {"name": "gamma", "provider": "openrouter", "model": "test-gamma",
+             "profiles": ["committee"], "enabled": True},
+        ]
+        self.replies = {r["model"]: "Usable final position" for r in self.roster}
+        self.calls = []
+        for patcher in (
+                mock.patch.object(committee, "SESSIONS", Path(tmp.name)),
+                mock.patch.object(committee.R, "load_reviewers",
+                                  return_value=self.roster),
+                mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key",
+                                             "OPENROUTER_API_KEY": "test-key"}),
+                mock.patch.object(committee.R, "_post", side_effect=self.provider)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def provider(self, url, payload, headers, timeout):
+        self.calls.append(payload["model"])
+        reply = self.replies[payload["model"]]
+        if reply is None:
+            return None, "provider offline"
+        if "input" in payload:
+            return {"status": "completed", "output": [{"type": "message",
+                    "content": [{"text": reply}]}]}, None
+        return {"choices": [{"finish_reason": "stop",
+                             "message": {"content": reply}}]}, None
+
+    def invoke(self, command, *flags):
+        argv = [str(SCRIPT), command, "quorum", "--author", "codex/gpt-6-astra",
+                *flags]
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), redirect_stdout(output):
+            with self.assertRaises(SystemExit) as stopped:
+                guarded_main(committee.main)
+        return stopped.exception.code, output.getvalue()
+
+    def open_session(self, *flags):
+        code, output = self.invoke("open", "--problem", "Which ordering?", *flags)
+        self.assertEqual(code, 0, output)
+        self.calls.clear()
+
+    def test_three_usable_challenge_replies_pass(self):
+        self.open_session()
+        code, output = self.invoke("ask", "--prompt", "Challenge the positions")
+        self.assertEqual(code, 0, output)
+        self.assertCountEqual(self.calls, [r["model"] for r in self.roster])
+        saved = committee.load_session("quorum")
+        self.assertEqual(saved["turns"][-1]["label"], "ask")
+        for member in saved["members"].values():
+            self.assertEqual(member["history"][-1]["content"], "Usable final position")
+
+    def test_two_of_three_challenge_replies_name_missing_member(self):
+        self.open_session()
+        for reply in (None, "", "   "):
+            with self.subTest(reply=reply):
+                self.replies["test-gamma"] = reply
+                code, output = self.invoke("ask", "--prompt", "Challenge again")
+                self.assertEqual(code, committee.STATES["UNAVAILABLE"], output)
+                self.assertIn("gamma\n" + "=" * 70 + "\n  [no reply]", output)
+                saved = committee.load_session("quorum")
+                self.assertTrue(saved["members"]["gamma"]["errors"])
+
+    def test_two_selected_members_pass_with_three_configured(self):
+        self.open_session("--member", "alpha,beta")
+        code, output = self.invoke("ask", "--prompt", "Challenge the positions")
+        self.assertEqual(code, 0, output)
+        self.assertCountEqual(self.calls, ["test-alpha", "test-beta"])
+
+    def test_review_also_requires_all_selected_members(self):
+        self.open_session()
+        for reply, expected in (("Usable final position", 0), (None, 3)):
+            with self.subTest(reply=reply), mock.patch.object(
+                    committee.R, "git_out", return_value="a nonempty diff"):
+                self.replies["test-gamma"] = reply
+                code, output = self.invoke("review")
+                self.assertEqual(code, expected, output)
+                if reply is None:
+                    self.assertIn("gamma\n" + "=" * 70 + "\n  [no reply]", output)
+
+
 class TestCommitteeTiebreak(unittest.TestCase):
     POSITIONS = {
         "luna": "Keep the stable order.\nEvidence: input IDs are already sorted.\n",
@@ -461,6 +549,64 @@ class TestCommitteeTiebreak(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(saved["resolution"]["plan"], self.synthesis["plan"])
         self.assertEqual(len(self.calls), 1)
+
+    def test_fenced_json_decision_parses(self):
+        decision = {"status": "CONVERGED", "plan": "Retain stable order."}
+        for fence in ("```json", "```"):
+            for newline in ("\n", "\r\n"):
+                with self.subTest(fence=fence, newline=newline):
+                    self.calls.clear()
+                    self.synthesis = newline.join((fence, json.dumps(decision), "```"))
+                    code, output, saved = self.invoke(author="codex/gpt-6-astra")
+                    self.assertEqual(code, 0, output)
+                    self.assertEqual(saved["resolution"]["status"], "CONVERGED")
+                    self.assertEqual(saved["resolution"]["plan"], decision["plan"])
+                    self.assertEqual(saved["resolution"]["reply"], self.synthesis)
+                    self.assertEqual(len(self.calls), 1)
+
+    def test_fenced_divergence_records_nonconverged_reason(self):
+        reason = "Stable and newest-first ordering remain incompatible."
+        self.synthesis = '```json\n' + json.dumps({
+            "status": "DIVERGED", "reason": reason}) + '\n```'
+        self.tie_error = "tie-break provider offline"
+        code, output, saved = self.invoke(author="codex/gpt-6-astra")
+        self.assertEqual(code, committee.STATES["DIVERGED"], output)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual([d["status"] for d in saved["decisions"]],
+                         ["DIVERGED", "OWNER"])
+        divergence = saved["decisions"][0]
+        self.assertEqual(divergence["reason"], reason)
+        self.assertIsNone(divergence["error"])
+        self.assertEqual(divergence["reply"], self.synthesis)
+        self.assertNotIn("malformed decision reply", output)
+
+    def test_malformed_decisions_are_still_refused(self):
+        valid = json.dumps({"status": "CONVERGED", "plan": "Retain stable order."})
+        for reply in (
+                "not JSON", "DIVERGED: the orders disagree", "{broken}",
+                "```json\n{broken}\n```", "```python\n" + valid + "\n```",
+                "```json\n" + valid, valid + "\n```",
+                "```json " + valid + "\n```", "```json\n" + valid + " ```",
+                "```json\n```json\n" + valid + "\n```\n```",
+                "Here is the decision:\n```json\n" + valid + "\n```",
+                "```json\n" + valid + "\n```\nExplanation follows.",
+                '```json\n{"status":"DIVERGED","reason":""}\n```'):
+            with self.subTest(reply=reply):
+                self.calls.clear()
+                self.synthesis = reply
+                code, output, saved = self.invoke(author="codex/gpt-6-astra")
+                self.assertEqual(code, committee.STATES["DIVERGED"], output)
+                self.assertEqual(saved["resolution"]["status"], "OWNER")
+                self.assertIn(saved["resolution"]["reason"], (
+                    "empty or malformed decision reply", "unusable synthesis reply"))
+                self.assertEqual(len(self.calls), 1)
+
+    def test_fenced_tiebreak_uses_same_decision_parser(self):
+        self.tie_text = "```json\n" + json.dumps(self.ruling) + "\n```"
+        code, output, saved = self.invoke("tiebreak", author="codex/gpt-6-astra")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(saved["resolution"]["status"], "RULING")
+        self.assertEqual(saved["resolution"]["reply"], self.tie_text)
 
     def test_empty_synthesis_plan_routes_owner(self):
         for value in ("", "   "):
