@@ -91,6 +91,12 @@ def validate(record):
         if not isinstance(path, str) or not path or (digest is not None and
                 (not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest))):
             raise ValueError('input digest')
+    if 'input_realpaths' in record:
+        realpaths = record['input_realpaths']
+        if (not isinstance(realpaths, dict) or set(realpaths) != set(inputs) or
+                any(not isinstance(path, str) or not os.path.isabs(path)
+                    for path in realpaths.values())):
+            raise ValueError('input realpaths')
     coverage = record['coverage']
     if type(coverage['complete']) is not bool:
         raise ValueError('coverage complete')
@@ -124,10 +130,24 @@ def render(record, current_inputs, now=None, max_age=900):
         finish = validate(record)
     except (ValueError, TypeError, KeyError, AttributeError):
         return 'Tracker: INVALID'
-    if set(record['inputs']) != set(current_inputs):
+    # Legacy records retain literal path comparison; they have no saved targets.
+    saved_sources = record.get('input_realpaths')
+    if saved_sources is None:
+        saved_sources = {path: path for path in record['inputs']}
+        current_sources = {path: path for path in current_inputs}
+    else:
+        for path, realpath in saved_sources.items():
+            if os.path.realpath(path) != realpath:
+                return 'Tracker: STALE: %s target changed' % path
+        current_sources = {path: os.path.realpath(path) for path in current_inputs}
+    # Aliases identify the same captured source, but every digest must agree.
+    current_by_source = {}
+    for path, digest in current_inputs.items():
+        current_by_source.setdefault(current_sources[path], set()).add(digest)
+    if set(saved_sources.values()) != set(current_by_source):
         return 'Tracker: STALE: input sources changed'
     for path, digest in record['inputs'].items():
-        if current_inputs[path] != digest:
+        if current_by_source[saved_sources[path]] != {digest}:
             return 'Tracker: STALE: %s changed' % path
     now = now or dt.datetime.now(dt.timezone.utc)
     age = (now - finish).total_seconds()

@@ -17,6 +17,15 @@ column means. Where a project wants findings in the report it emits
 findings.json, and those are rendered in a section labelled as the project's
 claims, not the coordinator's evidence.
 
+Usage: report.py [PROJECT] [--state-dir DIR] [--root RUNS]
+                 [--tracker-audit FILE] [--out FILE] [--title TITLE]
+                 [--fragment] [--json]
+
+Explicit state and run directories use the shared coordinator path policy:
+relative paths are resolved from the invocation directory, user homes and
+symlinks are expanded, and paths inside operated Git worktrees are refused.
+Without overrides, the existing per-project defaults and legacy migration apply.
+
 stdlib only, like the rest of the repo.
 """
 import argparse
@@ -218,22 +227,24 @@ def _discover_receipts(runs_root):
     return receipts, evidence, provenance
 
 
-def collect(project):
+def collect(project, state_dir=None, root=None):
     """Gather every evidence source. Missing ones are absences, not errors:
     a report on a half-finished run is exactly when this is most useful."""
     p = lambda *a: os.path.join(project, *a)
     plan = _load(p("plan.json"), {}) or {}
+    use_defaults = state_dir is None and root is None
     state_dir, runs_root, _worktrees = CP.resolve_paths(
-        plan=plan, cwd=project, need_root=True)
-    try:
-        CP.migrate_legacy_defaults(state_dir, runs_root, cwd=project)
-    except (OSError, shutil.Error):
-        # Inspection must still report an unreadable legacy attempt as
-        # unreadable. A failed migration is not permission to turn it into an
-        # absence. This fallback reads only and leaves the source untouched.
-        legacy = Path(project).resolve() / ".swarm"
-        if (legacy / "state" / "swarm-state.json").is_file():
-            state_dir, runs_root = legacy / "state", legacy / "runs"
+        state_dir=state_dir, root=root, plan=plan, cwd=project, need_root=True)
+    if use_defaults:
+        try:
+            CP.migrate_legacy_defaults(state_dir, runs_root, cwd=project)
+        except (OSError, shutil.Error):
+            # Inspection must still report an unreadable legacy attempt as
+            # unreadable. A failed migration is not permission to turn it into an
+            # absence. This fallback reads only and leaves the source untouched.
+            legacy = Path(project).resolve() / ".swarm"
+            if (legacy / "state" / "swarm-state.json").is_file():
+                state_dir, runs_root = legacy / "state", legacy / "runs"
     state = _load(os.path.join(state_dir, "swarm-state.json"), {}) or {}
 
     receipts, evidence, provenance = _discover_receipts(
@@ -1310,6 +1321,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Build the end-of-run report for a swarm project.")
     ap.add_argument("project", nargs="?", default=".")
+    ap.add_argument("--state-dir", default=None,
+                    help="external coordinator state directory (default: "
+                         "per-project state under XDG_STATE_HOME or ~/.local/state)")
+    ap.add_argument("--root", default=None,
+                    help="external attempt root (default: beside the default "
+                         "state directory)")
     ap.add_argument("--out", default=None,
                     help="write here (default: <project>/report.html)")
     ap.add_argument("--title", default=None)
@@ -1324,7 +1341,11 @@ def main(argv=None):
     if not os.path.isdir(args.project):
         sys.stderr.write("error: %s is not a directory\n" % args.project)
         return 2
-    data = collect(args.project)
+    try:
+        data = collect(args.project, state_dir=args.state_dir, root=args.root)
+    except CP.PathPolicyError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
     sources = tracker_sources(args.project, data["state_dir"])
     data["tracker_section"] = (TA.section(args.tracker_audit, **sources)
                                if args.tracker_audit else "Tracker: UNKNOWN (no audit)")

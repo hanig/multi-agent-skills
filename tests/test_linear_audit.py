@@ -301,6 +301,27 @@ class AuditCase(unittest.TestCase):
 
 
 class TestAudit(AuditCase):
+    def test_saved_symlink_retargeted_to_identical_file_is_stale(self):
+        first = self.binding
+        second = self.root / 'other-binding.json'
+        second.write_bytes(first.read_bytes())
+        alias = self.root / 'current-binding.json'
+        alias.symlink_to(first)
+        self.binding = alias
+        self.assertEqual(self.audit(), 0)
+        self.assertEqual(self.record['input_realpaths'],
+                         {str(alias): str(first.resolve())})
+        self.assertIn('Linear consistent', TA.section(self.out, binding=first))
+        self.assertIn('Linear consistent', TA.section(self.out, binding=alias))
+        recorded = self.out.read_bytes()
+        alias.unlink()
+        alias.symlink_to(second)
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        for current in (alias, first, second):
+            with self.subTest(current=current):
+                self.assertIn('Tracker: STALE:', TA.section(self.out, binding=current))
+        self.assertEqual(self.out.read_bytes(), recorded)
+
     def test_identifier_filter_excludes_unrequested_team_issues(self):
         for number in (1396, 1175, 1171, 1464, 1463, 2, 10):
             self.fake.add(str(number))
@@ -909,6 +930,8 @@ class TestAudit(AuditCase):
         self.audit(plan=True, state=True)
         paths = TA.source_paths(draft=self.draft, plan=self.plan, state_dir=self.state)
         self.assertEqual(set(self.record['inputs']), set(paths))
+        self.assertEqual(self.record['input_realpaths'],
+                         {path: os.path.realpath(path) for path in paths})
         absent = str(self.state / 'outbox.jsonl')
         self.assertIsNone(self.record['inputs'][absent])
         (self.state / 'outbox.jsonl').write_text(KEY)
@@ -1151,6 +1174,38 @@ class TestAudit(AuditCase):
         self.assertEqual(self.audit(), 3)
         self.assertEqual(self.checks['coverage'], 'UNKNOWN')
 
+    def test_local_symlink_retarget_during_read_invalidates_coverage(self):
+        first = self.binding
+        second = self.root / 'other-binding.json'
+        second.write_bytes(first.read_bytes())
+        alias = self.root / 'current-binding.json'
+        alias.symlink_to(first)
+        self.binding = alias
+        dispatch = self.fake.dispatch
+        def change(q, variables):
+            if 'query Binding' in q:
+                alias.unlink()
+                alias.symlink_to(second)
+            return dispatch(q, variables)
+        self.fake.dispatch = change
+        self.assertEqual(self.audit(), 3)
+        self.assertEqual(self.checks['coverage'], 'UNKNOWN')
+        self.assertEqual(self.record['input_realpaths'][str(alias)], str(first.resolve()))
+
+    def test_late_discovered_operation_source_records_realpath(self):
+        self.make_plan(needs=[])
+        operations = self.root / 'operations'
+        with mock.patch.dict(os.environ, {'HANIG_LINEAR_OPS_DIR': str(operations)}):
+            directory = TA.operation_directory(self.fake.org['id'], self.fake.project['id'])
+            directory.mkdir(parents=True)
+            source = directory / 'operation.json'
+            source.write_text('{}')
+            self.assertNotIn(str(source), TA.source_paths(draft=self.draft, plan=self.plan))
+            self.audit(plan=True)
+            self.assertIn(str(source), self.record['inputs'])
+            self.assertEqual(self.record['input_realpaths'][str(source)], str(source.resolve()))
+            TA.validate(self.record)
+
     def test_overlapping_reads_cannot_hide_a_transient_change(self):
         self.make_plan(needs=[])
         self.fake.issues['1']['description'] = 'swarm-unit: sample/one'
@@ -1203,6 +1258,7 @@ class TestConsumers(AuditCase):
             rec['checks'][0]['evidence'] = ['finding']
             yield verdict, rec, verdict
         rec = copy.deepcopy(valid); rec['inputs'][str(self.root / 'other')] = None
+        rec['input_realpaths'][str(self.root / 'other')] = str((self.root / 'other').resolve())
         yield 'sources', rec, 'STALE'
         rec = copy.deepcopy(valid); rec['scope']['plan'] = 'plan'
         yield 'missing_edges', rec, 'INVALID'
@@ -1268,6 +1324,11 @@ class TestConsumers(AuditCase):
             ('scope', dict(original['scope'], plan=3)),
             ('scope', dict(original['scope'], repository=[])),
             ('inputs', {}), ('inputs', {'': None}), ('inputs', {'x': 'bad'}),
+            ('input_realpaths', None), ('input_realpaths', []), ('input_realpaths', {}),
+            ('input_realpaths', dict(original['input_realpaths'], extra='/extra')),
+            ('input_realpaths', {path: None for path in original['inputs']}),
+            ('input_realpaths', {path: '' for path in original['inputs']}),
+            ('input_realpaths', {path: 'relative' for path in original['inputs']}),
             ('coverage', dict(original['coverage'], complete=1)),
             ('coverage', dict(original['coverage'], pages=-1)),
             ('coverage', dict(original['coverage'], issues=True)),
@@ -1317,6 +1378,133 @@ class TestConsumers(AuditCase):
         with mock.patch.object(MU.subprocess, 'run', side_effect=child), contextlib.redirect_stdout(io.StringIO()):
             MU.run(['gh', 'pr', 'view'])
             MU.run([sys.executable, MU.SWARM, 'status'])
+
+
+class TestAuditInputFreshness(unittest.TestCase):
+    """Exercise saved audits and both offline consumers using real input files."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.project = self.root / 'project'
+        self.project.mkdir()
+        (self.project / 'plan.json').write_text('{"name":"sample","units":[]}')
+        (self.project / 'tickets.json').write_text('{}')
+        self.state = self.root / 'state'
+        self.state.mkdir()
+        (self.state / 'swarm-state.json').write_text('{}')
+        # The other state sources are absent; aliases must preserve None digests.
+        self.alias = self.root / 'alias'
+        self.alias.symlink_to(self.root, target_is_directory=True)
+        env = mock.patch.dict(os.environ, {
+            'HANIG_LINEAR_OPS_DIR': str(self.root / 'operations'),
+            'XDG_STATE_HOME': str(self.root / 'defaults')})
+        env.start()
+        self.addCleanup(env.stop)
+        transport = mock.patch.object(API, 'transport',
+                                      side_effect=AssertionError('offline consumer used network'))
+        transport.start()
+        self.addCleanup(transport.stop)
+        stamp = dt.datetime.now(dt.timezone.utc).isoformat()
+        self.record = {
+            'schema_version': 1, 'read_started': stamp, 'read_finished': stamp,
+            'scope': {'workspace': 'workspace', 'team': 'team', 'project': 'project',
+                      'repository': None, 'plan': 'sample'},
+            'inputs': TA.current_inputs(**self.sources(self.root)),
+            'coverage': {'complete': True, 'pages': 1, 'issues': 0},
+            'checks': [{'id': name, 'verdict': 'CLEAN', 'evidence': []}
+                       for name in sorted(TA.CHECKS | {'plan_edges'})],
+            'verdict': 'CLEAN'}
+        self.record['input_realpaths'] = {
+            path: os.path.realpath(path) for path in self.record['inputs']}
+        self.audit = self.root / 'audit.json'
+        self.audit.write_text(json.dumps(self.record))
+
+    def sources(self, root):
+        return {'draft': root / 'project/tickets.json',
+                'plan': root / 'project/plan.json', 'state_dir': root / 'state'}
+
+    def test_symlink_alias_inputs_are_fresh_in_both_directions(self):
+        original = self.record['inputs']
+        aliased = TA.current_inputs(**self.sources(self.alias))
+        self.assertNotEqual(set(original), set(aliased))
+        for saved, current in ((original, aliased), (aliased, original)):
+            with self.subTest(saved=list(saved)):
+                record = dict(self.record, inputs=saved, input_realpaths={
+                    path: os.path.realpath(path) for path in saved})
+                self.assertIn('Linear consistent', TA.render(record, current))
+
+    def test_legacy_record_renders_with_literal_source_paths(self):
+        del self.record['input_realpaths']
+        self.audit.write_text(json.dumps(self.record))
+        self.assertIn('Linear consistent', TA.section(self.audit, **self.sources(self.root)))
+        self.assertEqual(TA.section(self.audit, **self.sources(self.alias)),
+                         'Tracker: STALE: input sources changed')
+        (self.project / 'plan.json').write_text('{"name":"changed","units":[]}')
+        self.assertIn('Tracker: STALE:', TA.section(self.audit, **self.sources(self.root)))
+
+    def test_distinct_same_named_file_with_identical_bytes_is_stale(self):
+        other = self.root / 'other'
+        other.mkdir()
+        source = self.project / 'plan.json'
+        replacement = other / source.name
+        replacement.write_bytes(source.read_bytes())
+        sources = dict(self.sources(self.root), plan=replacement)
+        self.assertEqual(TA.section(self.audit, **sources),
+                         'Tracker: STALE: input sources changed')
+
+    def test_same_path_with_changed_digest_is_stale(self):
+        (self.project / 'plan.json').write_text('{"name":"changed","units":[]}')
+        self.assertEqual(TA.section(self.audit, **self.sources(self.root)),
+                         'Tracker: STALE: %s changed' % (self.project / 'plan.json'))
+
+    def test_aliases_cannot_hide_a_conflicting_digest(self):
+        original = self.record['inputs']
+        alias_path = str(self.alias / 'project/plan.json')
+        for side in ('saved', 'current'):
+            for conflict_first in (False, True):
+                with self.subTest(side=side, conflict_first=conflict_first):
+                    conflicting = {alias_path: '0' * 64}
+                    combined = (dict(conflicting, **original) if conflict_first
+                                else dict(original, **conflicting))
+                    saved = combined if side == 'saved' else original
+                    current = combined if side == 'current' else original
+                    record = dict(self.record, inputs=saved, input_realpaths={
+                        path: os.path.realpath(path) for path in saved})
+                    self.assertIn('STALE', TA.render(record, current))
+
+    def test_linear_section_and_report_share_freshness_through_cli(self):
+        # Persist alias spellings too: the report resolves its state directory.
+        self.record['inputs'] = TA.current_inputs(**self.sources(self.alias))
+        self.record['input_realpaths'] = {
+            path: os.path.realpath(path) for path in self.record['inputs']}
+        self.audit.write_text(json.dumps(self.record))
+        other = self.root / 'other'
+        other.mkdir()
+        (other / 'swarm-state.json').write_bytes((self.state / 'swarm-state.json').read_bytes())
+        for state, changed, expected in ((self.alias / 'state', False, 'Linear consistent'),
+                                         (other, False, 'Tracker: STALE: input sources changed'),
+                                         (self.alias / 'state', True, 'Tracker: STALE:')):
+            with self.subTest(state=state, changed=changed):
+                if changed:
+                    (self.state / 'swarm-state.json').write_text('{"units":{}}')
+                out = io.StringIO()
+                sources = self.sources(self.root)
+                with contextlib.redirect_stdout(out):
+                    rc = LS.main(['section', '--audit', str(self.audit),
+                                  '--draft', str(sources['draft']), '--plan', str(sources['plan']),
+                                  '--state-dir', os.path.realpath(state)])
+                self.assertEqual(rc, 0)
+                section = out.getvalue().strip()
+                self.assertIn(expected, section)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = report.main([str(self.alias / 'project'), '--json',
+                                      '--state-dir', str(state), '--root', str(self.root / 'runs'),
+                                      '--tracker-audit', str(self.audit)])
+                self.assertEqual(rc, 0)
+                self.assertEqual(json.loads(out.getvalue())['tracker_section'], section)
 
 
 if __name__ == '__main__':

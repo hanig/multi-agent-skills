@@ -236,7 +236,14 @@ python3 scripts/tickets.py approve .swarm/tickets.json --approver hani
 
 python3 scripts/report.py  .          --out report.html      # ends every run
 python3 scripts/report.py  . --fragment --out frag.html      # to publish
+python3 scripts/report.py  . --state-dir "$STATE" --root "$RUNS" --out report.html
 ```
+
+`report.py --state-dir DIR --root RUNS` reads an external coordinator state
+directory and attempt root. Overrides use the shared coordinator path policy:
+relative paths start at the invocation directory, `~` and symlinks are resolved,
+and paths inside operated Git worktrees are refused. Omitting both options keeps
+the per-project defaults and legacy migration behavior.
 
 `draft` takes the plan positionally and accepts `--brief` and `--autopilot`.
 `approve` requires `--approver`: an approval with no one attached to it is not

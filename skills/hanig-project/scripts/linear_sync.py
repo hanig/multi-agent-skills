@@ -307,6 +307,7 @@ def audit(args, client, filing=None):
     started = utc()
     requests_started = client.requests
     paths = TA.source_paths(**sources(args)) if filing is None else []
+    input_realpaths = {path: os.path.realpath(path) for path in paths}
     raw, inputs = TA.capture(paths)
     plan = (filing['plan'] if filing else read_object(raw, args.plan) if args.plan else None)
     draft = (filing['draft'] if filing else read_object(raw, args.draft) if args.draft else None)
@@ -509,6 +510,7 @@ def audit(args, client, filing=None):
         for path in op_paths:
             if path not in paths:
                 paths.append(path)
+                input_realpaths[path] = os.path.realpath(path)
                 added_raw, added_inputs = TA.capture([path])
                 raw.update(added_raw)
                 inputs.update(added_inputs)
@@ -565,6 +567,8 @@ def audit(args, client, filing=None):
     try:
         if filing is None and TA.current_inputs(**sources(args), operation_scope=scope) != inputs:
             reader.problems.append('local inputs changed during read')
+        if any(os.path.realpath(path) != realpath for path, realpath in input_realpaths.items()):
+            reader.problems.append('local input targets changed during read')
     except OSError as exc:
         reader.problems.append(str(exc))
     if reader.problems:
@@ -576,6 +580,7 @@ def audit(args, client, filing=None):
     records = list(checks.values())
     result = {'schema_version': 1, 'verdict': TA.verdict(records), 'read_started': started,
             'read_finished': utc(), 'scope': scope, 'inputs': inputs,
+            'input_realpaths': input_realpaths,
             'coverage': {'complete': not reader.problems, 'pages': reader.pages, 'issues': len(issues),
                          'requests': client.requests - requests_started},
             'checks': records}
