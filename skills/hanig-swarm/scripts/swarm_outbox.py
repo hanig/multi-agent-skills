@@ -17,6 +17,8 @@ from pathlib import Path
 
 import swarm_evidence as SE
 import swarm_journal as SJ
+import swarm_state as SS
+import unit as U
 from swarm_types import OutboxError
 
 
@@ -294,7 +296,7 @@ def reconcile_observation(intent, observation):
 
 
 def _has_attested_merge_receipt(uid, receipt):
-    """Shared receipt admission for supersession and its close-intent path."""
+    """Receipt shape check; admission also requires coordinator binding below."""
     return (isinstance(receipt, dict)
             and receipt.get("unit") == uid
             and receipt.get("merged") is True
@@ -303,9 +305,10 @@ def _has_attested_merge_receipt(uid, receipt):
 
 
 def _has_bound_merge_evidence(uid, us, evidence):
-    """Does *evidence* carry the merge already admitted for this attempt?"""
+    """Sole receipt admission for supersede, close emission and collection."""
     receipt = evidence.get("receipt") if isinstance(evidence, dict) else None
-    if not _has_attested_merge_receipt(uid, receipt) or us.get("merge_receipt") != receipt:
+    if (not isinstance(us, dict) or not _has_attested_merge_receipt(uid, receipt)
+            or us.get("merge_receipt") != receipt):
         return False
     attempt = Path(us.get("attempt_dir") or "").name
     produced = (us.get("attempt_produced_heads") or {}).get(attempt)
@@ -315,19 +318,16 @@ def _has_bound_merge_evidence(uid, us, evidence):
             and receipt.get("pr") == us.get("merge_pr"))
 
 
-def superseded_evidence(us):
-    """Read the successor receipt pinned by the approver command, not an agent.
-
-    Admission checks the successor's DONE state and attempt/head binding.
-    Keeping that admitted receipt in coordinator state makes outbox repair
-    independent of later rechecks of the successor.
-    """
+def superseded_evidence(us, state_dir):
+    """Recheck the pinned receipt against the successor's coordinator binding."""
     decision = us.get("terminal_decision") or {}
     receipt = decision.get("merge_receipt")
     successor = decision.get("successor")
+    state, error = U.read_json(Path(state_dir) / SS.STATE_FILE)
+    next_us = ((state or {}).get("units") or {}).get(successor) if not error else None
     if (us.get("state") != "SUPERSEDED" or decision.get("state") != "SUPERSEDED"
             or not successor
-            or not _has_attested_merge_receipt(successor, receipt)):
+            or not _has_bound_merge_evidence(successor, next_us, {"receipt": receipt})):
         return None
     return {"successor": successor, "receipt": receipt}
 
@@ -570,7 +570,7 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
             return None
         why = decision["reason"]
         if unit_state == "SUPERSEDED":
-            evidence = superseded_evidence(us)
+            evidence = superseded_evidence(us, state_dir)
             if evidence is None:
                 return None
 
