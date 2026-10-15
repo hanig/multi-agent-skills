@@ -691,7 +691,11 @@ def project_comments(reader, workspace, project, ids):
 
 
 def latest_state(comments):
-    return max((c for c in comments if c['op'] in STATE_TYPE),
+    # A cancellation cannot undo another unit's completed work on this issue.
+    # All other verbs retain their existing latest-intent-wins ordering.
+    closed = any(c['op'] == 'close' for c in comments)
+    return max((c for c in comments if c['op'] in STATE_TYPE
+                and not (closed and c['op'] == 'cancel')),
                key=lambda c: c['order'], default=None)
 
 
@@ -830,8 +834,12 @@ def collect_intents(directories, contract, report):
                             subject = evidence.get('successor')
                             if not subject or subject == intent['unit']:
                                 raise ValueError('superseded close names no distinct successor')
-                            if not contract.contract.SO._has_attested_merge_receipt(subject, receipt):
-                                raise ValueError('successor receipt is not an attested merge for the successor')
+                            state, error = contract.contract.U.read_json(
+                                Path(directory) / contract.contract.SS.STATE_FILE)
+                            successor = ((state or {}).get('units') or {}).get(subject) if not error else None
+                            if not contract.contract.SO._has_bound_merge_evidence(
+                                    subject, successor, evidence):
+                                raise ValueError('successor receipt is not a bound attested merge for the successor')
                         else:
                             problem = contract.contract._merge_shape_problem(receipt)
                             if problem or receipt.get('unit') != subject:

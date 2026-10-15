@@ -64,6 +64,12 @@ class TestTrackerField(unittest.TestCase):
                     'pr': 'https://github.com/owner/repo/pull/1',
                     'target': 'main', 'head': 'a' * 40, 'merged_as': 'b' * 40,
                     'method': 'merge', 'merged': True, 'attested': True}
+                receipt = decision['merge_receipt']
+                (self.state_dir / S.SS.STATE_FILE).write_text(json.dumps({'units': {
+                    'successor': {'attempt_dir': '/runs/successor/a1',
+                                  'attempt_produced_heads': {'a1': receipt['head']},
+                                  'merge_receipt': receipt, 'merge_pr': receipt['pr'],
+                                  'merged_as': receipt['merged_as']}}}))
             us['terminal_decision'] = decision
         return S.emit_intent(
             self.state_dir, self.plan['name'], self.unit['id'], state,
