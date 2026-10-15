@@ -216,6 +216,7 @@ from swarm_outbox import (
     require_valid_intent,
     _receipt_admissible,
     reconcile_observation,
+    _has_attested_merge_receipt,
     _has_bound_merge_evidence,
     superseded_evidence,
     _intent_key,
@@ -3644,7 +3645,7 @@ def cmd_stop_unit(args):
         print(f"error: unknown unit {args.unit!r}", file=sys.stderr)
         return 4
     successor = getattr(args, "by", None)
-    if args.cmd == "supersede" and successor not in units:
+    if args.command == "supersede" and successor not in units:
         print(f"error: unknown successor unit {successor!r} in this plan", file=sys.stderr)
         return 4
     _prepare_command_paths(args, plan=plan)
@@ -3654,11 +3655,14 @@ def cmd_stop_unit(args):
         return 4
     try:
         state = SS.load_state(args.state_dir)
-        if state.get("plan_digest") not in (None, SPR.plan_digest(plan)):
+        if not state.get("plan_digest"):
+            print("error: coordinator state is missing plan_digest; ratify the intended plan first", file=sys.stderr)
+            return 4
+        if state["plan_digest"] != SPR.plan_digest(plan):
             print("error: plan differs from coordinator state; ratify the intended plan first", file=sys.stderr)
             return 4
         us = SS._unit_state(state, args.unit)
-        target = "ABANDONED" if args.cmd == "abandon" else "SUPERSEDED"
+        target = "ABANDONED" if args.command == "abandon" else "SUPERSEDED"
         request = {"state": target, "approver": args.approver,
                    "reason": args.reason, "successor": successor}
         decision = us.get("terminal_decision") or {}
@@ -4948,7 +4952,7 @@ def main():
     ap = argparse.ArgumentParser(
         prog="swarm.py", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="command", required=True)
 
     def common(p):
         p.add_argument("plan")
