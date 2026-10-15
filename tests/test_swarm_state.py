@@ -16,7 +16,7 @@ import swarm as S
 import swarm_state as SS
 
 DEFINITIONS = (
-    "acquire_lease", "_holds_the_path", "renew_lease", "release_lease",
+    "acquire_lease", "bump_lease_epoch", "_holds_the_path", "renew_lease", "release_lease",
     "_StateSnapshot", "_read_state_epoch", "load_state",
     "save_state", "_unit_state", "_set_unit_state", "_normalise_state_clock",
     "_deadline_host_evaluation", "_deadline_exceeded", "_mark_deadline_exceeded",
@@ -25,7 +25,7 @@ DEFINITIONS = (
 )
 DATA = (
     "STATE_FILE", "STATE_EPOCH_FILE", "LEASE", "LOCK",
-    "_LOCK_FDS", "_LOCK_EPOCHS", "_LOCK_OWNER_PID", "LIVE_STATES",
+    "_LOCK_FDS", "_LOCK_EPOCHS", "_LOCK_OWNER_PID", "LIVE_STATES", "OPERATOR_TERMINAL_STATES",
 )
 
 
