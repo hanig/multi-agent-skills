@@ -457,7 +457,7 @@ def cmd_ask(args):
                        args.timeout, args.label or "ask")
     save_session(args.name, session)
     ok = show_results(results)
-    return STATES["COMMITTEE_OK"] if ok == 2 else STATES["UNAVAILABLE"]
+    return STATES["COMMITTEE_OK"] if ok == len(members) else STATES["UNAVAILABLE"]
 
 
 def cmd_review(args):
@@ -502,7 +502,7 @@ def cmd_review(args):
     results = run_turn(members, session, prompt, args.timeout, "review")
     save_session(args.name, session)
     ok = show_results(results)
-    return STATES["COMMITTEE_OK"] if ok == 2 else STATES["UNAVAILABLE"]
+    return STATES["COMMITTEE_OK"] if ok == len(members) else STATES["UNAVAILABLE"]
 
 
 SYSTEM_DECISION = """You resolve a technical committee's existing positions.
@@ -576,6 +576,11 @@ def decision_reply(member, prompt, timeout, record):
     record.update(reply=text, error=error, usage=usage)
     if error:
         return None, error
+    if isinstance(text, str):
+        lines = text.splitlines(keepends=True)
+        if (len(lines) >= 3 and lines[0].rstrip("\r\n") in ("```json", "```")
+                and lines[-1].rstrip("\r\n") == "```"):
+            text = "".join(lines[1:-1])
     try:
         value = json.loads(text)
     except (ValueError, TypeError):
