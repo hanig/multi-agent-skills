@@ -24,7 +24,7 @@ RECONCILIATION_SCHEMA_VERSION = 1
 INTENT_CONNECTOR_CAPABILITY = (
     "tracker.intent.idempotent-mutation-readback.v1")
 INTENT_OPERATIONS = frozenset(
-    ("start", "close", "reopen", "note", "block", "open_pr"))
+    ("start", "close", "cancel", "reopen", "note", "block", "open_pr"))
 OPERATION_ACCEPTED = "operation_accepted"
 ASYNC_COMPLETED = "asynchronously_completed"
 CONFIRMED_BY_READBACK = "confirmed_by_readback"
@@ -306,6 +306,26 @@ def _has_bound_merge_evidence(uid, us, evidence):
             and SE._merge_shape_problem(receipt) is None)
 
 
+def superseded_evidence(us):
+    """Read the successor receipt pinned by the approver command, not an agent.
+
+    Admission checks the successor's DONE state and attempt/head binding.
+    Keeping that admitted receipt in coordinator state makes outbox repair
+    independent of later rechecks of the successor.
+    """
+    decision = us.get("terminal_decision") or {}
+    receipt = decision.get("merge_receipt")
+    successor = decision.get("successor")
+    if (us.get("state") != "SUPERSEDED" or decision.get("state") != "SUPERSEDED"
+            or not successor or not isinstance(receipt, dict)
+            or receipt.get("unit") != successor
+            or receipt.get("merged") is not True
+            or receipt.get("attested") is not True
+            or SE._merge_shape_problem(receipt) is not None):
+        return None
+    return {"successor": successor, "receipt": receipt}
+
+
 def _intent_key(project, uid, unit_state, us, verb, kind, evidence):
     key = outbox_key(project, uid, unit_state, us.get("attempt_dir"))
     if (verb == "block" and unit_state == "NEEDS_HUMAN"
@@ -355,6 +375,8 @@ RECEIPT_SCHEMA_VERSION = 2
 TRACKER_EVENTS = {
     "SUBMITTED": ("start", "work started"),
     "DONE": ("close", "the unit's predicate returned DONE"),
+    "ABANDONED": ("cancel", "stopped by an approver"),
+    "SUPERSEDED": ("close", "superseded by a merged successor"),
     "FAILED": ("reopen", "the command failed"),
     "FAILED_EVIDENCE": ("reopen", "no verdict arrived; evidence never landed"),
     "PREEMPTED": ("note", "preempted; a new attempt will be minted"),
@@ -379,12 +401,25 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     if unit_state == "NEEDS_HUMAN" and us.get("reason") == "deadline_exceeded":
         why = "deadline_exceeded"
 
+    decision = us.get("terminal_decision") or {}
+    if unit_state in ("ABANDONED", "SUPERSEDED"):
+        if (decision.get("state") != unit_state
+                or not str(decision.get("approver") or "").strip()
+                or not str(decision.get("reason") or "").strip()):
+            return None
+        why = decision["reason"]
+        if unit_state == "SUPERSEDED":
+            evidence = superseded_evidence(us)
+            if evidence is None:
+                return None
+
     # A code predicate reaches READY_FOR_PR, but an admitted merge advances it
     # to DONE. Only the exact merge receipt persisted by that admission may
     # cross this last boundary into a close intent. Keeping the fallback is
     # still belt-and-braces for malformed or legacy DONE state: it may request
     # PR work, but it cannot manufacture a close without merge evidence.
-    if (verb == "close" and closing_evidence_for(kind) == "merged_pr"
+    if (verb == "close" and unit_state != "SUPERSEDED"
+            and closing_evidence_for(kind) == "merged_pr"
             and not _has_bound_merge_evidence(uid, us, evidence)):
         verb = "open_pr"
         why = ("the agent finished and its declared outputs exist, which "
@@ -417,14 +452,16 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         "key": key, "project": project, "unit": uid, "verb": verb,
         # Named on every intent so a drainer never has to infer which kind of
         # evidence would justify acting on it.
-        "closing_evidence": closing_evidence_for(kind),
+        "closing_evidence": ("merged_pr" if unit_state == "SUPERSEDED"
+                             else closing_evidence_for(kind)),
         "kind": kind,
         "unit_state": unit_state, "why": why,
         # `applied` is deliberately NOT written any more. It was always
         # false, nothing ever set it true, and a permanently false field reads
         # as "this was not filed" when the truth is "this machine does not
         # know". Status is derived from outbox-receipts.jsonl instead.
-        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "at": (decision["at"] if unit_state in ("ABANDONED", "SUPERSEDED")
+               else time.strftime("%Y-%m-%dT%H:%M:%S%z")),
         "job_id": us.get("job_id"), "attempt_dir": us.get("attempt_dir"),
         # A close intent MUST carry the verdict that justifies it. A drain that
         # cannot see the evidence must refuse to close.
