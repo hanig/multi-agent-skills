@@ -293,21 +293,26 @@ def reconcile_observation(intent, observation):
     }
 
 
+def _has_attested_merge_receipt(uid, receipt):
+    """Shared receipt admission for supersession and its close-intent path."""
+    return (isinstance(receipt, dict)
+            and receipt.get("unit") == uid
+            and receipt.get("merged") is True
+            and receipt.get("attested") is True
+            and SE._merge_shape_problem(receipt) is None)
+
+
 def _has_bound_merge_evidence(uid, us, evidence):
     """Does *evidence* carry the merge already admitted for this attempt?"""
     receipt = evidence.get("receipt") if isinstance(evidence, dict) else None
-    if not isinstance(receipt, dict) or us.get("merge_receipt") != receipt:
+    if not _has_attested_merge_receipt(uid, receipt) or us.get("merge_receipt") != receipt:
         return False
     attempt = Path(us.get("attempt_dir") or "").name
     produced = (us.get("attempt_produced_heads") or {}).get(attempt)
     return (bool(produced)
-            and receipt.get("unit") == uid
             and receipt.get("head") == produced
             and receipt.get("merged_as") == us.get("merged_as")
-            and receipt.get("pr") == us.get("merge_pr")
-            and receipt.get("merged") is True
-            and receipt.get("attested") is True
-            and SE._merge_shape_problem(receipt) is None)
+            and receipt.get("pr") == us.get("merge_pr"))
 
 
 def superseded_evidence(us):
@@ -321,11 +326,8 @@ def superseded_evidence(us):
     receipt = decision.get("merge_receipt")
     successor = decision.get("successor")
     if (us.get("state") != "SUPERSEDED" or decision.get("state") != "SUPERSEDED"
-            or not successor or not isinstance(receipt, dict)
-            or receipt.get("unit") != successor
-            or receipt.get("merged") is not True
-            or receipt.get("attested") is not True
-            or SE._merge_shape_problem(receipt) is not None):
+            or not successor
+            or not _has_attested_merge_receipt(successor, receipt)):
         return None
     return {"successor": successor, "receipt": receipt}
 
