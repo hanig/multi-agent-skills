@@ -82,6 +82,107 @@ class TestAdjudication(unittest.TestCase):
     def records(self):
         return [json.loads(p.read_text()) for p in sorted(self.journal.glob("*/record.jsonl"))]
 
+    def seed_pass(self, head=HEAD):
+        _record, path = review.append_review_journal(
+            self.journal, "implementation", 1, ["independent"], "REVIEW_PASS",
+            [review.HONEST_RUN_CLAIM],
+            results=[{"name": "independent", "findings": []}], reviewed_head=head)
+        return path
+
+    def test_clean_head_ignores_malformed_other_head_regardless_of_recency(self):
+        for other_head in ("2" * 40, "ab" * 32):
+            for malformed_first in (False, True):
+                with self.subTest(other_head=other_head, malformed_first=malformed_first):
+                    if malformed_first:
+                        bad = self.seed(head=other_head)
+                        clean = self.seed_pass()
+                    else:
+                        clean = self.seed_pass()
+                        bad = self.seed(head=other_head)
+                    record = json.loads(bad.read_text())
+                    record.pop("verdict")
+                    bad.write_text(json.dumps(record) + "\n")
+                    before = {p: p.read_bytes() for p in (clean, bad)}
+                    query = self.query()
+                    self.assertEqual(query.returncode, 0, query.stdout + query.stderr)
+                    report = json.loads(query.stdout)
+                    self.assertEqual(report["state"], "NO_OPEN_FINDINGS")
+                    self.assertEqual(report["open_findings"], [])
+                    self.assertEqual(report["unattributable_records"], [])
+                    self.assertEqual(report["unreadable_records"], [])
+                    damaged = self.query(other_head)
+                    self.assertEqual(damaged.returncode, 1, damaged.stderr)
+                    report = json.loads(damaged.stdout)
+                    self.assertEqual(report["state"], "UNATTRIBUTABLE")
+                    self.assertEqual(report["unattributable_records"], [{
+                        "record_path": str(bad), "reviewed_head": other_head,
+                        "type": "review_round", "round": 1,
+                        "problems": ["verdict is missing or invalid"],
+                    }])
+                    self.assertEqual(before, {p: p.read_bytes() for p in before})
+                    for path in before:
+                        path.unlink()
+
+    def test_open_findings_unchanged_with_malformed_other_head_and_unreadable_head(self):
+        self.seed()
+        bad = self.seed(head="2" * 40)
+        record = json.loads(bad.read_text())
+        record.pop("verdict")
+        bad.write_text(json.dumps(record) + "\n")
+        unreadable = self.seed(head=None)
+        query = self.query()
+        self.assertEqual(query.returncode, 1, query.stderr)
+        report = json.loads(query.stdout)
+        self.assertEqual(report["state"], "OPEN_FINDINGS")
+        self.assertEqual(len(report["open_findings"]), 1)
+        self.assertEqual(report["open_findings"][0]["finding_digest"], self.digest)
+        self.assertEqual(report["open_findings"][0]["reviewed_head"], HEAD)
+        self.assertEqual(report["unattributable_records"], [])
+        self.assertEqual(report["unreadable_records"][0]["record_path"], str(unreadable))
+
+    def test_unreadable_heads_are_diagnostic_only_and_never_normalized_or_rebound(self):
+        self.seed_pass()
+        path = self.seed()
+        baseline = json.loads(path.read_text())
+        for value in (None, "", HEAD[:7], " " + HEAD, HEAD + "\n", "A" * 40,
+                      "g" * 40, True, 123, [], {}, "<redacted>"):
+            with self.subTest(value=value):
+                record = dict(baseline, reviewed_head=value)
+                path.write_text(json.dumps(record) + "\n")
+                before = path.read_bytes()
+                for queried_head in (HEAD, "2" * 40):
+                    query = self.query(queried_head)
+                    self.assertEqual(query.returncode, 0, query.stderr)
+                    report = json.loads(query.stdout)
+                    self.assertEqual(report["state"], "NO_OPEN_FINDINGS")
+                    self.assertEqual(report["open_findings"], [])
+                    self.assertEqual(report["unattributable_records"], [])
+                    self.assertEqual(report["unreadable_records"], [{
+                        "record_path": str(path), "reviewed_head": value,
+                        "type": "review_round", "round": 1,
+                        "problems": ["reviewed_head is missing or invalid"],
+                    }])
+                self.assertEqual(self.adjudicate().returncode, 4)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_unreadable_record_schema_survives_secret_collisions(self):
+        path = self.seed(head=None, round_no=1234)
+        for secret in ("unreadable_records", "record_path", "problems", "reviewed_head",
+                       "type", "round", "1234"):
+            with self.subTest(secret=secret), patch.dict(os.environ, {"OPENAI_API_KEY": secret}):
+                query = self.query()
+                self.assertEqual(query.returncode, 0, query.stderr)
+                report = json.loads(query.stdout)
+                self.assertEqual(report["state"], "NO_OPEN_FINDINGS")
+                self.assertEqual(report["unattributable_records"], [])
+                damaged = report["unreadable_records"][0]
+                self.assertEqual(set(damaged), {"record_path", "problems", "reviewed_head",
+                                                "type", "round"})
+                self.assertEqual(damaged["round"], 1234)
+                self.assertEqual(damaged["record_path"], review.redact(str(path)))
+                self.assertEqual(damaged["problems"],
+                                 [review.redact("reviewed_head is missing or invalid")])
+
     def test_record_query_round_trip_preserves_failed_review_bytes(self):
         original = self.seed()
         before = original.read_bytes()
@@ -237,7 +338,7 @@ class TestAdjudication(unittest.TestCase):
                     record = dict(original, verdict=verdict, reviewed_head=head)
                     path.write_text(json.dumps(record) + "\n")
                     before = path.read_bytes()
-                    query = self.query()
+                    query = self.query(head)
                     self.assertEqual(query.returncode, 1, query.stderr)
                     output = json.loads(query.stdout)
                     self.assertEqual(output["state"], "UNATTRIBUTABLE")
@@ -289,7 +390,7 @@ class TestAdjudication(unittest.TestCase):
                 review.record_adjudication(args, 1)
         self.assertEqual(self.records(), [])
 
-    def test_damaged_decision_fields_cannot_hide_on_another_head(self):
+    def test_damaged_decision_fields_are_reported_for_their_recorded_head(self):
         original = self.seed()
         self.assertEqual(self.adjudicate().returncode, 0)
         adjudication = sorted(self.journal.glob("*/record.jsonl"))[-1]
@@ -307,7 +408,7 @@ class TestAdjudication(unittest.TestCase):
                     record.update({field: value, "reviewed_head": head})
                     adjudication.write_text(json.dumps(record) + "\n")
                     before = adjudication.read_bytes()
-                    result = self.query()
+                    result = self.query(head)
                     self.assertEqual(result.returncode, 1, result.stderr)
                     output = json.loads(result.stdout)
                     self.assertEqual(output["state"], "UNATTRIBUTABLE")
@@ -316,10 +417,11 @@ class TestAdjudication(unittest.TestCase):
         adjudication.write_bytes(baseline[adjudication])
         for field, value in (("confirmed", "true"), ("confirmed", 1)):
             record = json.loads(baseline[original])
-            record["reviewed_head"] = "2" * 40
+            head = "2" * 40
+            record["reviewed_head"] = head
             record["results"][0]["findings"][0][field] = value
             original.write_text(json.dumps(record) + "\n")
-            result = self.query()
+            result = self.query(head)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(json.loads(result.stdout)["state"], "UNATTRIBUTABLE")
 
@@ -410,10 +512,12 @@ class TestAdjudication(unittest.TestCase):
         original.write_text(json.dumps(record) + "\n")
         before = original.read_bytes()
         queried = self.query()
-        self.assertEqual(queried.returncode, 1)
+        self.assertEqual(queried.returncode, 0)
         report = json.loads(queried.stdout)
-        self.assertEqual(report["state"], "UNATTRIBUTABLE")
-        self.assertEqual(report["unattributable_records"][0]["record_path"], str(original))
+        self.assertEqual(report["state"], "NO_OPEN_FINDINGS")
+        self.assertEqual(report["open_findings"], [])
+        self.assertEqual(report["unattributable_records"], [])
+        self.assertEqual(report["unreadable_records"][0]["record_path"], str(original))
         self.assertEqual(self.adjudicate().returncode, 4)
         self.assertEqual(original.read_bytes(), before)
 
@@ -466,10 +570,12 @@ class TestAdjudication(unittest.TestCase):
         path.write_text(json.dumps(record) + "\n")
         before = path.read_bytes()
         queried = self.query()
-        self.assertEqual(queried.returncode, 1, queried.stderr)
+        self.assertEqual(queried.returncode, 0, queried.stderr)
         report = json.loads(queried.stdout)
-        self.assertEqual(report["state"], "UNATTRIBUTABLE")
-        damaged = report["unattributable_records"]
+        self.assertEqual(report["state"], "NO_OPEN_FINDINGS")
+        self.assertEqual(report["open_findings"], [])
+        self.assertEqual(report["unattributable_records"], [])
+        damaged = report["unreadable_records"]
         self.assertEqual(len(damaged), 1)
         self.assertEqual(damaged[0]["record_path"], str(path))
         self.assertEqual(damaged[0]["reviewed_head"], record["reviewed_head"])
@@ -506,7 +612,7 @@ class TestAdjudication(unittest.TestCase):
                 self.assertEqual(self.query(head).returncode, 0)
                 self.assertEqual(path.read_bytes(), before)
 
-    def test_bad_digests_cannot_hide_behind_another_head_or_a_disposition(self):
+    def test_bad_digests_are_reported_for_their_head_despite_a_disposition(self):
         original = self.seed()
         self.assertEqual(self.adjudicate().returncode, 0)
         original_review = original.read_bytes()
@@ -529,7 +635,7 @@ class TestAdjudication(unittest.TestCase):
                         record["finding_digest"] = bad_digest
                     path.write_text(json.dumps(record) + "\n")
                     before = path.read_bytes()
-                    queried = self.query()
+                    queried = self.query(head)
                     self.assertEqual(queried.returncode, 1, queried.stderr)
                     report = json.loads(queried.stdout)
                     self.assertEqual(report["state"], "UNATTRIBUTABLE")
