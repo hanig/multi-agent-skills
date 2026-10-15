@@ -9,6 +9,11 @@ import tempfile
 import unittest
 
 from tests.test_linear_drain import DrainCase
+from tests.scheduler_fixture import isolated_module_path, cleanup_module_path as tearDownModule
+
+
+def setUpModule():
+    isolated_module_path()
 
 ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / 'skills/hanig-swarm/scripts'
@@ -138,6 +143,17 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
         self.assertFalse((self.state / SO.OUTBOX).exists())
         self.assertFalse((self.state / SS.STATE_EPOCH_FILE).exists())
 
+    def test_refuses_a_plan_that_is_not_the_coordinators_recorded_plan(self):
+        state = self.load()
+        state['plan_digest'] = S.SPR.plan_digest(json.loads(self.plan.read_text()))
+        self.save(state)
+        plan = json.loads(self.plan.read_text())
+        plan['units'][0]['command'] = 'different-command'
+        self.plan.write_text(json.dumps(plan))
+        for command in ('abandon', 'supersede'):
+            self.assert_refused(self.stop(command), 'plan differs')
+            self.assertEqual(self.load(), state)
+
     def test_supersede_requires_successor_done_and_bound_merge_receipt(self):
         original = self.load()
         variants = [({'state': 'READY_FOR_PR'}, 'not DONE'),
@@ -220,6 +236,26 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                 self.assert_ok(self.swarm('advance', '--root', str(self.runs)))
                 repaired = next(i for i in self.intents() if i['unit'] == 'old')
                 self.assertEqual(repaired, intent)
+
+    def test_code_unit_supersession_uses_successor_not_its_own_produced_head(self):
+        plan = json.loads(self.plan.read_text())
+        plan['units'][0].update(kind='code', repo=str(self.root / 'repo'), task='fix it')
+        self.plan.write_text(json.dumps(plan))
+        state = self.load()
+        state['units']['old']['attempt_produced_heads'] = {'attempt1': 'c' * 40}
+        self.save(state)
+        self.assert_ok(self.stop('supersede'))
+        intent = self.intents()[0]
+        self.assertEqual(intent['verb'], 'close')
+        self.assertEqual(intent['evidence']['receipt']['head'], 'a' * 40)
+        self.assertEqual(intent['evidence']['successor'], 'successor')
+
+    def test_new_decision_fences_a_previously_loaded_snapshot(self):
+        before = SS.load_state(self.state)
+        self.assert_ok(self.stop())
+        with self.assertRaisesRegex(SystemExit, 'another coordinator'):
+            SS.save_state(self.state, before)
+        self.assertEqual(self.load()['units']['old']['state'], 'ABANDONED')
 
     def test_live_stop_preserves_claim_occupancy_and_deadline_cannot_rewrite_it(self):
         plan = json.loads(self.plan.read_text())

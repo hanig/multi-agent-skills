@@ -1045,6 +1045,8 @@ def section(args):
     try:
         state = json.loads((Path(args.state_dir) / 'swarm-state.json').read_text())
         units = state['units']
+        if not any(us.get('state') in ('ABANDONED', 'SUPERSEDED') for us in units.values()):
+            return summary
         groups = {name: [] for name in ('ABANDONED', 'SUPERSEDED', 'RUNNING')}
         for uid, us in sorted(units.items()):
             name = us.get('state')
@@ -1063,7 +1065,7 @@ def section(args):
             '%s: %s' % (name, '; '.join(values) or 'none')
             for name, values in groups.items())
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return summary + '\nCurrent coordinator units: UNKNOWN (state unreadable)'
+        return summary
 
 
 def parse_args(argv=None):

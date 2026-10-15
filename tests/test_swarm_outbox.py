@@ -24,7 +24,7 @@ DEFINITIONS = (
     "_intent_attempt_identity", "_intent_envelope", "normalize_intent",
     "_nonblank_text", "_schema_is", "validate_intent", "validate_observation",
     "require_valid_intent", "_receipt_admissible", "reconcile_observation",
-    "_has_bound_merge_evidence", "_intent_key",
+    "_has_bound_merge_evidence", "superseded_evidence", "_intent_key",
 )
 CONSTANTS = (
     "OUTBOX", "RECEIPT_SCHEMA_VERSION", "TRACKER_EVENTS", "RECEIPTS",

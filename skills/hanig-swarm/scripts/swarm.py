@@ -217,6 +217,7 @@ from swarm_outbox import (
     _receipt_admissible,
     reconcile_observation,
     _has_bound_merge_evidence,
+    superseded_evidence,
     _intent_key,
     _with_intent_envelope,
     INTENT_SCHEMA_VERSION,
@@ -298,7 +299,7 @@ def __getattr__(name):
     # Read state helpers through their owner so patches reach every consumer;
     # the lock owner PID is rebound there after acquisition and fork detection.
     if name in {
-        "acquire_lease", "renew_lease", "release_lease", "load_state",
+        "acquire_lease", "bump_lease_epoch", "renew_lease", "release_lease", "load_state",
         "_LOCK_OWNER_PID",
         "save_state",
         "_unit_state",
@@ -312,7 +313,7 @@ def __getattr__(name):
         "_occupies_live_resources",
         "trusted_launch_facts",
         "trusted_launch_host_anchor",
-        "LIVE_STATES",
+        "LIVE_STATES", "OPERATOR_TERMINAL_STATES",
     }:
         return getattr(SS, name)
     # Routing resolution rebinds defaults. Read through to their owner so
@@ -3077,8 +3078,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"{uid}: DRY RUN -- would re-emit tracker {verb} "
                         f"intent from durable state {now}")
             continue
-        SO.emit_intent(state_dir, project, uid, now, us, evidence, kind=kind,
-                    tracker=units[uid].get("tracker"))
+        _emit_current_intent(state_dir, project, uid, us, units[uid], evidence)
     return report, dispatched, halted or dispatch_refusal
 
 
@@ -3585,6 +3585,12 @@ def cmd_advance(args):
     return cmd_run(args)
 
 
+def _emit_current_intent(state_dir, project, uid, us, unit, evidence=None):
+    """Both advancement and operator commands emit from their durable result."""
+    return SO.emit_intent(state_dir, project, uid, us.get("state"), us, evidence,
+                          kind=unit.get("kind"), tracker=unit.get("tracker"))
+
+
 def cmd_stop_unit(args):
     """Record an approver's terminal disposition; preserve every attempt."""
     if not args.approver or not args.approver.strip():
@@ -3593,8 +3599,19 @@ def cmd_stop_unit(args):
     if not args.reason or not args.reason.strip():
         print("error: a non-blank reason is required", file=sys.stderr)
         return 4
-    plan = _load_plan(args.plan)
-    units = {u["id"]: u for u in SPR._units_with_canary(plan)}
+    # This command never dispatches. A stopped code plan remains operable on
+    # a host without Paseo, its runtime, or its old working repository.
+    plan, error = U.read_json(args.plan)
+    if error or not isinstance(plan, dict) or not isinstance(plan.get("units"), list):
+        print(f"error: no plan with a units list at {args.plan}: {error or 'invalid shape'}", file=sys.stderr)
+        return 4
+    units = {}
+    for unit in plan["units"]:
+        uid = unit.get("id") if isinstance(unit, dict) else None
+        if not isinstance(uid, str) or not uid.strip() or uid in units:
+            print("error: plan units require unique non-blank ids", file=sys.stderr)
+            return 4
+        units[uid] = unit
     if args.unit not in units:
         print(f"error: unknown unit {args.unit!r}", file=sys.stderr)
         return 4
@@ -3609,6 +3626,9 @@ def cmd_stop_unit(args):
         return 4
     try:
         state = SS.load_state(args.state_dir)
+        if state.get("plan_digest") not in (None, SPR.plan_digest(plan)):
+            print("error: plan differs from coordinator state; ratify the intended plan first", file=sys.stderr)
+            return 4
         us = SS._unit_state(state, args.unit)
         target = "ABANDONED" if args.cmd == "abandon" else "SUPERSEDED"
         request = {"state": target, "approver": args.approver,
@@ -3643,13 +3663,15 @@ def cmd_stop_unit(args):
             SS.bump_lease_epoch(args.state_dir)
             state = SS.load_state(args.state_dir)
             us = SS._unit_state(state, args.unit)
-            SS._set_unit_state(us, target)
+            if target == "ABANDONED":
+                SS._set_unit_state(us, "ABANDONED")
+            else:
+                SS._set_unit_state(us, "SUPERSEDED")
             us["reason"] = args.reason
             us["terminal_decision"] = decision
             SS.save_state(args.state_dir, state)
-        SO.emit_intent(args.state_dir, plan.get("name") or "swarm",
-                       args.unit, target, us, kind=units[args.unit].get("kind"),
-                       tracker=units[args.unit].get("tracker"))
+        _emit_current_intent(args.state_dir, plan.get("name") or "swarm",
+                             args.unit, us, units[args.unit])
         print(f"{args.unit}: {target} -- {args.reason}" +
               (f" (successor: {successor})" if successor else ""))
         return EXIT_OK
@@ -5078,11 +5100,11 @@ def main():
 __all__ = [name for name in globals() if not name.startswith("_")] + [
     "AGENTS_FILE", "DEFAULT_AGENT_PROVIDER", "DEFAULT_AGENT_THINKING",
     "THINKING_BY_MODEL", "PINNED_AGENT_PROVIDER", "PINNED_THINKING_BY_MODEL",
-    "acquire_lease", "renew_lease", "release_lease", "load_state",
+    "acquire_lease", "bump_lease_epoch", "renew_lease", "release_lease", "load_state",
     "save_state",
     "trusted_launch_facts",
     "trusted_launch_host_anchor",
-    "LIVE_STATES",
+    "LIVE_STATES", "OPERATOR_TERMINAL_STATES",
 ]
 
 
