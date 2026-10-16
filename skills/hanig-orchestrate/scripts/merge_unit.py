@@ -63,6 +63,14 @@ def read_object(path):
     return value
 
 
+def verification_state_digests(state_dir, unit):
+    """Capture the complete unit record and global state under the plan lease."""
+    state = read_object(Path(state_dir) / S.STATE_FILE)
+    return tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"))
+                                .encode("utf-8")).hexdigest() for value in (
+        state["units"].get(unit), {key: value for key, value in state.items() if key != "units"}))
+
+
 def durable_write(path, value):
     """Atomically publish a journal record and fsync it and its directory."""
     fd, temporary = tempfile.mkstemp(prefix=".merge-unit-", dir=str(path.parent))
@@ -569,12 +577,15 @@ def reconcile(args, plan):
         S.load_verifications(state_dir)
         target = observed_target(cmd["target"], binding["target"])
         execution_policy, execution_digest = declared_execution(state_dir, repo)
+        unit_digest, coordinator_digest = verification_state_digests(state_dir, args.unit)
         # Return only coordinator/forge inputs captured under the lease. The
         # caller releases it before running the disposable candidate verifier.
         return repo, {"binding": binding, "scope_binding": scope_binding,
                       "state_dir": state_dir, "root": root,
                       "operation_id": operation_id, "target": target,
                       "plan_digest": S.plan_digest(plan),
+                      "unit_record_digest": unit_digest,
+                      "coordinator_digest": coordinator_digest,
                       "execution_policy": execution_policy,
                       "execution_policy_digest": execution_digest}
     observation = {"approver": args.approver, "already_merged": pr["state"] == "MERGED",
@@ -733,18 +744,22 @@ def verify_integration(args, repo, snapshot):
             _, execution_digest = RV.read_policy(args.state_dir)
             if execution_digest != snapshot["execution_policy_digest"]:
                 raise Refusal("execution policy changed during verification")
+            unit_digest, coordinator_digest = verification_state_digests(args.state_dir, args.unit)
+            if unit_digest != snapshot["unit_record_digest"]:
+                raise Refusal("verified unit record changed during verification: " + args.unit)
+            if coordinator_digest != snapshot["coordinator_digest"]:
+                raise Refusal("top-level coordinator state changed during verification")
             current = authority(args, plan)
             state_dir, root, fresh, host, repo_path, scope_binding, fresh_repo = current
             for key, value in binding.items():
                 if fresh.get(key) != value:
                     raise Refusal("coordinator binding changed during verification: " + key)
-            # acquire_lease increments the epoch once for our own new lease.
-            # Any other increment (even a no-op coordinator pass) invalidates
-            # the observation; never refresh the saved epoch to accept it.
-            expected_scope = dict(snapshot["scope_binding"])
-            expected_scope["state_epoch"] += 1
-            for key, value in expected_scope.items():
-                if scope_binding.get(key) != value:
+            # The epoch still fences state writes. Verification instead binds
+            # the complete unit record and top-level state above: another unit
+            # or a no-op acquisition may advance the epoch without voiding it.
+            # Every other scope-binding key must still match exactly.
+            for key, value in snapshot["scope_binding"].items():
+                if key != "state_epoch" and scope_binding.get(key) != value:
                     raise Refusal("coordinator binding changed during verification: " + key)
             if (state_dir != snapshot["state_dir"] or root != snapshot["root"]
                     or fresh_repo != repo):

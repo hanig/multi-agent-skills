@@ -1350,5 +1350,92 @@ class TestMergeUnit(unittest.TestCase):
         self.assertNotIn("merge_unit", imports)
 
 
+class TestUnitVerificationFence(unittest.TestCase):
+    def setUp(self):
+        # Reuse the real candidate-verifier barrier and process-group cleanup.
+        from tests import test_arc1049_verify_lock as lock_fixture
+        self.lock = lock_fixture.TestVerificationLock()
+        self.lock.setUp()
+        self.addCleanup(self.lock.doCleanups)
+        self.f = self.lock.f
+
+    def concurrent_advance(self, stop_other=False):
+        from tests import test_advance_idempotent_record as measured
+        f = self.f
+        other = measured.prepare_advance(f)
+        before = measured.read_state(f)
+        self.lock.start()
+        before_epoch, error = S._read_state_epoch(f.state_dir)
+        self.assertIsNone(error)
+        if stop_other:
+            (other / S.U.ENGINE_RC).write_text("1\n")
+        after = measured.advance(f)
+        self.assertEqual(S._read_state_epoch(f.state_dir), (before_epoch + 1, None))
+        self.assertEqual(measured.canonical(before["units"]["u"]),
+                         measured.canonical(after["units"]["u"]))
+        self.assertEqual({k: v for k, v in before.items() if k != "units"},
+                         {k: v for k, v in after.items() if k != "units"})
+        self.assertEqual(after["units"]["other"]["state"],
+                         "FAILED" if stop_other else "RUNNING")
+        result = self.lock.complete()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(S._read_state_epoch(f.state_dir), (before_epoch + 2, None))
+        receipts = S.load_verifications(f.state_dir)[0]
+        self.assertEqual(len(receipts), 2)
+        self.assertEqual(receipts[-1]["result"], "pass")
+        self.assertEqual(receipts[-1]["subject_head"], f.head)
+        self.assertEqual(receipts[-1]["target_commit"], self.lock.target)
+
+    def test_noop_advance_during_verification_is_admitted(self):
+        self.concurrent_advance()
+
+    def test_other_unit_advance_during_verification_is_admitted(self):
+        self.concurrent_advance(stop_other=True)
+
+    def change_unit(self, action):
+        self.lock.start()
+        self.lock.locked_change(
+            "path = state / 'swarm-state.json'\n"
+            "record = json.loads(path.read_text())\n"
+            "unit = record['units']['u']\n" + action + "\n"
+            "path.write_text(json.dumps(record))\n")
+        self.lock.assert_stale("verified unit record changed during verification: u")
+
+    def test_verified_unit_state_change_refuses(self):
+        self.change_unit("unit['state'] = 'DONE'")
+
+    def test_verified_unit_removal_refuses(self):
+        self.change_unit("del record['units']['u']")
+
+    def test_verified_unit_attempt_directory_change_refuses(self):
+        # Same attempt basename: the old attempt/head binding alone misses it.
+        self.change_unit("unit['attempt_dir'] = str(pathlib.Path(unit['attempt_dir']).parent / 'moved' / 'a1')")
+
+    def test_verified_unit_produced_head_change_refuses(self):
+        self.change_unit("unit['attempt_produced_heads']['a1'] = 'f' * 40")
+
+    def test_verified_unit_watch_change_refuses(self):
+        self.f.us['code_terminal_watches'] = {'a1': {
+            'agent_id': self.f.us['job_id'], 'status': 'checked', 'checked_at': 'earlier'}}
+        self.f.save()
+        self.change_unit("unit['code_terminal_watches']['a1']['checked_at'] = 'later'")
+
+    def test_top_level_halted_change_refuses(self):
+        self.lock.start()
+        self.lock.locked_change(
+            "path = state / 'swarm-state.json'\n"
+            "record = json.loads(path.read_text())\n"
+            "record['halted'] = 'operator hold'\n"
+            "path.write_text(json.dumps(record))\n")
+        self.lock.assert_stale("top-level coordinator state changed during verification")
+
+    def test_execution_policy_change_still_refuses(self):
+        self.lock.start()
+        self.lock.locked_change(
+            "(state / 'verification-execution.json').write_text("
+            "json.dumps({'schema_version': 1, 'local': {}}))")
+        self.lock.assert_stale("execution policy changed during verification")
+
+
 if __name__ == "__main__":
     unittest.main()
