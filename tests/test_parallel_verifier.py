@@ -206,16 +206,17 @@ v.run_modules = omit
     def test_existing_startup_and_environment_preserved(self):
         startup = self.root / 'startup'
         startup.mkdir()
-        (startup / 'sitecustomize.py').write_text("import os\nos.environ['E1_STARTUP'] = 'ran'\n")
+        (startup / 'sitecustomize.py').write_text(
+            "import os\nos.environ['E1_STARTUP'] = os.environ.get('E1_STARTUP', '') + 'ran'\n")
         self.module('test_startup.py', PASS + """\
 import os, sys
-assert os.environ['E1_STARTUP'] == 'ran'
+assert os.environ['E1_STARTUP'] == 'ranran'
 assert sys.path[0] == os.path.abspath('tests'), sys.path
 assert sys.path[1] == os.getcwd(), sys.path
 assert sys.path[2] == __EXPECTED_STARTUP__, sys.path
 assert os.environ['PYTHONPATH'] == __EXPECTED_STARTUP__
 """.replace('__EXPECTED_STARTUP__', repr(str(startup))))
-        with mock.patch.dict(os.environ, {'PYTHONPATH': str(startup)}):
+        with mock.patch.dict(os.environ, {'PYTHONPATH': str(startup), 'E1_STARTUP': ''}):
             result = self.run_verifier()
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(self.summary(result)['tests'], 1)
