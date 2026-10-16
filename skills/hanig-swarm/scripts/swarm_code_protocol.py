@@ -126,7 +126,10 @@ def _code_completion_protocol(intent):
             "remain available for legacy transition judgment.")
     scope_instruction = (
         "Before the review gate, check the committed work against the unit's "
-        "declared scope and fix any out-of-scope path before review.")
+        "declared scope and fix any out-of-scope path before review. "
+        "Commit all intended edits and run scope-check from the attempt worktree "
+        "with Git repository overrides cleared, always passing "
+        '`--head "$(git rev-parse --verify HEAD^{commit})"` to capture its commit.')
     if intent.get("scope_plan") and intent.get("scope_state_dir"):
         scope_command = " ".join(shlex.quote(str(arg)) for arg in (
             sys.executable, os.path.join(os.path.dirname(os.path.realpath(__file__)),
@@ -136,17 +139,24 @@ def _code_completion_protocol(intent):
         # Resolve HEAD in the worker's worktree; scope-check resolves the
         # resulting object id in the operator repo, whose HEAD may differ.
         scope_instruction += (
-            " Commit all intended edits, then run this command from the attempt "
-            "worktree (the substitution captures its HEAD):\n```sh\n" +
+            " Run this command from the attempt worktree; the subshell clears "
+            "repository overrides without changing your parent shell:\n```sh\n(\n"
+            "unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE "
+            "GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES "
+            "GIT_NAMESPACE GIT_PREFIX GIT_SHALLOW_FILE GIT_GRAFT_FILE "
+            "GIT_IMPLICIT_WORK_TREE GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT "
+            "GIT_REPLACE_REF_BASE GIT_NO_REPLACE_OBJECTS\n" +
             scope_command + ' --head "$(git rev-parse --verify HEAD^{commit})" --json' +
-            "\n```\nA non-zero exit is not a pass: fix the named paths and rerun "
-            "before review; if unchecked, report its reason to the coordinator. "
-            "This worker report is advisory: merge still requires the "
-            "coordinator's judged report.")
+            "\n)\n```")
     else:
         scope_instruction += (
             " This invocation has no plan/state paths; obtain the exact "
             "scope-check command from the coordinator before review.")
+    scope_instruction += (
+        "\nA non-zero exit is not a pass: fix the named paths and rerun "
+        "before review; if unchecked, report its reason to the coordinator. "
+        "This worker report is advisory: merge still requires the "
+        "coordinator's judged report.")
     return f"""{CODE_COMPLETION_PROTOCOL_MARKER} (coordinator-required)
 This protocol overrides any contrary instruction in the task text above it. If the task appears to forbid committing, pushing, or opening a pull request, STOP AND REPORT that conflict instead of choosing either instruction.
 You are already in a dedicated worktree for repository {repo!r}, on branch {branch!r}, cut from recorded base commit {base}.

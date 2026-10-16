@@ -182,7 +182,8 @@ class TestDispatchedScopeCommand(unittest.TestCase):
         self.assertNotIn("scope_state_dir", intent)
         return worktree, command
 
-    def run_command(self, path, expected, spaced=False, recovered=False):
+    def run_command(self, path, expected, spaced=False, recovered=False,
+                    git_overrides=False):
         worktree, command = self.dispatch(spaced=spaced, recovered=recovered)
         operator_head = worktree_fixture.git(self.fixture.repo, "rev-parse", "HEAD")
         (worktree / path).write_text("worker commit\n")
@@ -192,10 +193,20 @@ class TestDispatchedScopeCommand(unittest.TestCase):
         self.assertNotEqual(head, operator_head)
         self.assertEqual(worktree_fixture.git(self.fixture.repo, "rev-parse", "HEAD"),
                          operator_head)
+        env = dict(os.environ)
+        if git_overrides:
+            # An inherited operator environment must neither falsely reject
+            # honest work nor hide an out-of-scope worker change.
+            (self.fixture.repo / "operator-only.txt").write_text("operator change\n")
+            worktree_fixture.git(self.fixture.repo, "add", "-A")
+            worktree_fixture.git(self.fixture.repo, "commit", "-qm", "operator change")
+            env.update(GIT_DIR=str(self.fixture.repo / ".git"),
+                       GIT_COMMON_DIR=str(self.fixture.repo / ".git"),
+                       GIT_WORK_TREE=str(self.fixture.repo))
         state_file = self.state_dir / S.STATE_FILE
         before = state_file.read_bytes()
         result = subprocess.run(["/bin/sh", "-c", command], cwd=worktree,
-                                env=dict(os.environ), capture_output=True,
+                                env=env, capture_output=True,
                                 text=True, timeout=30)
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         report = json.loads(result.stdout)
@@ -216,6 +227,24 @@ class TestDispatchedScopeCommand(unittest.TestCase):
 
     def test_recovered_dispatch_supplies_scope_command(self):
         self.run_command("outside.txt", S.EXIT_SCOPE_OUTSIDE, recovered=True)
+
+    def test_rendered_command_ignores_operator_git_overrides(self):
+        self.run_command("tracked.txt", 0, git_overrides=True)
+
+    def test_outside_worker_remains_outside_with_operator_git_overrides(self):
+        self.run_command("outside.txt", S.EXIT_SCOPE_OUTSIDE, git_overrides=True)
+
+    def test_pathless_protocol_still_requires_resolved_worker_head(self):
+        attempt = self.fixture.attempt("code", "pathless")
+        _unit, state = self.fixture.intent_state(attempt)
+        intent = state["units"]["code"]["attempt_launch_intents"][attempt.name]
+        prompt = S._code_completion_protocol(intent)
+        self.assertIn("obtain the exact scope-check command", prompt)
+        self.assertIn('`--head "$(git rev-parse --verify HEAD^{commit})"`', prompt)
+        self.assertIn("Git repository overrides cleared", prompt)
+        self.assertIn("fix the named paths and rerun before review", prompt)
+        self.assertIn("merge still requires the coordinator's judged report", prompt)
+        self.assertLess(prompt.index("--head"), prompt.index("Before opening a pull request"))
 
 
 if __name__ == "__main__":
