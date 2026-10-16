@@ -623,7 +623,7 @@ for replay rules and the same-host locking boundary.
 The coordinator. Roughly 2,200 lines in `swarm.py`, 1,300 in `unit.py`.
 
 ```sh
-python3 scripts/swarm.py validate plan.json
+python3 scripts/swarm.py validate plan.json [--check-seeds]
 python3 scripts/swarm.py run      plan.json [--dry-run]
 python3 scripts/swarm.py status   plan.json [--json]
 python3 scripts/swarm.py advance  plan.json
@@ -641,6 +641,15 @@ python3 scripts/unit.py allocate --root /external/swarm-runs --task ID --kind sl
 python3 scripts/unit.py bind  <unit_dir> --job-id 12345
 python3 scripts/unit.py check <unit_dir> [--json]
 ```
+
+`validate` stays offline by default and runs no Git. Add `--check-seeds` to
+check every declared seed before dispatch, using the same dispatch source
+resolution and seed reachability check as dispatch. It reports each failing
+unit and exits 1 if any fail. This opt-in check may contact the origin push
+destination and fetch Git metadata through a temporary ref; it does not allocate
+attempts, write coordinator state, or touch attempt worktrees. With no seeded
+units it runs no Git. A pass is a point-in-time observation, not a reservation
+or a guarantee that replay will be conflict-free.
 
 `run` and `advance` take `--max-new-dispatches` to throttle a fan-out, and
 `--accept-plan-change` to proceed when the plan digest no longer matches the

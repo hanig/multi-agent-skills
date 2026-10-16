@@ -3473,6 +3473,24 @@ def cmd_validate(args):
         summary = validate_plan(plan, survey)
     except PlanError as e:
         sys.exit(f"error: invalid plan: {e}")
+    if getattr(args, "check_seeds", False):
+        problems = []
+        for u in plan["units"]:
+            if "seed" not in u:
+                continue
+            target, problem = SP._resolve_dispatch_target(u)
+            if not problem:
+                source, problem = SP._dispatch_source_identity(u, target)
+            if not problem:
+                problem = SP._seed_reachability_problem(
+                    u["seed"], source["repo"], source["repository_remote_raw"],
+                    source["repository_remote"])
+            if problem:
+                # Render one diagnostic line per unit, after the decision.
+                detail = " ".join(problem.splitlines())
+                problems.append(f"unit {u['id']!r}: {detail}")
+        if problems:
+            sys.exit("error: invalid plan:\n" + "\n".join(problems))
     print(f"plan is valid: {summary['units']} unit(s), "
           f"{summary['with_deps']} with dependencies")
     # WHICH CLUSTER FACTS WERE CONSULTED, in both directions. A pass here
@@ -4820,6 +4838,10 @@ def main():
 
     v = sub.add_parser("validate", help="acyclic deps, disjoint write scopes")
     v.add_argument("plan")
+    v.add_argument("--check-seeds", action="store_true",
+                   help="check every declared seed against its dispatch "
+                        "source and origin push destination using Git; "
+                        "does not allocate attempts or write state")
     v.add_argument("--survey", default=None,
                    help="the survey.py JSON to check this plan's memory "
                         "requests and account/partition pairs against. "
