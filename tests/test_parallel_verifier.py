@@ -128,6 +128,20 @@ atexit.register(lambda: os.kill(os.getpid(), signal.SIGKILL))
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn('test_exit.py: FAIL:', result.stdout)
 
+    def test_nested_success_report_cannot_hide_early_exit(self):
+        self.module('test_exit.py', """\
+            import os, unittest
+            class TestExit(unittest.TestCase):
+                def test_exit(self):
+                    unittest.TextTestRunner().run(unittest.TestSuite([
+                        unittest.FunctionTestCase(lambda: None)]))
+                    os._exit(0)
+        """)
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('Ran 1 test', result.stdout)
+        self.assertIn('missing or invalid unittest completion record', result.stdout)
+
     def test_module_set_comparison(self):
         self.module('test_a.py')
         self.module('test_b.py')
@@ -171,6 +185,40 @@ v.run_modules = omit
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertIn('tests/fixtures/nested', result.stdout)
         self.assertNotIn('must not import', result.stdout)
+
+    def test_symlinked_package_refused(self):
+        package = self.root / 'external_package'
+        package.mkdir()
+        (package / '__init__.py').write_text('')
+        (self.root / 'tests' / 'linked').symlink_to(package, target_is_directory=True)
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn('tests/linked', result.stdout)
+
+    def test_non_module_filename_does_not_expand_pattern(self):
+        self.module('test_a.py')
+        self.module('test_[ab].py', "raise AssertionError('not an importable module')\n")
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.summary(result)['tests'], 1)
+        self.assertEqual(self.summary(result)['modules'], 1)
+
+    def test_existing_startup_and_environment_preserved(self):
+        startup = self.root / 'startup'
+        startup.mkdir()
+        (startup / 'sitecustomize.py').write_text("import os\nos.environ['E1_STARTUP'] = 'ran'\n")
+        self.module('test_startup.py', PASS + """\
+import os, sys
+assert os.environ['E1_STARTUP'] == 'ran'
+assert sys.path[0] == os.path.abspath('tests'), sys.path
+assert sys.path[1] == os.getcwd(), sys.path
+assert sys.path[2] == os.path.abspath('startup'), sys.path
+assert os.environ['PYTHONPATH'] == os.path.abspath('startup')
+""")
+        with mock.patch.dict(os.environ, {'PYTHONPATH': str(startup)}):
+            result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.summary(result)['tests'], 1)
 
     def test_sorted_complete_output_under_four_workers(self):
         for index, name in enumerate(('test_d.py', 'test_c.py', 'test_b.py', 'test_a.py')):

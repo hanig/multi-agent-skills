@@ -20,19 +20,49 @@ import time
 
 
 MODULE_TIMEOUT = 7200
-# Match the runner's final report, not nested unittest output from test bodies
-# (including test_review's supervised worker). stdout and stderr share a file.
-REPORT = re.compile(
-    r"^Ran (\d+) tests? in [^\r\n]+\r?\n\r?\n"
-    r"(OK|FAILED|NO TESTS RAN)(?: \(([^\r\n]*)\))?\r?$", re.MULTILINE)
-# Only zero-result modules need a second discovery. The probe imports candidate
-# code in a CHILD with the same discovery start/top-level directory. It runs no
-# tests. A separate descriptor keeps incidental import output out of the count.
-COUNT_DISCOVERY = """import json, os, sys, unittest
-fd = int(sys.argv[2])
+# Startup instrumentation preserves the exact `-m unittest discover` command.
+# Restore both sys.path and PYTHONPATH before candidate imports, and chain any
+# existing sitecustomize. Only the outer TestProgram can record completion;
+# nested runners and early process exits cannot supply its result by printing.
+BOOTSTRAP = """import importlib, json, os, sys
+fd = __CHANNEL_FD__
 os.set_inheritable(fd, False)
-suite = unittest.defaultTestLoader.discover('tests', pattern=sys.argv[1])
-os.write(fd, json.dumps(suite.countTestCases()).encode('ascii'))
+sys.path.remove(__BOOTSTRAP_DIR__)
+previous_path = __ORIGINAL_PYTHONPATH__
+if previous_path is None:
+    os.environ.pop('PYTHONPATH', None)
+else:
+    os.environ['PYTHONPATH'] = previous_path
+this_module = sys.modules.pop('sitecustomize')
+try:
+    importlib.import_module('sitecustomize')
+except ModuleNotFoundError as exc:
+    if exc.name != 'sitecustomize':
+        raise
+    sys.modules['sitecustomize'] = this_module
+import unittest
+original = unittest.TestProgram.runTests
+getpid, write, dumps = os.getpid, os.write, json.dumps
+pid = getpid()
+program = []
+def runTests(self):
+    if program:
+        return original(self)
+    program.append(self)
+    found = self.test.countTestCases()
+    try:
+        return original(self)
+    finally:
+        result = getattr(self, 'result', None)
+        if result is not None and getpid() == pid:
+            record = dict(pid=pid, discovered=found, tests=result.testsRun,
+                          failures=len(result.failures), errors=len(result.errors),
+                          skips=len(result.skipped), successful=result.wasSuccessful(),
+                          stopped=result.shouldStop)
+            payload = dumps(record).encode('ascii')
+            if write(fd, payload) != len(payload):
+                raise RuntimeError('incomplete completion write')
+unittest.TestProgram.runTests = runTests
 """
 
 
@@ -41,11 +71,16 @@ def discover_modules(root):
     if not tests.is_dir():
         raise ValueError('tests/ is missing')
     for directory, subdirs, files in os.walk(str(tests)):
-        if Path(directory) != tests and '__init__.py' in files:
-            raise ValueError('package discovery is unsupported: ' +
-                             str(Path(directory).relative_to(root)))
+        # Inspect directory entries too: os.walk does not descend into a
+        # symlinked package, but unittest discovery does.
+        for name in subdirs:
+            package = Path(directory) / name
+            if (package / '__init__.py').is_file():
+                raise ValueError('package discovery is unsupported: ' +
+                                 str(package.relative_to(root)))
     return sorted(p.name for p in tests.iterdir()
-                  if p.is_file() and fnmatch.fnmatchcase(p.name, 'test*.py'))
+                  if p.is_file() and fnmatch.fnmatchcase(p.name, 'test*.py')
+                  and re.match(r'[_a-z]\w*\.py$', p.name, re.IGNORECASE))
 
 
 def worker_count():
@@ -57,61 +92,64 @@ def worker_count():
     return int(value)
 
 
-def run_child(argv, root, output, pass_fds=()):
+def completion(raw, pid):
+    counts = dict(tests=0, failures=0, errors=0, skips=0)
     try:
-        child = subprocess.run(argv, cwd=str(root), stdout=output,
-                               stderr=subprocess.STDOUT, pass_fds=pass_fds,
-                               timeout=MODULE_TIMEOUT,
-                               env=dict(os.environ, PYTHONUNBUFFERED='1'))
-    except subprocess.TimeoutExpired:
-        return None, 'child timed out after {} seconds'.format(MODULE_TIMEOUT)
-    except OSError as exc:
-        return None, 'child could not start: {}'.format(exc)
-    if child.returncode != 0:
-        return child.returncode, 'child exited {}'.format(child.returncode)
-    return 0, None
+        record = json.loads(raw)
+        numeric = set(counts) | {'pid', 'discovered'}
+        if (not isinstance(record, dict)
+                or set(record) != numeric | {'successful', 'stopped'}
+                or any(type(record[k]) is not int or record[k] < 0 for k in numeric)
+                or record['pid'] != pid
+                or type(record['successful']) is not bool
+                or type(record['stopped']) is not bool):
+            raise ValueError('invalid record')
+    except (ValueError, UnicodeError):
+        return counts, 'missing or invalid unittest completion record'
+    counts = {key: record[key] for key in counts}
+    if record['discovered'] and not record['tests']:
+        return counts, 'discovery found {} tests but child ran zero'.format(record['discovered'])
+    if (not record['successful'] or record['stopped']
+            or record['failures'] or record['errors']):
+        return counts, 'unittest reported an unsuccessful or stopped run'
+    return counts, None
 
 
 def run_module(root, name):
     counts = dict(tests=0, failures=0, errors=0, skips=0)
-    with tempfile.TemporaryFile() as output:
-        code, problem = run_child([sys.executable, '-m', 'unittest', 'discover',
-                             '-s', 'tests', '-p', name], root, output)
+    problem = None
+    with tempfile.TemporaryDirectory() as startup, \
+            tempfile.TemporaryFile() as record, tempfile.TemporaryFile() as output:
+        previous = os.environ.get('PYTHONPATH')
+        hook = BOOTSTRAP.replace('__CHANNEL_FD__', str(record.fileno()))
+        hook = hook.replace('__BOOTSTRAP_DIR__', repr(startup))
+        hook = hook.replace('__ORIGINAL_PYTHONPATH__', repr(previous))
+        Path(startup, 'sitecustomize.py').write_text(hook)
+        env = dict(os.environ, PYTHONPATH=startup +
+                   (os.pathsep + previous if previous is not None else ''))
+        try:
+            child = subprocess.Popen(
+                [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', name],
+                cwd=str(root), stdout=output, stderr=subprocess.STDOUT,
+                pass_fds=(record.fileno(),), env=env)
+            try:
+                child.wait(timeout=MODULE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+                problem = 'child timed out after {} seconds'.format(MODULE_TIMEOUT)
+            record.seek(0)
+            counts, record_problem = completion(record.read(4097), child.pid)
+            # Python 3.12 uses exit 5 for zero tests; older versions use 0.
+            # Only a complete, successful, genuinely empty discovery accepts 5.
+            empty = not record_problem and not counts['tests'] and child.returncode == 5
+            if child.returncode != 0 and not empty:
+                problem = problem or 'child exited {}'.format(child.returncode)
+            problem = problem or record_problem
+        except OSError as exc:
+            problem = 'child could not start: {}'.format(exc)
         output.seek(0)
         raw = output.read()
-        reports = list(REPORT.finditer(raw.decode('utf-8', errors='replace')))
-        if not reports:
-            problem = problem or 'missing unittest completion report'
-        else:
-            report = reports[-1]
-            counts['tests'] = int(report[1])
-            details = {key.strip(): value for key, value in
-                       re.findall(r'([a-zA-Z ]+)=(\d+)', report[3] or '')}
-            for source, target in (('failures', 'failures'), ('errors', 'errors'),
-                                   ('skipped', 'skips')):
-                counts[target] = int(details.get(source, 0))
-            # Python 3.12 uses exit 5 for an empty discovery; older versions
-            # use OK/0. Accept that special exit ONLY after counting zero.
-            empty_exit = code == 5 and report[2] == 'NO TESTS RAN'
-            if report[2] == 'FAILED':
-                problem = problem or 'unittest reported failure'
-            if (not problem or empty_exit) and counts['tests'] == 0:
-                with tempfile.TemporaryFile() as count:
-                    output.seek(0, os.SEEK_END)
-                    probe_code, problem = run_child(
-                        [sys.executable, '-c', COUNT_DISCOVERY, name,
-                         str(count.fileno())], root, output, (count.fileno(),))
-                    count.seek(0)
-                    try:
-                        expected = json.loads(count.read())
-                        if type(expected) is not int or expected < 0:
-                            raise ValueError('invalid count')
-                        if expected:
-                            problem = 'discovery found {} tests but child ran zero'.format(expected)
-                    except (ValueError, UnicodeError):
-                        problem = problem or 'missing discovery count'
-                output.seek(0)
-                raw = output.read()
     return name, raw, counts, problem
 
 
