@@ -323,6 +323,14 @@ def load_tests(loader, tests, pattern):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(self.summary(result)['tests'], 1)
 
+    @unittest.skipIf(sys.version_info >= (3, 12), 'exit 5 denotes empty discovery on 3.12+')
+    def test_unexpected_exit5_on_older_python(self):
+        self.module('test_empty.py',
+                    'import atexit, os\natexit.register(lambda: os._exit(5))\n')
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('child exited 5', result.stdout)
+
     def test_timeout_fails_with_output(self):
         self.module('test_timeout.py', "import time\nprint('before timeout', flush=True)\ntime.sleep(10)\n")
         result = self.run_verifier(patch='v.MODULE_TIMEOUT = 0.2')

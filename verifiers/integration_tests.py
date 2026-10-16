@@ -149,7 +149,8 @@ def run_module(root, name):
             counts, record_problem = completion(record.read(4097), child.pid)
             # Python 3.12 uses exit 5 for zero tests; older versions use 0.
             # Only a complete, successful, genuinely empty discovery accepts 5.
-            empty = not record_problem and not counts['tests'] and child.returncode == 5
+            empty = (sys.version_info >= (3, 12) and not record_problem
+                     and not counts['tests'] and child.returncode == 5)
             if child.returncode != 0 and not empty:
                 problem = problem or 'child exited {}'.format(child.returncode)
             if record_problem:
