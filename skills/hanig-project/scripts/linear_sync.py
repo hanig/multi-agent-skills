@@ -595,9 +595,16 @@ COMMENT_FIELDS = 'id body issue { id }'
 DRAIN_ISSUE_FIELDS = 'id identifier state { type } project { id } team { id }'
 
 
-def intent_order(at, key):
+def intent_order(at, key, seq=None):
+    """Order by instant, legacy before sequenced, sequence, then key.
+
+    Sequences are local to one state directory; across directories at the same
+    instant, sequence ties still fall back to key, not global emission order.
+    """
     if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9._:-]+', key):
         raise ValueError('key not drainable')
+    if seq is not None and (type(seq) is not int or seq <= 0):
+        raise ValueError('intent seq must be a positive integer')
     require_id(at, 'intent at')
     try:
         instant = dt.datetime.strptime(at, '%Y-%m-%dT%H:%M:%S%z')
@@ -605,7 +612,7 @@ def intent_order(at, key):
         instant = dt.datetime.fromisoformat(at.replace('Z', '+00:00'))
     if instant.utcoffset() is None:
         raise ValueError('intent at requires a timezone')
-    return instant, key
+    return instant, int(seq is not None), seq if seq is not None else 0, key
 
 
 def comment_id(workspace, project, issue, key):
@@ -613,8 +620,11 @@ def comment_id(workspace, project, issue, key):
 
 
 def intent_markers(intent):
+    order = '%s %s %s' % (intent['at'], intent['key'], intent['verb'])
+    if 'seq' in intent:
+        order += ' %s' % intent['seq']
     return {'intent': intent['key'], 'evidence': intent['envelope']['evidence_digest'],
-            'order': '%s %s %s' % (intent['at'], intent['key'], intent['verb'])}
+            'order': order}
 
 
 def comment_body(intent):
@@ -653,10 +663,19 @@ def genuine_comment(comment, workspace, project, issue):
     if not re.fullmatch('[0-9a-f]{64}', markers['evidence']):
         return None
     try:
-        at, order_key, op = markers['order'].rsplit(' ', 2)
+        seq = None
+        # Parse from the right to retain legacy ISO instants with a space
+        # separator between the date and time.
+        if markers['order'].rsplit(' ', 1)[-1] in OPERATIONS:
+            at, order_key, op = markers['order'].rsplit(' ', 2)
+        else:
+            at, order_key, op, raw_seq = markers['order'].rsplit(' ', 3)
+            if not re.fullmatch(r'[1-9][0-9]*', raw_seq):
+                return None
+            seq = int(raw_seq)
         if order_key != key or op not in OPERATIONS:
             return None
-        order = intent_order(at, key)
+        order = intent_order(at, key, seq)
     except (ValueError, TypeError):
         return None
     return {'key': key, 'op': op, 'order': order, 'markers': markers}
@@ -806,7 +825,7 @@ def collect_intents(directories, contract, report):
             label = '%s line %d' % (directory, number)
             try:
                 intent = contract.normalize_intent(json.loads(line))
-                order = intent_order(intent.get('at'), intent.get('key'))
+                order = intent_order(intent.get('at'), intent.get('key'), intent.get('seq'))
                 problems = contract.validate_intent(intent)
                 if problems:
                     raise ValueError('; '.join(problems))
