@@ -2,14 +2,11 @@
 
 import json
 import os
-from pathlib import Path
-import re
 import subprocess
 import sys
 import unittest
 
 from tests import test_arc809_scope_check as scope_fixture
-from tests import test_attempt_worktrees as worktree_fixture
 from tests.scheduler_fixture import isolated_module_path
 from tests.scheduler_fixture import cleanup_module_path as tearDownModule
 
@@ -112,46 +109,6 @@ class TestWorkerScopeCheck(unittest.TestCase):
                 actual = "\n".join(line for line in result.stdout.splitlines()
                                    if '"head_source":' not in line) + "\n"
                 self.assertEqual(actual, json.dumps(baseline, indent=2, sort_keys=True) + "\n")
-
-    def test_dispatched_protocol_command_runs_in_attempt_worktree(self):
-        fixture = worktree_fixture.TestPerAttemptWorktrees("runTest")
-        self.addCleanup(fixture.doCleanups)
-        fixture.setUp()
-        unit = worktree_fixture.code_unit(fixture.repo)
-        unit["scope"] = ["tracked.txt"]
-        plan_path = fixture.tmp / "plan with ' quotes.json"
-        plan_path.write_text(json.dumps({"name": "worker-scope", "units": [unit]}))
-        state_dir = fixture.tmp / "state with ' quotes"
-        attempt = fixture.attempt("code", "worker-scope")
-        state = {"units": {"code": {"attempt_dir": str(attempt)}}}
-        with worktree_fixture.paseo_resolvable():
-            job, error = S._submit(unit, str(attempt), False, state, state_dir,
-                                   plan_path=plan_path)
-        self.assertIsNone(error)
-        self.assertIsNotNone(job)
-        argv = fixture.fake.launches[0]
-        worktree = Path(argv[argv.index("--cwd") + 1])
-        self.assertNotEqual(worktree, fixture.repo)
-        (worktree / "tracked.txt").write_text("worker commit\n")
-        worktree_fixture.git(worktree, "commit", "-qam", "worker change")
-        head = worktree_fixture.git(worktree, "rev-parse", "HEAD")
-        self.assertNotEqual(head, worktree_fixture.git(fixture.repo, "rev-parse", "HEAD"))
-        prompt = argv[-1]
-        command = next(block for block in re.findall(r"```sh\n(.*?)\n```", prompt, re.S)
-                       if " scope-check " in block)
-        self.assertLess(prompt.index(command), prompt.index("Before opening a pull request"))
-        self.assertIn("fix any out-of-scope path before review", prompt)
-        before = (state_dir / S.STATE_FILE).read_bytes()
-        result = subprocess.run(["/bin/sh", "-c", command], cwd=worktree,
-                                env=dict(os.environ), capture_output=True,
-                                text=True, timeout=30)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        report = json.loads(result.stdout)
-        self.assertEqual(report["status"], "in_scope")
-        self.assertEqual(report["head_source"], "worker")
-        self.assertEqual(report["head"], head)
-        self.assertEqual(report["out_of_scope"], [])
-        self.assertEqual((state_dir / S.STATE_FILE).read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -1344,7 +1344,7 @@ RETRY_MODES = ("restart", "resume")
 
 # --- dispatch -------------------------------------------------------------
 def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
-            dispatch_source=None, plan_path=None):
+            dispatch_source=None):
     """Submit, and return (job_id, error). Dispatch differs per kind; judging
     does not.
 
@@ -1748,13 +1748,8 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             argv += ["--thinking", str(thinking)]
         for kv in (u.get("env") or []):
             argv += ["--env", str(kv)]
-        # Invocation paths are prompt context, not persisted launch authority.
-        prompt_intent = dict(intent)
-        if plan_path is not None:
-            prompt_intent.update(scope_plan=str(Path(plan_path).resolve()),
-                                 scope_state_dir=str(Path(state_dir).resolve()))
-        prompt = SCP._dispatch_prompt(u, prompt_intent)
-        protocol_problem = SCP._code_protocol_problem(prompt, prompt_intent)
+        prompt = SCP._dispatch_prompt(u, intent)
+        protocol_problem = SCP._code_protocol_problem(prompt, intent)
         if protocol_problem:
             return None, (
                 f"unit {u['id']!r} code prompt has no valid completion "
@@ -1975,7 +1970,7 @@ WORKTREE_CLEANUP_STATES = frozenset(
 
 
 def advance(plan, state, state_dir, root, dry_run, max_new=None,
-            accept_plan_change=False, plan_path=None):
+            accept_plan_change=False):
     """Idempotent. Re-check every live unit, then dispatch whatever is ready.
 
     Safe to run from a Paseo schedule or cron every few minutes: it never
@@ -2303,7 +2298,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         if not problem:
                             recovered_job, problem = _submit(
                                 u, us["attempt_dir"], False, state, state_dir,
-                                dispatch_source=source, plan_path=plan_path)
+                                dispatch_source=source)
                         if problem:
                             SS._set_unit_state(us, "NEEDS_HUMAN")
                             us["launch_recovery_problem"] = problem
@@ -2887,8 +2882,6 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 u, root, state_dir, Path(unit_dir).name)
         submit_args = ({"dispatch_source": dispatch_source}
                        if dispatch_source is not None else {})
-        if plan_path is not None:
-            submit_args["plan_path"] = plan_path
         job_id, err = ((None, claim_refusal) if claim_refusal
                        else _submit(u, unit_dir, dry_run, state, state_dir,
                                     **submit_args))
@@ -3555,8 +3548,7 @@ def cmd_run(args):
         report, dispatched, halted = advance(
             plan, state, args.state_dir, args.root, args.dry_run,
             args.max_new_dispatches,
-            accept_plan_change=getattr(args, "accept_plan_change", False),
-            plan_path=str(Path(args.plan).resolve()))
+            accept_plan_change=getattr(args, "accept_plan_change", False))
         report[:0] = watch_report
         if (not args.dry_run
                 and _start_code_terminal_watchers(plan, state, args, report)):
