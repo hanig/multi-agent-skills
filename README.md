@@ -481,7 +481,9 @@ outside this trusted-writer storage convention.
 
 
 The designated `merge-precondition` verifier runs
-`python3 -m unittest discover -s tests` in the candidate tree. Its policy and
+`python3 -m unittest discover -s tests -p <module file name>` per module in the
+candidate tree, using a pool of `min(os.cpu_count() or 1, 8)` workers (override
+with a positive integer `HANIG_VERIFIER_WORKERS`). Its policy and
 program must first exist on the trusted target; missing policy or mismatched
 program bytes refuse. Reading target policy lets attempts whose launch bases
 predate installation use the new precondition without allowing a candidate
