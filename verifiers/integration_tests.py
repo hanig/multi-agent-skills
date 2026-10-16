@@ -24,7 +24,7 @@ MODULE_TIMEOUT = 7200
 # (including test_review's supervised worker). stdout and stderr share a file.
 REPORT = re.compile(
     r"^Ran (\d+) tests? in [^\r\n]+\r?\n\r?\n"
-    r"(OK|FAILED)(?: \(([^\r\n]*)\))?\r?$", re.MULTILINE)
+    r"(OK|FAILED|NO TESTS RAN)(?: \(([^\r\n]*)\))?\r?$", re.MULTILINE)
 # Only zero-result modules need a second discovery. The probe imports candidate
 # code in a CHILD with the same discovery start/top-level directory. It runs no
 # tests. A separate descriptor keeps incidental import output out of the count.
@@ -64,18 +64,18 @@ def run_child(argv, root, output, pass_fds=()):
                                timeout=MODULE_TIMEOUT,
                                env=dict(os.environ, PYTHONUNBUFFERED='1'))
     except subprocess.TimeoutExpired:
-        return 'child timed out after {} seconds'.format(MODULE_TIMEOUT)
+        return None, 'child timed out after {} seconds'.format(MODULE_TIMEOUT)
     except OSError as exc:
-        return 'child could not start: {}'.format(exc)
+        return None, 'child could not start: {}'.format(exc)
     if child.returncode != 0:
-        return 'child exited {}'.format(child.returncode)
-    return None
+        return child.returncode, 'child exited {}'.format(child.returncode)
+    return 0, None
 
 
 def run_module(root, name):
     counts = dict(tests=0, failures=0, errors=0, skips=0)
     with tempfile.TemporaryFile() as output:
-        problem = run_child([sys.executable, '-m', 'unittest', 'discover',
+        code, problem = run_child([sys.executable, '-m', 'unittest', 'discover',
                              '-s', 'tests', '-p', name], root, output)
         output.seek(0)
         raw = output.read()
@@ -90,12 +90,15 @@ def run_module(root, name):
             for source, target in (('failures', 'failures'), ('errors', 'errors'),
                                    ('skipped', 'skips')):
                 counts[target] = int(details.get(source, 0))
-            if report[2] != 'OK':
+            # Python 3.12 uses exit 5 for an empty discovery; older versions
+            # use OK/0. Accept that special exit ONLY after counting zero.
+            empty_exit = code == 5 and report[2] == 'NO TESTS RAN'
+            if report[2] == 'FAILED':
                 problem = problem or 'unittest reported failure'
-            if not problem and counts['tests'] == 0:
+            if (not problem or empty_exit) and counts['tests'] == 0:
                 with tempfile.TemporaryFile() as count:
                     output.seek(0, os.SEEK_END)
-                    problem = run_child(
+                    probe_code, problem = run_child(
                         [sys.executable, '-c', COUNT_DISCOVERY, name,
                          str(count.fileno())], root, output, (count.fileno(),))
                     count.seek(0)
