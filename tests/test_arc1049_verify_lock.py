@@ -364,7 +364,7 @@ exec(%r)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("verifier barrier watchdog expired", result.stderr)
 
-    def test_epoch_change_refuses_stale_evidence(self):
+    def test_epoch_change_alone_does_not_void_evidence(self):
         self.start()
         self.locked_change('''
 path = state / 'state-epoch.json'
@@ -372,17 +372,25 @@ record = json.loads(path.read_text())
 record['epoch'] += 1
 path.write_text(json.dumps(record))
 ''')
-        self.assert_stale("state_epoch")
+        result = self.complete()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(S.load_verifications(self.f.state_dir)[0]), 2)
 
-    def test_real_coordinator_acquisition_can_run_and_invalidates_observation(self):
+    def test_real_coordinator_acquisition_keeps_epoch_fence_without_voiding_evidence(self):
         self.start()
+        before_epoch, error = S._read_state_epoch(self.f.state_dir)
+        self.assertIsNone(error)
         code = ("import sys; sys.path.insert(0, %r); import swarm as S; "
                 "ok, reason = S.acquire_lease(%r); assert ok, reason; S.release_lease(%r)" %
                 (str(preconditions.fixtures.SCRIPTS), str(self.f.state_dir), str(self.f.state_dir)))
         result = subprocess.run([sys.executable, "-c", code], env=self.f.env,
                                 capture_output=True, text=True, timeout=self.remaining())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assert_stale("state_epoch")
+        self.assertEqual(S._read_state_epoch(self.f.state_dir), (before_epoch + 1, None))
+        result = self.complete()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(S._read_state_epoch(self.f.state_dir), (before_epoch + 2, None))
+        self.assertEqual(len(S.load_verifications(self.f.state_dir)[0]), 2)
 
     def test_judged_head_change_refuses_without_epoch_change(self):
         self.start()
@@ -395,7 +403,7 @@ forge = json.loads(forge_path.read_text())
 forge['pr']['headRefOid'] = 'f' * 40
 forge_path.write_text(json.dumps(forge))
 ''')
-        self.assert_stale("binding changed during verification: head")
+        self.assert_stale("verified unit record changed during verification: u")
 
     def test_attempt_change_refuses_without_epoch_change(self):
         self.start()
@@ -410,7 +418,7 @@ for field in ('attempt_launch_intents', 'attempt_launch_facts'):
 unit['attempt_produced_heads']['a2'] = unit['attempt_produced_heads']['a1']
 path.write_text(json.dumps(record))
 ''')
-        self.assert_stale("binding changed during verification: attempt")
+        self.assert_stale("verified unit record changed during verification: u")
 
     def test_target_tip_change_refuses_even_with_stale_pr_base(self):
         self.start()

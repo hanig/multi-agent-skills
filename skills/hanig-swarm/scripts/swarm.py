@@ -2738,7 +2738,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                 if u.get("kind") == "code":
                     watch = _current_code_terminal_watch(
                         state, uid, Path(attempt).name, us.get("job_id"))
-                    if watch is not None:
+                    if watch is not None and not (
+                            watch.get("status") == "checked" and watch.get("checked_at")):
                         watch["status"] = "checked"
                         watch["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
                 SS.save_state(state_dir, state)
@@ -4757,9 +4758,12 @@ def cmd_status(args):
                 suffix = f" (process {process})" if process else ""
                 if watch.get("import_pending"):
                     suffix += " (not yet imported)"
+                observation = (
+                    f"checked {watch.get('checked_at') or 'unknown'}"
+                    if watch.get("status") == "checked" else
+                    f"observed {watch.get('observed_at') or watch.get('process_observed_at') or watch.get('started_at') or 'unknown'}")
                 print(f"  {'':{w}}    terminal watcher: "
-                      f"{watch.get('status', 'unknown')}{suffix}; observed "
-                      f"{watch.get('observed_at') or watch.get('process_observed_at') or watch.get('started_at') or 'unknown'}")
+                      f"{watch.get('status', 'unknown')}{suffix}; {observation}")
                 if watch.get("outcome_ignored"):
                     print(f"  {'':{w}}      {watch['outcome_ignored']}")
                 if watch.get("reason") or watch.get("process_reason"):
