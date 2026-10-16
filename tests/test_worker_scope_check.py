@@ -1,12 +1,19 @@
 """Worker scope checks use real Git objects and never create merge authority."""
 
 import json
+import contextlib
+import io
 import os
+from argparse import Namespace
+from pathlib import Path
+import re
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from tests import test_arc809_scope_check as scope_fixture
+from tests import test_attempt_worktrees as worktree_fixture
 from tests.scheduler_fixture import isolated_module_path
 from tests.scheduler_fixture import cleanup_module_path as tearDownModule
 
@@ -109,6 +116,106 @@ class TestWorkerScopeCheck(unittest.TestCase):
                 actual = "\n".join(line for line in result.stdout.splitlines()
                                    if '"head_source":' not in line) + "\n"
                 self.assertEqual(actual, json.dumps(baseline, indent=2, sort_keys=True) + "\n")
+
+
+class TestDispatchedScopeCommand(unittest.TestCase):
+    def setUp(self):
+        self.fixture = worktree_fixture.TestPerAttemptWorktrees("runTest")
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp()
+
+    def dispatch(self, spaced=False, recovered=False):
+        fixture = self.fixture
+        unit = worktree_fixture.code_unit(fixture.repo)
+        unit["scope"] = ["tracked.txt"]
+        unit["outputs"] = ["evidence.md"]
+        suffix = " with ' quotes" if spaced else ""
+        plan_path = fixture.tmp / ("plan" + suffix + ".json")
+        self.state_dir = fixture.tmp / ("state" + suffix)
+        plan_path.write_text(json.dumps({"name": "worker-scope", "units": [unit]}))
+        args = Namespace(plan=str(plan_path), state_dir=str(self.state_dir),
+                         root=str(fixture.tmp / "runs"), dry_run=False,
+                         max_new_dispatches=1)
+        if recovered:
+            # Crash after worktree creation, before agent creation. The
+            # redispatch path must also use this invocation's plan path.
+            attempt = fixture.attempt("code", "recover-scope")
+            unit, state = fixture.intent_state(attempt)
+            us = state["units"]["code"]
+            us.update(state="ALLOCATED", attempt_dir=str(attempt),
+                      attempts=[str(attempt)], gpu_hours=0.0)
+            intent = us["attempt_launch_intents"][attempt.name]
+            _path, _pointer, error = S.SCL._create_code_worktree(self.state_dir, intent)
+            self.assertIsNone(error)
+            S.SS.save_state(self.state_dir, state)
+        real = fixture.fake
+
+        def service(argv, **kwargs):
+            if argv[:3] == ["paseo", "ls", "--json"]:
+                return 0, "[]", ""
+            if argv[:3] == ["paseo", "workspace", "ls"]:
+                return 0, "[]", ""
+            return real(argv, **kwargs)
+
+        # Fake service discovery/creation and watcher scheduling only. The
+        # command handler, advance, submit, renderer and Git are exercised.
+        with worktree_fixture.paseo_resolvable(), \
+                mock.patch.object(S.U, "run", side_effect=service), \
+                mock.patch.object(S, "_start_code_terminal_watchers", return_value=False), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            result = S.cmd_run(args)
+        self.assertEqual(result, 0, output.getvalue())
+        self.assertEqual(len(fixture.fake.launches), 1, output.getvalue())
+        argv = fixture.fake.launches[0]
+        worktree = Path(argv[argv.index("--cwd") + 1])
+        self.assertNotEqual(worktree, fixture.repo)
+        prompt = argv[-1]
+        command = next(block for block in re.findall(r"```sh\n(.*?)\n```", prompt, re.S)
+                       if " scope-check " in block)
+        self.assertLess(prompt.index(command), prompt.index("Before opening a pull request"))
+        self.assertIn("fix any out-of-scope path before review", prompt)
+        self.assertIn("fix the named paths and rerun before review", prompt)
+        self.assertIn("merge still requires the coordinator's judged report", prompt)
+        state = S.SS.load_state(self.state_dir)
+        intent = next(iter(state["units"]["code"]["attempt_launch_intents"].values()))
+        self.assertNotIn("scope_plan", intent)
+        self.assertNotIn("scope_state_dir", intent)
+        return worktree, command
+
+    def run_command(self, path, expected, spaced=False, recovered=False):
+        worktree, command = self.dispatch(spaced=spaced, recovered=recovered)
+        operator_head = worktree_fixture.git(self.fixture.repo, "rev-parse", "HEAD")
+        (worktree / path).write_text("worker commit\n")
+        worktree_fixture.git(worktree, "add", "-A")
+        worktree_fixture.git(worktree, "commit", "-qm", "worker change")
+        head = worktree_fixture.git(worktree, "rev-parse", "HEAD")
+        self.assertNotEqual(head, operator_head)
+        self.assertEqual(worktree_fixture.git(self.fixture.repo, "rev-parse", "HEAD"),
+                         operator_head)
+        state_file = self.state_dir / S.STATE_FILE
+        before = state_file.read_bytes()
+        result = subprocess.run(["/bin/sh", "-c", command], cwd=worktree,
+                                env=dict(os.environ), capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["status"], "in_scope" if expected == 0 else "out_of_scope")
+        self.assertEqual(report["head_source"], "worker")
+        self.assertEqual(report["head"], head)
+        self.assertEqual(report["out_of_scope"], [] if expected == 0 else [path])
+        self.assertEqual(state_file.read_bytes(), before)
+
+    def test_rendered_command_checks_in_scope_worker_commit(self):
+        self.run_command("tracked.txt", 0)
+
+    def test_rendered_command_rejects_outside_worker_commit(self):
+        self.run_command("outside.txt", S.EXIT_SCOPE_OUTSIDE)
+
+    def test_rendered_command_quotes_plan_and_state_paths(self):
+        self.run_command("tracked.txt", 0, spaced=True)
+
+    def test_recovered_dispatch_supplies_scope_command(self):
+        self.run_command("outside.txt", S.EXIT_SCOPE_OUTSIDE, recovered=True)
 
 
 if __name__ == "__main__":

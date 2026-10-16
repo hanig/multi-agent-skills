@@ -666,6 +666,7 @@ as `head_source: "worker"`; it cannot satisfy the merge scope precondition.
 Without `--head`, scope-check uses the coordinator's judged head and reports
 `head_source: "judged"`. Exit 0 is in scope, 1 is out of scope (including
 deletions), and 2 is unchecked, including absent scope or an unresolved head.
+The dispatched completion protocol supplies the quoted command with the coordinator's plan, state directory and unit, and requires workers to resolve their own commit and fix named paths before review.
 
 `converge.py check` answers whether a training run converged or merely stopped.
 It was ported out of a deleted skill before that skill was removed, because it
