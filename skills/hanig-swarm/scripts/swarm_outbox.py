@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shlex
 import stat
 import sys
 import tempfile
@@ -351,6 +352,7 @@ def _intent_key(project, uid, unit_state, us, verb, kind, evidence):
 #     unit's own report. An agent saying "done" on a ticket is exactly the
 #     self-assertion this whole family refuses.
 OUTBOX = "outbox.jsonl"
+OUTBOX_SEQ = "outbox-seq.json"
 RECEIPT_SCHEMA_VERSION = 2
 
 # Unit states that justify a tracker mutation, and what each means to a reader.
@@ -367,13 +369,121 @@ TRACKER_EVENTS = {
                                 "closed by a merged pull request."),
 }
 
+def _read_sequence(state_dir):
+    """Only coordinator state supplies allocation authority after migration."""
+    try:
+        record = json.loads((Path(state_dir) / OUTBOX_SEQ).read_text())
+    except FileNotFoundError:
+        return None
+    if (not isinstance(record, dict)
+            or not _schema_is(record.get("schema_version"), 1)
+            or type(record.get("high_water")) is not int
+            or record["high_water"] < 0):
+        raise OutboxError("invalid outbox sequence counter")
+    return record
+
+
+def _write_sequence(state_dir, record):
+    """Publish a file-fsynced counter, then fsync its directory before return."""
+    directory = Path(state_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".outbox-seq-", dir=str(directory))
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, directory / OUTBOX_SEQ)
+        SJ._fsync_directory(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _sequence_history(path):
+    """Read dedup keys and migration history without changing journal bytes.
+
+    A torn final append is not a published intent; the append primitive heals
+    it only after allocation succeeds. Complete malformed records refuse.
+    """
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        return None
+    lines = raw.splitlines()
+    records = []
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            if index == len(lines) - 1 and not raw.endswith("\n"):
+                break
+            raise OutboxError("corrupt outbox history")
+        if (not isinstance(record, dict) or not _nonblank_text(record.get("key"))
+                or ("seq" in record and
+                    (type(record["seq"]) is not int or record["seq"] <= 0))):
+            raise OutboxError("invalid outbox history key or sequence")
+        records.append(record)
+    return records
+
+
+def _allocate_sequence(state_dir, history):
+    """Reserve durably under the coordinator lease; gaps are allowed."""
+    record = _read_sequence(state_dir)
+    if record is None:
+        receipts, problems = load_acknowledgments(state_dir)
+        if problems:
+            raise OutboxError("incomplete receipt history")
+        if history is None:
+            # Even an empty receipt file distinguishes missing history from
+            # the specified new-directory case. stat errors are not absence.
+            try:
+                (Path(state_dir) / RECEIPTS).stat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise OutboxError("outbox is missing but receipt history exists")
+        keys = {row["key"] for row in history or []}
+        if any(row["key"] not in keys for row in receipts):
+            raise OutboxError("outbox is missing keys from receipt history")
+        record = {"schema_version": 1,
+                  "high_water": max((row.get("seq", 0) for row in history or []),
+                                    default=0)}
+        _write_sequence(state_dir, record)
+    record = dict(record, high_water=record["high_water"] + 1)
+    _write_sequence(state_dir, record)
+    return record["high_water"]
+
+
+def set_sequence_floor(state_dir, floor, approver, reason):
+    """Record an operator's evidence-based floor under the coordinator lease."""
+    if type(floor) is not int or floor < 0:
+        raise OutboxError("floor must be a non-negative integer")
+    if not _nonblank_text(approver) or not _nonblank_text(reason):
+        raise OutboxError("seq-floor requires a non-blank approver and reason")
+    previous = _read_sequence(state_dir)
+    if previous is not None and floor <= previous["high_water"]:
+        raise OutboxError("floor must exceed current high_water %d" %
+                          previous["high_water"])
+    record = {"schema_version": 1, "high_water": floor,
+              "approver": approver, "reason": reason,
+              "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    _write_sequence(state_dir, record)
+    return record
+
+
 def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
                 kind=None, tracker=None):
     """Append one tracker intent. Returns the key, or None if already emitted.
 
     Deterministic from state: replaying the same local transition produces the
     same key. A connected drainer must deduplicate or read back before retrying
-    a remote mutation; the key alone cannot establish what landed."""
+    a remote mutation; the key alone cannot establish what landed.
+    There is no ordering guarantee across clock rollback, restoring stale
+    coordinator state, or simultaneous loss of outbox-seq.json and the outbox.
+    """
     action = TRACKER_EVENTS.get(unit_state)
     if not action:
         return None
@@ -408,32 +518,23 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         return None
     key = _intent_key(project, uid, unit_state, us, verb, kind, evidence)
     path = Path(state_dir) / OUTBOX
-    max_seq = 0
     try:
-        if path.is_file():
-            for line in path.read_text().splitlines():
-                if not line.strip():
-                    continue
-                previous = json.loads(line)
-                if previous.get("key") == key:
-                    return None          # already emitted; do not duplicate
-                seq = previous.get("seq")
-                if type(seq) is int:
-                    max_seq = max(max_seq, seq)
-    except OSError as exc:
-        # An unreadable maximum is not zero. Leave the journal untouched so
-        # the next advance can retry without reusing an earlier sequence.
-        print(f"WARNING: could not read tracker intents to allocate a "
-              f"sequence: {exc}. It will be retried on the next advance.",
+        history = _sequence_history(path)
+        if any(previous["key"] == key for previous in history or []):
+            return None          # already emitted; do not duplicate
+        seq = _allocate_sequence(state_dir, history)
+    except (OSError, ValueError, OutboxError) as exc:
+        print(f"WARNING: cannot allocate tracker sequence in {state_dir}: "
+              f"{exc}. Restore readable history or recover with "
+              f"swarm.py seq-floor --state-dir {shlex.quote(str(state_dir))} "
+              f"--floor N --approver NAME --reason TEXT; choose N from "
+              f"evidence. Intent emission will retry on the next advance.",
               file=sys.stderr)
         return None
-    except ValueError:
-        # Keep the existing interrupted-tail recovery in _fsync_append.
-        pass
     intent = {
         "key": key, "project": project, "unit": uid, "verb": verb,
         # The coordinator lease serializes emitters in this state directory.
-        "seq": max_seq + 1,
+        "seq": seq,
         # Named on every intent so a drainer never has to infer which kind of
         # evidence would justify acting on it.
         "closing_evidence": closing_evidence_for(kind),
