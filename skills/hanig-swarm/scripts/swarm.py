@@ -180,6 +180,12 @@ from swarm_plan_rules import (
     MEM_FLAGS,
 )
 from swarm_outbox import (
+    _read_sequence,
+    _write_sequence,
+    _sequence_history,
+    _allocate_sequence,
+    set_sequence_floor,
+    OUTBOX_SEQ,
     emit_intent,
     backfill_tracker_intents,
     _parse_receipt_text,
