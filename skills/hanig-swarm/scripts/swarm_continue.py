@@ -95,10 +95,11 @@ def _continuation(plan, state, args, scratch):
     if problem:
         raise PlanError(problem)
     remote = intent["repository_remote"]
-    ref = args.head_ref or "refs/heads/" + intent["branch"]
+    ref = (args.head_ref if args.head_ref is not None
+           else "refs/heads/" + intent["branch"])
     tip = _remote_head(repo, raw, remote, ref)
     judged = SE.trusted_produced_head(state, args.unit, attempt_dir)
-    head = tip if args.head_ref or judged is None else judged
+    head = tip if args.head_ref is not None or judged is None else judged
     seed = {"ref": ref, "head": head, "base": recorded_base,
             "evidence": str(Path(attempt_dir) / "evidence.md")}
     SPR.declared_seed({"id": args.new_id, "kind": "code", "seed": seed})
@@ -125,7 +126,6 @@ def _continuation(plan, state, args, scratch):
 
 @contextmanager
 def _plan_file(path, write):
-    # Append waiters on a replaced inode must reopen before reading.
     while True:
         stream = path.open("rb")
         try:

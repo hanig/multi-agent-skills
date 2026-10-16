@@ -176,6 +176,7 @@ class ContinueCommandTests(unittest.TestCase):
         self.assert_refusal("recorded base/head ancestry", "--head-ref", "refs/heads/unrelated")
 
     def test_unresolved_ref_refused_without_fallback(self):
+        self.assert_refusal("seed.ref", "--head-ref", "")
         self.assert_refusal("does not resolve", "--head-ref", "refs/heads/missing")
         self.us["attempt_produced_heads"] = {}
         self.git("push", "-q", "origin", ":refs/heads/swarm-a1")
