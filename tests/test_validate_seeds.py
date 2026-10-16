@@ -34,6 +34,8 @@ class ValidateSeedsTests(unittest.TestCase):
         self.state = self.tmp / "state"
         self.env = dict(os.environ, PATH=str(self.bin), HOME=str(self.home),
                         XDG_STATE_HOME=str(self.state),
+                        # Apple Python otherwise writes import caches under HOME.
+                        PYTHONDONTWRITEBYTECODE="1",
                         GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
                         GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="test@example.invalid",
                         GIT_COMMITTER_NAME="test",
