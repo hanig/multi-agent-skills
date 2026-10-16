@@ -2784,7 +2784,22 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     #     and `acquire_lease` already serialises access to it.
     if not dry_run:
         for uid, u in sorted(units.items()):
-            if not SS._occupies_live_resources(u, SS._unit_state(state, uid)):
+            us = SS._unit_state(state, uid)
+            if (us.get("state") in SS.OPERATOR_TERMINAL_STATES
+                    and us.get("attempt_dir") and SS._occupies_live_resources(u, us)
+                    and (u.get("kind") != "code" or W.attempt_belongs_to_host(
+                        SS.trusted_launch_host_anchor(state, uid, us["attempt_dir"])) is True)):
+                # Reuse output-claim liveness; unknown still holds.
+                live, why = SP._claim_liveness({
+                    "attempt": Path(us["attempt_dir"]).name,
+                    "kind": u.get("kind"), "job": us.get("job_id")})
+                if live == SP.CLAIM_FREE:
+                    us["terminal_resource_release"] = {
+                        "attempt_dir": us["attempt_dir"], "job_id": us.get("job_id"),
+                        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "basis": why}
+                    SS.save_state(state_dir, state)
+                    report.append(f"{uid}: stopped attempt released resources -- {why}")
+            if not SS._occupies_live_resources(u, us):
                 SP._release_output_claims(u, root, state_dir)
 
     # 2. Budget. Charged on DISPATCH, not on completion: a budget that only
