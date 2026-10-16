@@ -95,6 +95,10 @@ ALLOWED = {
         "reads the declared workspace from the PLAN, not from a record",
     ("swarm.py", "validate_plan"):
         "validates the plan's own execution_workspace field before any run",
+    ("swarm.py", "cmd_validate"):
+        "reads values from _dispatch_source_identity(u, target), which the "
+        "coordinator computes live from the plan and the repository, not "
+        "from any agent-writable record",
     ("coordinator_paths.py", "operated_worktrees"):
         "reads execution_workspace off the PLAN's units to build the path "
         "containment set; no record is involved",

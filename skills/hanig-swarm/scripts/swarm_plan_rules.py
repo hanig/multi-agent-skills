@@ -32,8 +32,14 @@ def declared_seed(u):
     ref = seed.get("ref")
     if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
         raise PlanError(prefix + ".ref must be a full refs/heads/... branch ref")
-    rc, _, _ = U.run(["git", "check-ref-format", ref])
-    if rc != 0:
+    # git-check-ref-format's full-ref rules, without invoking Git during
+    # offline plan validation. The prefix above supplies the required slash
+    # and rules out a lone '@'; do not apply the stricter --branch rules.
+    if (ref.endswith(".") or ".." in ref or "@{" in ref
+            or any(not part or part.startswith(".") or part.endswith(".lock")
+                   for part in ref.split("/"))
+            or any(ord(c) < 32 or ord(c) == 127 or c in " ~^:?*[\\"
+                   for c in ref)):
         raise PlanError(prefix + ".ref is not a valid refs/heads/... branch ref")
     for field in ("base", "head"):
         value = seed.get(field)
