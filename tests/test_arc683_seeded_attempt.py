@@ -452,7 +452,7 @@ class SeedDispatchTests(unittest.TestCase):
 
 class UnseededCompatibilityTests(unittest.TestCase):
     def test_base_intent_prompt_and_plan_golden_digests(self):
-        # Captured by executing base e5a7e018 before implementation, with only
+        # Intent and plan captured at base e5a7e018 before implementation, with only
         # nondeterministic observations fixed. These are not source-text checks.
         unit = {"id": "code", "kind": "code", "repo": "/seed-compat/repo",
                 "target_branch": "main", "prompt": "Repair the implementation.",
@@ -479,8 +479,10 @@ class UnseededCompatibilityTests(unittest.TestCase):
         encoded = json.dumps(intent, sort_keys=True, separators=(",", ":")).encode()
         self.assertEqual(hashlib.sha256(encoded).hexdigest(),
                          "6d17a37532381f9046afbe0656c139340bbc79b6fb28a8ae736b96eb4af7fbf3")
+        # Prompt golden re-captured for the scope-check instruction of ARC-2208,
+        # at 1bd0004; intent and plan goldens remain unchanged.
         self.assertEqual(hashlib.sha256(S._dispatch_prompt(unit, intent).encode()).hexdigest(),
-                         "8bf3481207446c8ddee6ce6d9058a97afd874962787dce91bd33f0a88ddac57b")
+                         "783a78ec9fc762067863951a30a13c2c63016da4b7487b95abcc5a05a3d9cd1b")
         self.assertEqual(S.plan_digest({"name": "seed-compat", "units": [unit]}),
                          "55ce911fb07620734d54da3b6ef9cde709df04d099bc7d7ffd66aaf2d24db93a")
 

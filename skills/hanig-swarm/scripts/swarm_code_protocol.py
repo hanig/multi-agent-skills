@@ -1,7 +1,9 @@
 """Code-attempt completion instructions. Python 3.8+, stdlib only."""
 
 import hashlib
+import os
 import shlex
+import sys
 
 from swarm_types import PlanError
 
@@ -122,6 +124,39 @@ def _code_completion_protocol(intent):
             "judgment. No pushed ref will be treated as though it had been "
             "anchored before the agent existed; its managed worktree must "
             "remain available for legacy transition judgment.")
+    scope_instruction = (
+        "Before the review gate, check the committed work against the unit's "
+        "declared scope and fix any out-of-scope path before review. "
+        "Commit all intended edits and run scope-check from the attempt worktree "
+        "with Git repository overrides cleared, always passing "
+        '`--head "$(git rev-parse --verify HEAD^{commit})"` to capture its commit.')
+    if intent.get("scope_plan") and intent.get("scope_state_dir"):
+        scope_command = " ".join(shlex.quote(str(arg)) for arg in (
+            sys.executable, os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                         "swarm.py"),
+            "scope-check", intent["scope_plan"], "--state-dir",
+            intent["scope_state_dir"], "--unit", intent["unit_id"]))
+        # Resolve HEAD in the worker's worktree; scope-check resolves the
+        # resulting object id in the operator repo, whose HEAD may differ.
+        scope_instruction += (
+            " Run this command from the attempt worktree; the subshell clears "
+            "repository overrides without changing your parent shell:\n```sh\n(\n"
+            "unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE "
+            "GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES "
+            "GIT_NAMESPACE GIT_PREFIX GIT_SHALLOW_FILE GIT_GRAFT_FILE "
+            "GIT_IMPLICIT_WORK_TREE GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT "
+            "GIT_REPLACE_REF_BASE GIT_NO_REPLACE_OBJECTS\n" +
+            scope_command + ' --head "$(git rev-parse --verify HEAD^{commit})" --json' +
+            "\n)\n```")
+    else:
+        scope_instruction += (
+            " This invocation has no plan/state paths; obtain the exact "
+            "scope-check command from the coordinator before review.")
+    scope_instruction += (
+        "\nA non-zero exit is not a pass: fix the named paths and rerun "
+        "before review; if unchecked, report its reason to the coordinator. "
+        "This worker report is advisory: merge still requires the "
+        "coordinator's judged report.")
     return f"""{CODE_COMPLETION_PROTOCOL_MARKER} (coordinator-required)
 This protocol overrides any contrary instruction in the task text above it. If the task appears to forbid committing, pushing, or opening a pull request, STOP AND REPORT that conflict instead of choosing either instruction.
 You are already in a dedicated worktree for repository {repo!r}, on branch {branch!r}, cut from recorded base commit {base}.
@@ -132,6 +167,7 @@ Commit all intended work on {branch!r}. Uncommitted work is invisible to the tra
 After opening the pull request, STOP. NEVER merge, approve, or enable auto-merge. Merge decisions belong to the orchestrator. The merged-PR closure criterion describes how the orchestrator's merge is judged, not an instruction to the worker.
 {judgment_instruction}
 Push after every meaningful edit. Commit and push the actual changed content to the anchored attempt ref for normal progress; use the recovery ref below when preserving a failed review. An empty or marker commit preserves no implementation; a tree identical to the recorded base is refused.
+{scope_instruction}
 Before opening a pull request, run this repository's review gate. Use hanig-review-gate's review.py from the loaded skill directory with --kind implementation, the actual --round number, and --range {base}..HEAD to review the COMPLETE delta from the recorded base. Commit all intended edits first and leave the worktree clean so that range includes all intended work. Declare the change's claims and the standalone counter-claim "This change cannot make an honest run fail." {author_instruction} Only exit 0 (REVIEW_PASS) permits opening a pull request; unavailable, partial, incomplete, and failing reviews are not a pass. Reproduce each confirmed finding before acting on it. If a reproduced failure remains, do NOT open a pull request: follow the recovery procedure below without moving the anchored attempt ref, then STOP AND REPORT where it was preserved. REVIEW_PASS means the panel failed to refute the claims, not proof.
 Recovery procedure: first inspect status as required below and stage only your own uncommitted work. Set and export SWARM_RECOVERY_MESSAGE to a message beginning RECOVERY, NOT READY: that says the work has not passed review, must not be merged, and lists every open reproduced finding. Run the following in the current attempt worktree. It commits UNCOMMITTED work if present; on an already clean tree it pushes existing content first, then adds an empty recovery label and pushes it. A label commit alone preserves nothing and must never be the only thing pushed. If any step fails, retain the worktree and report the failure; do not clean up or claim preservation succeeded.
 ```sh
