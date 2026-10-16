@@ -71,6 +71,7 @@ import swarm_code_protocol as SCP
 import swarm_code_launch as SCL
 import swarm_workspaces as SW
 import swarm_dispatch as SD
+import swarm_continue as SC
 from swarm_dispatch import (
     _allocate, _dep_env, _isolation_submission, _record_isolation_facts,
     _clear_isolation_marker, _slurm_exit_trap, _bind,
@@ -3462,6 +3463,31 @@ def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False,
     return state, root
 
 
+def _check_plan_seeds(plan, check=None):
+    """The same live seed admission for validate and continuation previews."""
+    check = check or SP._seed_reachability_problem
+    problems = []
+    for u in plan["units"]:
+        if "seed" not in u:
+            continue
+        target, problem = SP._resolve_dispatch_target(u)
+        if not problem:
+            source, problem = SP._dispatch_source_identity(u, target)
+        if not problem:
+            problem = check(u["seed"], source["repo"],
+                            source["repository_remote_raw"],
+                            source["repository_remote"])
+        if problem:
+            detail = " ".join(problem.splitlines())
+            problems.append(f"unit {u['id']!r}: {detail}")
+    if problems:
+        raise PlanError("\n" + "\n".join(problems))
+
+
+def cmd_continue(args):
+    return SC.continue_plan(args, validate_plan, _check_plan_seeds)
+
+
 def cmd_validate(args):
     SR.apply_agent_resolution(args.plan)
     plan, err = U.read_json(args.plan)
@@ -3480,26 +3506,10 @@ def cmd_validate(args):
         survey, note = SPR.discover_survey(args.plan)
     try:
         summary = validate_plan(plan, survey)
+        if getattr(args, "check_seeds", False):
+            _check_plan_seeds(plan)
     except PlanError as e:
         sys.exit(f"error: invalid plan: {e}")
-    if getattr(args, "check_seeds", False):
-        problems = []
-        for u in plan["units"]:
-            if "seed" not in u:
-                continue
-            target, problem = SP._resolve_dispatch_target(u)
-            if not problem:
-                source, problem = SP._dispatch_source_identity(u, target)
-            if not problem:
-                problem = SP._seed_reachability_problem(
-                    u["seed"], source["repo"], source["repository_remote_raw"],
-                    source["repository_remote"])
-            if problem:
-                # Render one diagnostic line per unit, after the decision.
-                detail = " ".join(problem.splitlines())
-                problems.append(f"unit {u['id']!r}: {detail}")
-        if problems:
-            sys.exit("error: invalid plan:\n" + "\n".join(problems))
     print(f"plan is valid: {summary['units']} unit(s), "
           f"{summary['with_deps']} with dependencies")
     # WHICH CLUSTER FACTS WERE CONSULTED, in both directions. A pass here
@@ -4872,6 +4882,17 @@ def main():
                         "there those cluster facts are UNKNOWN and nothing "
                         "is refused on them.")
     v.set_defaults(fn=cmd_validate)
+
+    c = sub.add_parser("continue", help="derive a fresh code unit from an attempt")
+    c.add_argument("plan")
+    c.add_argument("--state-dir", required=True)
+    c.add_argument("--unit", required=True)
+    c.add_argument("--new-id", required=True)
+    c.add_argument("--prompt-file", required=True)
+    c.add_argument("--head-ref", help="exact remote refs/heads/... override")
+    c.add_argument("--write", action="store_true",
+                   help="atomically append the validated unit to the plan")
+    c.set_defaults(fn=cmd_continue)
 
     r = sub.add_parser("run", help="dispatch what is ready, then exit")
     common(r)
