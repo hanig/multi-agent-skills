@@ -57,10 +57,10 @@ class TestDurableSequence(DrainCase):
         return SO.emit_intent(self.state, 'project', uid, 'SUBMITTED', {})
 
     def test_luna_lost_outbox_keeps_same_second_order_through_cli_and_drain(self):
-        self.assertEqual(self.floor(6)[0], 0)
+        self.intent(key='seed', seq=6, at=AT)
         result = self.advance('SUBMITTED')
         self.assertEqual(result[0], 0, result)
-        old = SO.read_outbox(self.state)[0]
+        old = SO.read_outbox(self.state)[-1]
         self.assertEqual(old['seq'], 7)
         self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
         self.assertEqual(self.receipts()[0]['key'], old['key'])
@@ -75,7 +75,7 @@ class TestDurableSequence(DrainCase):
                   for c in self.fake.comments.values()]
         self.assertEqual(LS.latest_state(parsed)['key'], new['key'])
         self.assertEqual(self.fake.issues['1']['state']['type'], 'unstarted')
-        self.assertEqual(len(self.writes('IntentCommentCreate')), 2)
+        self.assertEqual(len(self.writes('IntentCommentCreate')), 3)
 
     def test_complete_migration_persists_maximum_then_allocates_five(self):
         old = self.intent(seq=4)
