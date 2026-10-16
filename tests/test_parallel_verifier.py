@@ -212,9 +212,9 @@ import os, sys
 assert os.environ['E1_STARTUP'] == 'ran'
 assert sys.path[0] == os.path.abspath('tests'), sys.path
 assert sys.path[1] == os.getcwd(), sys.path
-assert sys.path[2] == os.path.abspath('startup'), sys.path
-assert os.environ['PYTHONPATH'] == os.path.abspath('startup')
-""")
+assert sys.path[2] == __EXPECTED_STARTUP__, sys.path
+assert os.environ['PYTHONPATH'] == __EXPECTED_STARTUP__
+""".replace('__EXPECTED_STARTUP__', repr(str(startup))))
         with mock.patch.dict(os.environ, {'PYTHONPATH': str(startup)}):
             result = self.run_verifier()
         self.assertEqual(result.returncode, 0, result.stdout)

@@ -145,7 +145,8 @@ def run_module(root, name):
             empty = not record_problem and not counts['tests'] and child.returncode == 5
             if child.returncode != 0 and not empty:
                 problem = problem or 'child exited {}'.format(child.returncode)
-            problem = problem or record_problem
+            if record_problem:
+                problem = '; '.join(p for p in (problem, record_problem) if p)
         except OSError as exc:
             problem = 'child could not start: {}'.format(exc)
         output.seek(0)
