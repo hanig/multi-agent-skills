@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from tests.test_linear_drain import DrainCase, DC, LS
 from tests.scheduler_fixture import isolated_module_path, cleanup_module_path as tearDownModule
@@ -69,8 +70,36 @@ class StopFixture:
 
     def swarm(self, command, *args):
         # Execute the real entrypoint: main() parses argv and selects the handler.
-        return subprocess.run([sys.executable, str(SWARM / 'swarm.py'), command,
-                               str(self.plan), '--state-dir', str(self.state), *args],
+        argv = [str(SWARM / 'swarm.py'), command, str(self.plan),
+                '--state-dir', str(self.state), *args]
+        if getattr(self, 'clock', None):
+            # Freeze both clock APIs inside the real CLI subprocess; argv still
+            # reaches swarm.py's parser and main, with no production test hook.
+            wrapper = '''
+import datetime as dt
+import os
+from pathlib import Path
+import runpy
+import sys
+import time
+from unittest import mock
+instant = dt.datetime.fromisoformat(sys.argv.pop(1))
+sys.argv.pop(0)
+sys.path.insert(0, str(Path(sys.argv[0]).parent))
+os.environ['TZ'] = 'UTC'
+time.tzset()
+class Clock(dt.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+strftime = time.strftime
+def formatted(fmt, when=None):
+    return strftime(fmt, time.gmtime(instant.timestamp()) if when is None else when)
+with mock.patch.object(dt, 'datetime', Clock), mock.patch.object(time, 'strftime', formatted):
+    runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+            argv = ['-c', wrapper, self.clock, *argv]
+        return subprocess.run([sys.executable, *argv],
                               cwd=str(self.root), capture_output=True, text=True, timeout=60)
 
     def stop(self, command='abandon', unit='old', approver='owner', reason='No longer needed', by='successor'):
@@ -246,6 +275,7 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                 self.assertEqual({p: p.read_bytes() for p in paths}, before)
 
     def test_identical_command_repairs_missing_append_without_state_or_epoch_change(self):
+        self.clock = '2026-10-16T20:00:00.800000+00:00'
         for command in ('abandon', 'supersede'):
             with self.subTest(command=command):
                 self.setup_stop()
@@ -293,6 +323,7 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                     self.assertEqual(next(r for r in status['units'] if r['id'] == 'dependent')['held_by'], ['old'])
 
     def test_outbox_uses_successor_evidence_and_repairs_missing_append(self):
+        self.clock = '2026-10-16T20:00:00.800000+00:00'
         for command, verb in (('abandon', 'cancel'), ('supersede', 'close')):
             with self.subTest(command=command):
                 self.setup_stop()
@@ -311,6 +342,32 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                 self.assert_ok(self.swarm('advance', '--root', str(self.runs)))
                 repaired = next(i for i in self.intents() if i['unit'] == 'old')
                 self.assertEqual(repaired, intent)
+
+    def test_delayed_disposition_repair_uses_emission_time_and_next_sequence(self):
+        for command in ('abandon', 'supersede'):
+            with self.subTest(command=command):
+                self.setup_stop()
+                self.clock = '2026-10-16T20:00:00.800000+00:00'
+                self.assert_ok(self.stop(command))
+                original = self.intents()[0]
+                paths = [self.state / name for name in (SS.STATE_FILE, SS.STATE_EPOCH_FILE)]
+                before = {p: p.read_bytes() for p in paths}
+                (self.state / SO.OUTBOX).unlink()
+                with mock.patch.object(SO.time, 'strftime', return_value='2026-10-16T20:00:01+0000'):
+                    SO.emit_intent(self.state, 'stop-test', 'sibling', 'SUBMITTED', {},
+                                   tracker='ARC-1')
+                self.clock = '2026-10-16T20:00:02.900000+00:00'
+                self.assert_ok(self.stop(command))
+                start, repaired = self.intents()
+                self.assertEqual([start['seq'], repaired['seq']], [1, 2])
+                self.assertEqual(repaired['at'], '2026-10-16T20:00:02+0000')
+                self.assertEqual(original['at'], '2026-10-16T20:00:00+0000')
+                # Only emission order changes; decision, evidence and key stay exact.
+                self.assertEqual(repaired, dict(original, seq=2, at='2026-10-16T20:00:02+0000'))
+                self.assertEqual({p: p.read_bytes() for p in paths}, before)
+                outbox = (self.state / SO.OUTBOX).read_bytes()
+                self.assert_ok(self.stop(command))
+                self.assertEqual((self.state / SO.OUTBOX).read_bytes(), outbox)
 
     def test_code_unit_supersession_uses_successor_not_its_own_produced_head(self):
         plan = json.loads(self.plan.read_text())
@@ -424,6 +481,40 @@ class TestStoppedDrain(StopFixture, DrainCase):
         self.assert_ok(self.stop(unit='successor'))
         self.assert_drained('canceled')
         self.assert_drained('canceled', repeat=True)
+
+    def test_same_second_abandon_and_start_drain_in_both_emission_orders(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                self.setup_stop()
+                self.shared_issue()
+                self.fake.comments.clear()
+                self.fake.mutations.clear()
+                self.fake.issues['1']['state']['type'] = 'unstarted'
+                (self.state / SO.RECEIPTS).unlink(missing_ok=True)
+                operations = ('start', 'cancel') if reverse else ('cancel', 'start')
+                for index, operation in enumerate(operations):
+                    self.clock = '2026-10-16T20:00:00.%s00000+00:00' % (8 + index)
+                    if operation == 'cancel':
+                        self.assert_ok(self.stop())
+                    else:
+                        state = self.load()
+                        state['units']['successor']['state'] = 'SUBMITTED'
+                        self.save(state)
+                        self.assert_ok(self.swarm('advance', '--root', str(self.runs),
+                                                  '--max-new-dispatches', '0'))
+                intents = self.intents()
+                expected = 'canceled' if reverse else 'started'
+                # Exercise the consumer before checking the wire contract: the
+                # microsecond regression must actually leave the wrong issue state.
+                self.assert_drained(expected)
+                sent = [LS.comment_markers({'body': v['input']['body']})['intent']
+                        for v in self.writes('IntentCommentCreate')]
+                self.assertEqual(sent, [i['key'] for i in intents])
+                self.assertEqual([i['verb'] for i in intents], list(operations))
+                self.assertEqual([i['seq'] for i in intents], [1, 2])
+                self.assertEqual([i['at'] for i in intents],
+                                 ['2026-10-16T20:00:00+0000'] * 2)
+                self.assert_drained(expected, repeat=True)
 
     def test_shared_issue_cancel_never_replaces_done_close(self):
         self.shared_issue()

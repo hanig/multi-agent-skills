@@ -481,8 +481,10 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         # false, nothing ever set it true, and a permanently false field reads
         # as "this was not filed" when the truth is "this machine does not
         # know". Status is derived from outbox-receipts.jsonl instead.
-        "at": (decision["at"] if unit_state in ("ABANDONED", "SUPERSEDED")
-               else time.strftime("%Y-%m-%dT%H:%M:%S%z")),
+        # Order every event by emission, including a repaired disposition.
+        # The decision's audit timestamp stays in coordinator state; mixing
+        # its microseconds with ordinary whole-second events defeats seq.
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "job_id": us.get("job_id"), "attempt_dir": us.get("attempt_dir"),
         # A close intent MUST carry the verdict that justifies it. A drain that
         # cannot see the evidence must refuse to close.
