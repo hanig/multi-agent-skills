@@ -32,7 +32,6 @@ class TestParallelVerifier(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / 'tests').mkdir()
-        # Discovery's start directory is NOT imported as a package.
         (self.root / 'tests' / '__init__.py').write_text(
             "raise AssertionError('tests package must not be imported')\n")
 
@@ -74,7 +73,6 @@ class TestParallelVerifier(unittest.TestCase):
                 @unittest.expectedFailure
                 def test_expected_failure(self): self.fail('expected')
         ''')
-        # Default discovery is test*.py, not only test_*.py.
         self.module('testplain.py')
         self.module('helper.py', "raise AssertionError('not a test module')\n")
         result = self.run_verifier()
@@ -193,8 +191,6 @@ def load_tests(loader, tests, pattern):
     def test_module_set_comparison(self):
         self.module('test_a.py')
         self.module('test_b.py')
-        # First prove the real scheduler executes the entire input list. Dropping
-        # a module inside run_modules must turn this successful run into failure.
         complete = self.run_verifier()
         self.assertEqual(complete.returncode, 0, complete.stdout)
         self.assertEqual(self.summary(complete)['modules'], 2)
@@ -242,6 +238,21 @@ v.run_modules = omit
         result = self.run_verifier()
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertIn('tests/linked', result.stdout)
+
+    def test_package_below_linked_plain_directory_and_cycle(self):
+        external = self.root / 'external'
+        (external / 'pkg').mkdir(parents=True)
+        marker = external / 'pkg' / '__init__.py'
+        marker.write_text('')
+        (external / 'cycle').symlink_to(external, target_is_directory=True)
+        (self.root / 'tests' / 'linked').symlink_to(external, target_is_directory=True)
+        self.module('test_ok.py')
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn('tests/linked/pkg', result.stdout)
+        marker.unlink()
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_non_module_filename_does_not_expand_pattern(self):
         self.module('test_a.py')
@@ -332,8 +343,21 @@ def load_tests(loader, tests, pattern):
         self.assertIn('child exited 5', result.stdout)
 
     def test_timeout_fails_with_output(self):
-        self.module('test_timeout.py', "import time\nprint('before timeout', flush=True)\ntime.sleep(10)\n")
-        result = self.run_verifier(patch='v.MODULE_TIMEOUT = 0.2')
+        self.module('test_timeout.py', "import time\nfrom pathlib import Path\n"
+                    "time.sleep(0.3)\nprint('before timeout', flush=True)\n"
+                    "Path('ready').touch()\ntime.sleep(10)\n")
+        result = self.run_verifier(patch='''\
+import time
+v.MODULE_TIMEOUT = 0.2
+original_wait = v.subprocess.Popen.wait
+def after_ready(self, timeout=None):
+    if timeout is not None:
+        deadline = time.monotonic() + 10
+        while not v.Path('ready').exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+    return original_wait(self, timeout=timeout)
+v.subprocess.Popen.wait = after_ready
+''')
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn('before timeout', result.stdout)
         self.assertIn('child timed out', result.stdout)

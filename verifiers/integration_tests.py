@@ -3,7 +3,8 @@
 
 The operator reads these bytes from the trusted target and pins their digest.
 Tests and implementation are the candidate tree's bytes; this is integration
-validation, not an immutable test-corpus guarantee or an OS security boundary.
+validation on POSIX hosts, not an immutable corpus or an OS security boundary.
+Modules must be independent of process-global state in other test modules.
 Modules use min(cpu_count or 1, 8) processes, overridden by the positive integer
 HANIG_VERIFIER_WORKERS; each child has a two-hour timeout.
 """
@@ -77,9 +78,14 @@ def discover_modules(root):
     tests = root / 'tests'
     if not tests.is_dir():
         raise ValueError('tests/ is missing')
-    for directory, subdirs, files in os.walk(str(tests)):
-        # Inspect directory entries too: os.walk does not descend into a
-        # symlinked package, but unittest discovery does.
+    seen = set()
+    for directory, subdirs, files in os.walk(str(tests), followlinks=True):
+        info = os.stat(directory)
+        identity = (info.st_dev, info.st_ino)
+        if identity in seen:
+            subdirs[:] = []
+            continue
+        seen.add(identity)
         for name in subdirs:
             package = Path(directory) / name
             if (package / '__init__.py').is_file():
