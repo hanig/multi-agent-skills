@@ -371,19 +371,12 @@ a snapshot, restores no lost bytes, and confers no authority.
 
 ## Usage
 
-Before review, workers run `scope-check PLAN --state-dir DIR --unit U --head REV
---json` and fix out-of-scope paths. REV resolves in the launch-intent repo; from
-the attempt worktree use `--head "$(git rev-parse --verify HEAD^{commit})"`.
-The recorded base and scope rules remain the same. JSON adds `head_source`:
-`worker` with `--head`, `judged` without it. Only judged reports are admissible
-for merging. Exit 0 is in scope, 1 is out of scope, and 2 is unchecked.
+Before review, workers run `scope-check PLAN --state-dir DIR --unit U --head REV --json` and fix out-of-scope paths. REV resolves in the launch-intent repo; from the attempt worktree use `--head "$(git rev-parse --verify HEAD^{commit})"`. The recorded base and scope rules remain the same. JSON adds `head_source`: `worker` with `--head`, `judged` without it. Only judged reports are admissible for merging. Exit 0 is in scope, 1 is out of scope, and 2 is unchecked.
 
 ```bash
 export HANIG_SWARM_DIR="/path/to/loaded/hanig-swarm"
 U="$HANIG_SWARM_DIR/scripts/unit.py"
-D=$(python3 "$U" allocate --root /external/swarm-runs --task align-reads \
-  --kind slurm --command "bwa mem ref.fa r1.fq r2.fq > out.bam" \
-  --output out.bam --input ref.fa --gpu-hours 4 --charge-to hani)
+D=$(python3 "$U" allocate --root /external/swarm-runs --task align-reads --kind slurm --command "bwa mem ref.fa r1.fq r2.fq > out.bam" --output out.bam --input ref.fa --gpu-hours 4 --charge-to hani)
 python3 "$U" bind "$D" --job-id 187196
 python3 "$U" check "$D"
 # DONE 0 | RUNNING 1 | FAILED 2 | PREEMPTED 3 | INCOMPLETE 4
