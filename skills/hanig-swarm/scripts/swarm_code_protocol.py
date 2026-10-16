@@ -1,9 +1,9 @@
 """Code-attempt completion instructions. Python 3.8+, stdlib only."""
 
 import hashlib
+import os
 import shlex
 import sys
-from pathlib import Path
 
 from swarm_types import PlanError
 
@@ -129,7 +129,8 @@ def _code_completion_protocol(intent):
         "declared scope and fix any out-of-scope path before review.")
     if intent.get("scope_plan") and intent.get("scope_state_dir"):
         scope_command = " ".join(shlex.quote(str(arg)) for arg in (
-            sys.executable, Path(__file__).resolve().with_name("swarm.py"),
+            sys.executable, os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                         "swarm.py"),
             "scope-check", intent["scope_plan"], "--state-dir",
             intent["scope_state_dir"], "--unit", intent["unit_id"]))
         # Resolve HEAD in the worker's worktree; scope-check resolves the
