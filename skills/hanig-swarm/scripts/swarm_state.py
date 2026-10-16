@@ -484,7 +484,12 @@ def _occupies_live_resources(u, us):
     """
     if us.get("state") in OPERATOR_TERMINAL_STATES:
         # A tracker disposition does not establish process termination.
-        return bool((us.get("terminal_decision") or {}).get("retains_live_resources"))
+        release = us.get("terminal_resource_release") or {}
+        released = (bool(release)
+                    and release.get("attempt_dir") == us.get("attempt_dir")
+                    and release.get("job_id") == us.get("job_id"))
+        return (bool((us.get("terminal_decision") or {}).get("retains_live_resources"))
+                and not released)
     return (us.get("state") in LIVE_STATES
             or _deadline_attempt_is_unresolved(u, us))
 

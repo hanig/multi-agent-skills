@@ -3,6 +3,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import unittest
 from unittest import mock
 
 from tests.test_linear_drain import DrainCase, DC, LS
+from tests.test_dispatch_claims import fake_bin, SBATCH, SQUEUE_LISTS, SQUEUE_SILENT, SQUEUE_BROKEN
 from tests.scheduler_fixture import isolated_module_path, cleanup_module_path as tearDownModule
 
 
@@ -362,7 +364,6 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                 self.assertEqual([start['seq'], repaired['seq']], [1, 2])
                 self.assertEqual(repaired['at'], '2026-10-16T20:00:02+0000')
                 self.assertEqual(original['at'], '2026-10-16T20:00:00+0000')
-                # Only emission order changes; decision, evidence and key stay exact.
                 self.assertEqual(repaired, dict(original, seq=2, at='2026-10-16T20:00:02+0000'))
                 self.assertEqual({p: p.read_bytes() for p in paths}, before)
                 outbox = (self.state / SO.OUTBOX).read_bytes()
@@ -404,6 +405,82 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
         self.assertTrue(SS._occupies_live_resources(plan['units'][0], stopped))
         self.assert_ok(self.swarm('advance', '--root', str(self.runs)))
         self.assertEqual(self.load()['units']['old'], stopped)
+
+    def test_stopped_slurm_job_releases_slot_only_after_registry_confirms_absence(self):
+        for command in ('abandon', 'supersede'):
+            with self.subTest(command=command):
+                self.setup_stop()
+                plan = json.loads(self.plan.read_text())
+                plan['limits'] = {'max_running': 1, 'pools': {'workers': 1}}
+                plan['units'][0]['pool'] = 'workers'
+                plan['units'].append(dict(plan['units'][0], id='ready', tracker='ARC-3'))
+                self.plan.write_text(json.dumps(plan))
+                state = self.load()
+                state['plan_digest'] = S.SPR.plan_digest(plan)
+                state['units']['old'].update(state='RUNNING', job_id='778899')
+                self.save(state)
+                self.assert_ok(self.stop(command))
+                stopped = self.load()['units']['old']
+                self.assertTrue(SS._occupies_live_resources(plan['units'][0], stopped))
+                for queue in (SQUEUE_LISTS, SQUEUE_BROKEN):
+                    with fake_bin(sbatch=SBATCH, squeue=queue):
+                        result = self.swarm('advance', '--root', str(self.runs))
+                    self.assert_ok(result)
+                    self.assertIn('dispatched 0 unit(s)', result.stdout)
+                    self.assertEqual(self.load()['units']['old'], stopped)
+                with fake_bin(sbatch=SBATCH, squeue=SQUEUE_SILENT):
+                    self.assert_ok(self.swarm('advance', '--root', str(self.runs), '--dry-run'))
+                    self.assertEqual(self.load()['units']['old'], stopped)
+                    result = self.swarm('advance', '--root', str(self.runs))
+                self.assert_ok(result)
+                self.assertIn('dispatched 1 unit(s)', result.stdout)
+                current = self.load()
+                self.assertEqual(current['units']['ready']['state'], 'SUBMITTED')
+                released = current['units']['old']
+                self.assertFalse(SS._occupies_live_resources(plan['units'][0], released))
+                observation = released.pop('terminal_resource_release')
+                self.assertEqual(observation['attempt_dir'], stopped['attempt_dir'])
+                self.assertEqual(observation['job_id'], stopped['job_id'])
+                self.assertEqual(released, stopped)
+                self.assertEqual((self.attempt / 'preserved.patch').read_bytes(),
+                                 b'preserved implementation\x00\xff')
+                for field in ('attempt_dir', 'job_id'):
+                    changed = dict(current['units']['old'], terminal_resource_release=observation)
+                    changed[field] = 'different'
+                    self.assertTrue(SS._occupies_live_resources(plan['units'][0], changed))
+
+    def test_resource_release_requires_a_local_registry_answer(self):
+        for kind, host, answer, held in (
+                ('code', os.uname().nodename, '[]', False),
+                ('code', os.uname().nodename, '{}', True),
+                ('code', os.uname().nodename, '', True),
+                ('code', os.uname().nodename, '[null]', True),
+                ('code', os.uname().nodename, '[{}]', True),
+                ('code', 'another-host', '[]', True),
+                ('code', None, '[]', True),
+                ('pipeline', os.uname().nodename, '[]', True)):
+            with self.subTest(kind=kind, host=host, answer=answer):
+                self.setup_stop()
+                plan = json.loads(self.plan.read_text())
+                plan['units'][0]['kind'] = kind
+                self.plan.write_text(json.dumps(plan))
+                state = self.load()
+                state['plan_digest'] = S.SPR.plan_digest(plan)
+                state['units']['old'].update(state='RUNNING', job_id='agent',
+                    attempt_launch_intents={'attempt1': {'launch_host': host}})
+                self.save(state)
+                self.assert_ok(self.stop())
+                decision = self.load()['units']['old']['terminal_decision']
+                ok, why = SS.acquire_lease(self.state)
+                self.assertTrue(ok, why)
+                try:
+                    with fake_bin(paseo="printf '%s' '" + answer + "'"):
+                        S.advance(plan, SS.load_state(self.state), str(self.state), str(self.runs), False)
+                finally:
+                    SS.release_lease(self.state)
+                current = self.load()['units']['old']
+                self.assertEqual(current['terminal_decision'], decision)
+                self.assertEqual(SS._occupies_live_resources(plan['units'][0], current), held)
 
     def test_report_dispositions_override_preserved_attempt_verdict(self):
         for command, expected in (('abandon', 'ABANDONED'), ('supersede', 'SUPERSEDED')):
@@ -504,8 +581,7 @@ class TestStoppedDrain(StopFixture, DrainCase):
                                                   '--max-new-dispatches', '0'))
                 intents = self.intents()
                 expected = 'canceled' if reverse else 'started'
-                # Exercise the consumer before checking the wire contract: the
-                # microsecond regression must actually leave the wrong issue state.
+                # Check the drain before the wire contract.
                 self.assert_drained(expected)
                 sent = [LS.comment_markers({'body': v['input']['body']})['intent']
                         for v in self.writes('IntentCommentCreate')]
@@ -531,6 +607,15 @@ class TestStoppedDrain(StopFixture, DrainCase):
         self.assert_ok(self.stop(unit='successor'))
         self.assert_drained('completed')
         self.assert_drained('completed', repeat=True)
+        self.draft.write_text(json.dumps({'project': {'linear_id': 'project', 'team': 'ARC'},
+                                         'issues': [{'unit': u, 'identifier': 'ARC-1'}
+                                                    for u in ('old', 'successor')]}))
+        self.assertEqual(self.audit(plan=True, state=True), 0, self.stdout + self.stderr)
+        self.assertEqual(self.checks['swarm_state'], 'CLEAN')
+        self.fake.issues['1']['state']['type'] = 'unstarted'
+        self.assertEqual(self.audit(plan=True, state=True), 1)
+        self.assertEqual(self.checks['swarm_state'], 'DRIFT')
+        self.assertEqual(self.checks['intent_order'], 'DRIFT')
 
     def test_two_drains_then_audit_have_no_intent_order_drift(self):
         self.history()

@@ -514,10 +514,13 @@ def audit(args, client, filing=None):
                 added_raw, added_inputs = TA.capture([path])
                 raw.update(added_raw)
                 inputs.update(added_inputs)
+        closed_targets = {}
         try:
             comments = project_comments(reader, workspace, project, [i['id'] for i in issues])
             for issue in issues:
                 latest = latest_state(comments[issue['id']])
+                if latest and any(c['op'] == 'close' for c in comments[issue['id']]):
+                    closed_targets[issue['id']] = STATE_TYPE[latest['op']]
                 if latest and issue['state']['type'] != STATE_TYPE[latest['op']]:
                     finding('intent_order', 'DRIFT', {'issue': issue['identifier'],
                             'latest': latest['key'], 'expected': STATE_TYPE[latest['op']],
@@ -549,10 +552,14 @@ def audit(args, client, filing=None):
                         continue
                     issue_state = mapped[row['id']]['state']['type']
                     state = row['state']
-                    mismatch = ((state in ('DONE', 'SUPERSEDED') and issue_state != 'completed') or
-                                (state == 'ABANDONED' and issue_state != 'canceled') or
+                    mismatch = ((state == 'DONE' and issue_state != 'completed') or
                                 (state in ('RUNNING', 'SUBMITTED') and issue_state != 'started') or
                                 (state in ('FAILED', 'FAILED_EVIDENCE', 'HELD', 'NEEDS_HUMAN') and issue_state == 'completed'))
+                    if state in ('ABANDONED', 'SUPERSEDED'):
+                        # Honor the drain's shared-issue close precedence.
+                        expected = closed_targets.get(mapped[row['id']]['id'],
+                            'canceled' if state == 'ABANDONED' else 'completed')
+                        mismatch = issue_state != expected
                     if mismatch:
                         finding('swarm_state', 'DRIFT', {'unit': row['id'], 'coordinator': state, 'issue': issue_state})
             except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
