@@ -626,6 +626,7 @@ The coordinator. Roughly 2,200 lines in `swarm.py`, 1,300 in `unit.py`.
 python3 scripts/swarm.py validate plan.json
 python3 scripts/swarm.py run      plan.json [--dry-run]
 python3 scripts/swarm.py status   plan.json [--json]
+python3 scripts/swarm.py scope-check plan.json --state-dir DIR --unit ID [--head REV] [--json]
 python3 scripts/swarm.py advance  plan.json
 python3 scripts/swarm.py outbox            [--all] [--json]
 python3 scripts/swarm.py outbox \
@@ -646,6 +647,16 @@ python3 scripts/unit.py check <unit_dir> [--json]
 `--accept-plan-change` to proceed when the plan digest no longer matches the
 state directory. `promote` takes `--accept-weak-evidence`, which is exactly the
 kind of thing that should have to be typed out in full.
+
+`scope-check --head REV` lets a worker check committed changes against the
+attempt's recorded base before coordinator judgment. REV resolves to a full
+commit ID in the launch-intent repository. From an attempt worktree, pass
+`--head "$(git rev-parse --verify HEAD^{commit})"` to check that worktree's HEAD.
+Fix out-of-scope paths before review. JSON reports identify this advisory result
+as `head_source: "worker"`; it cannot satisfy the merge scope precondition.
+Without `--head`, scope-check uses the coordinator's judged head and reports
+`head_source: "judged"`. Exit 0 is in scope, 1 is out of scope (including
+deletions), and 2 is unchecked, including absent scope or an unresolved head.
 
 `converge.py check` answers whether a training run converged or merely stopped.
 It was ported out of a deleted skill before that skill was removed, because it

@@ -238,6 +238,8 @@ def validate_scope_report(report, code, binding):
     """Validate every exit's complete report before considering an exception."""
     if not isinstance(report, dict):
         raise Refusal("scope-check returned an invalid scope report")
+    if report.get("head_source") != "judged":
+        raise Refusal("scope-check returned malformed output: head_source must be judged")
     for key, expected in binding.items():
         if report.get(key) != expected:
             raise Refusal("scope-check binding differs from coordinator state: " + key)
