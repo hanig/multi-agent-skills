@@ -514,13 +514,13 @@ def audit(args, client, filing=None):
                 added_raw, added_inputs = TA.capture([path])
                 raw.update(added_raw)
                 inputs.update(added_inputs)
-        closed_targets = {}
+        stop_targets = {}
         try:
             comments = project_comments(reader, workspace, project, [i['id'] for i in issues])
             for issue in issues:
                 latest = latest_state(comments[issue['id']])
-                if latest and any(c['op'] == 'close' for c in comments[issue['id']]):
-                    closed_targets[issue['id']] = STATE_TYPE[latest['op']]
+                if latest and any(c['op'] in ('cancel', 'close') for c in comments[issue['id']]):
+                    stop_targets[issue['id']] = STATE_TYPE[latest['op']]
                 if latest and issue['state']['type'] != STATE_TYPE[latest['op']]:
                     finding('intent_order', 'DRIFT', {'issue': issue['identifier'],
                             'latest': latest['key'], 'expected': STATE_TYPE[latest['op']],
@@ -547,6 +547,8 @@ def audit(args, client, filing=None):
                 status = json.loads(result.stdout)
                 if not isinstance(status, dict) or not isinstance(status.get('units'), list):
                     raise ValueError('coordinator status must contain a units list')
+                stopped = {mapped[r['id']]['id'] for r in status['units']
+                           if r['state'] in ('ABANDONED', 'SUPERSEDED') and r['id'] in mapped}
                 for row in status['units']:
                     if row['id'] not in mapped:
                         continue
@@ -556,10 +558,11 @@ def audit(args, client, filing=None):
                                 (state in ('RUNNING', 'SUBMITTED') and issue_state != 'started') or
                                 (state in ('FAILED', 'FAILED_EVIDENCE', 'HELD', 'NEEDS_HUMAN') and issue_state == 'completed'))
                     if state in ('ABANDONED', 'SUPERSEDED'):
-                        # Honor the drain's shared-issue close precedence.
-                        expected = closed_targets.get(mapped[row['id']]['id'],
-                            'canceled' if state == 'ABANDONED' else 'completed')
+                        expected = 'canceled' if state == 'ABANDONED' else 'completed'
                         mismatch = issue_state != expected
+                    iid = mapped[row['id']]['id']
+                    if iid in stopped and iid in stop_targets:
+                        mismatch = issue_state != stop_targets[iid]
                     if mismatch:
                         finding('swarm_state', 'DRIFT', {'unit': row['id'], 'coordinator': state, 'issue': issue_state})
             except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:

@@ -1,4 +1,4 @@
-"""ARC-1786: approver dispositions through CLI, outbox, fake drain and audit."""
+"""Operator dispositions."""
 import copy
 import datetime as dt
 import hashlib
@@ -484,8 +484,6 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
             with self.subTest(command=command):
                 self.setup_stop()
                 self.assert_ok(self.stop(command))
-                # The retained receipt judged the earlier attempt; its missing
-                # declared outputs do not invalidate an approver disposition.
                 receipt = {'state': 'FAILED', 'outputs': {'other': {}}, 'kind': 'slurm'}
                 data = {'plan': {'units': [json.loads(self.plan.read_text())['units'][0]]},
                         'state': {'units': {'old': self.load()['units']['old']}},
@@ -540,9 +538,17 @@ class TestStoppedDrain(StopFixture, DrainCase):
         self.assertEqual(self.audit(), 0, self.stdout + self.stderr)
         self.assertEqual(self.checks['intent_order'], 'CLEAN')
 
+    def map_shared(self):
+        self.draft.write_text(json.dumps({'project': {'linear_id': 'project', 'team': 'ARC'},
+            'issues': [{'unit': u, 'identifier': 'ARC-1'} for u in ('old', 'successor')]}))
+
     def test_shared_issue_live_start_then_all_abandoned(self):
         self.shared_issue()
+        self.history()
         self.assert_ok(self.stop())
+        self.map_shared()
+        self.assertEqual(self.audit(plan=True, state=True), 1)
+        self.assertEqual(self.checks['swarm_state'], 'DRIFT')
         self.assert_drained('canceled')
         time.sleep(1.01)
         state = self.load()
@@ -586,6 +592,12 @@ class TestStoppedDrain(StopFixture, DrainCase):
                 self.assertEqual([i['at'] for i in intents],
                                  ['2026-10-16T20:00:00+0000'] * 2)
                 self.assert_drained(expected, repeat=True)
+                self.map_shared()
+                self.assertEqual(self.audit(plan=True, state=True), 0, self.stdout + self.stderr)
+                self.assertEqual(self.checks['swarm_state'], 'CLEAN')
+                self.fake.issues['1']['state']['type'] = 'unstarted'
+                self.assertEqual(self.audit(plan=True, state=True), 1)
+                self.assertEqual(self.checks['swarm_state'], 'DRIFT')
 
     def test_shared_issue_cancel_never_replaces_done_close(self):
         self.shared_issue()
@@ -602,9 +614,7 @@ class TestStoppedDrain(StopFixture, DrainCase):
         self.assert_ok(self.stop(unit='successor'))
         self.assert_drained('completed')
         self.assert_drained('completed', repeat=True)
-        self.draft.write_text(json.dumps({'project': {'linear_id': 'project', 'team': 'ARC'},
-                                         'issues': [{'unit': u, 'identifier': 'ARC-1'}
-                                                    for u in ('old', 'successor')]}))
+        self.map_shared()
         self.assertEqual(self.audit(plan=True, state=True), 0, self.stdout + self.stderr)
         self.assertEqual(self.checks['swarm_state'], 'CLEAN')
         self.fake.issues['1']['state']['type'] = 'unstarted'
@@ -642,7 +652,6 @@ class TestStoppedDrain(StopFixture, DrainCase):
             self.assertIn(text, body)
 
     def test_cli_and_close_intent_consumers_share_receipt_admission(self):
-        # Keep the coordinator binding fixed as receipt shape and identity vary.
         variants = [(None, None, True)]
         variants += [(field, value, False) for field, value in (
             ('attested', False), ('attested', None), ('attested', 1),
@@ -682,8 +691,6 @@ class TestStoppedDrain(StopFixture, DrainCase):
                 outbox.unlink(missing_ok=True)
                 key = SO.emit_intent(directory, 'stop-test', 'old', 'SUPERSEDED', stopped)
                 self.assertEqual(key is not None, accepted)
-                # Also feed the collector an invalid candidate directly; an
-                # emission refusal alone must not mask a lax drain consumer.
                 valid = copy.deepcopy(stopped)
                 valid['terminal_decision']['merge_receipt'] = self.receipt
                 outbox.unlink(missing_ok=True)
