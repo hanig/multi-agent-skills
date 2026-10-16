@@ -652,6 +652,8 @@ attempts, write coordinator state, or touch attempt worktrees. With no seeded
 units it runs no Git. A pass is a point-in-time observation, not a reservation
 or a guarantee that replay will be conflict-free.
 
+`swarm.py continue PLAN --state-dir DIR --unit OLD --new-id NEW --prompt-file FILE [--head-ref REF] [--write]` copies OLD with a new id, prompt, description and seed from coordinator state and live Git. Preview changes nothing; `--write` atomically appends after `validate --check-seeds` checks. Evidence is a path only.
+
 `run` and `advance` take `--max-new-dispatches` to throttle a fan-out, and
 `--accept-plan-change` to proceed when the plan digest no longer matches the
 state directory. `promote` takes `--accept-weak-evidence`, which is exactly the
