@@ -142,6 +142,54 @@ atexit.register(lambda: os.kill(os.getpid(), signal.SIGKILL))
         self.assertIn('Ran 1 test', result.stdout)
         self.assertIn('missing or invalid unittest completion record', result.stdout)
 
+    def test_import_time_nested_program_cannot_complete_outer_program(self):
+        self.module('test_exit.py', PASS + """\
+import os
+unittest.main(module=__name__, argv=['nested'], exit=False)
+os._exit(0)
+""")
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('missing or invalid unittest completion record', result.stdout)
+
+    def test_no_modules_matches_single_discovery(self):
+        result = self.run_verifier()
+        serial = subprocess.run([sys.executable, '-m', 'unittest', 'discover',
+                                 '-s', 'tests'], cwd=str(self.root),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, serial.returncode, result.stdout)
+        self.assertEqual(self.summary(result)['modules'], 0)
+
+    def test_discovery_can_import_local_json_helper(self):
+        self.module('json.py', 'SENTINEL = True\n')
+        self.module('test_helper.py', PASS + 'import json\nassert json.SENTINEL\n')
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.summary(result)['tests'], 1)
+
+    def test_temporary_startup_is_not_exposed(self):
+        probe = ("import importlib.util; s = importlib.util.find_spec('sitecustomize'); "
+                 "print(repr(s.origin if s else None))")
+        expected = subprocess.check_output([sys.executable, '-c', probe],
+                                           cwd=str(self.root), text=True).splitlines()[-1]
+        self.module('test_startup.py', PASS + """\
+import importlib.util
+spec = importlib.util.find_spec('sitecustomize')
+assert (spec.origin if spec else None) == EXPECTED
+""".replace('EXPECTED', expected))
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_load_hook_may_return_genuinely_empty_suite(self):
+        self.module('test_optional.py', PASS + """\
+def load_tests(loader, tests, pattern):
+    return unittest.TestSuite()
+""")
+        result = self.run_verifier()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('test_optional.py: discovered zero tests', result.stdout)
+        self.assertEqual(self.summary(result)['tests'], 0)
+
     def test_module_set_comparison(self):
         self.module('test_a.py')
         self.module('test_b.py')

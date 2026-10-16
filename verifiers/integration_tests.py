@@ -7,9 +7,9 @@ validation, not an immutable test-corpus guarantee or an OS security boundary.
 Modules use min(cpu_count or 1, 8) processes, overridden by the positive integer
 HANIG_VERIFIER_WORKERS; each child has a two-hour timeout.
 """
+import ast
 from concurrent.futures import ThreadPoolExecutor
 import fnmatch
-import json
 import os
 from pathlib import Path
 import re
@@ -24,7 +24,7 @@ MODULE_TIMEOUT = 7200
 # Restore both sys.path and PYTHONPATH before candidate imports, and chain any
 # existing sitecustomize. Only the outer TestProgram can record completion;
 # nested runners and early process exits cannot supply its result by printing.
-BOOTSTRAP = """import importlib, json, os, sys
+BOOTSTRAP = """import os, sys
 fd = __CHANNEL_FD__
 os.set_inheritable(fd, False)
 sys.path.remove(__BOOTSTRAP_DIR__)
@@ -35,20 +35,26 @@ else:
     os.environ['PYTHONPATH'] = previous_path
 this_module = sys.modules.pop('sitecustomize')
 try:
-    importlib.import_module('sitecustomize')
+    __import__('sitecustomize')
 except ModuleNotFoundError as exc:
     if exc.name != 'sitecustomize':
         raise
     sys.modules['sitecustomize'] = this_module
 import unittest
 original = unittest.TestProgram.runTests
-getpid, write, dumps = os.getpid, os.write, json.dumps
+original_init = unittest.TestProgram.__init__
+getpid, write, render = os.getpid, os.write, repr
 pid = getpid()
 program = []
+def initialize(self, *args, **kwargs):
+    if not program:
+        program.append(self)
+    if sys.modules.get('sitecustomize') is this_module:
+        del sys.modules['sitecustomize']
+    return original_init(self, *args, **kwargs)
 def runTests(self):
-    if program:
+    if self is not program[0]:
         return original(self)
-    program.append(self)
     found = self.test.countTestCases()
     try:
         return original(self)
@@ -59,9 +65,10 @@ def runTests(self):
                           failures=len(result.failures), errors=len(result.errors),
                           skips=len(result.skipped), successful=result.wasSuccessful(),
                           stopped=result.shouldStop)
-            payload = dumps(record).encode('ascii')
+            payload = render(record).encode('ascii')
             if write(fd, payload) != len(payload):
                 raise RuntimeError('incomplete completion write')
+unittest.TestProgram.__init__ = initialize
 unittest.TestProgram.runTests = runTests
 """
 
@@ -95,7 +102,7 @@ def worker_count():
 def completion(raw, pid):
     counts = dict(tests=0, failures=0, errors=0, skips=0)
     try:
-        record = json.loads(raw)
+        record = ast.literal_eval(raw.decode('ascii'))
         numeric = set(counts) | {'pid', 'discovered'}
         if (not isinstance(record, dict)
                 or set(record) != numeric | {'successful', 'stopped'}
@@ -104,7 +111,7 @@ def completion(raw, pid):
                 or type(record['successful']) is not bool
                 or type(record['stopped']) is not bool):
             raise ValueError('invalid record')
-    except (ValueError, UnicodeError):
+    except (ValueError, SyntaxError, UnicodeError):
         return counts, 'missing or invalid unittest completion record'
     counts = {key: record[key] for key in counts}
     if record['discovered'] and not record['tests']:
@@ -200,6 +207,8 @@ def main():
           'modules={modules} failed_modules={failed} wall_seconds={wall:.3f}'.format(
               modules=len(ran), failed=failed, wall=time.monotonic() - started,
               **totals), flush=True)
+    if not modules and sys.version_info >= (3, 12):
+        return 5  # Match discovery when there are no modules at all.
     return 1 if failed else 0
 
 
