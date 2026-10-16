@@ -446,7 +446,8 @@ def _allocate_sequence(state_dir, history):
             else:
                 raise OutboxError("outbox is missing but receipt history exists")
         keys = {row["key"] for row in history or []}
-        if any(row["key"] not in keys for row in receipts):
+        if any(not _nonblank_text(row["key"]) or row["key"] not in keys
+               for row in receipts):
             raise OutboxError("outbox is missing keys from receipt history")
         record = {"schema_version": 1,
                   "high_water": max((row.get("seq", 0) for row in history or []),
