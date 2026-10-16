@@ -184,6 +184,13 @@ SO.emit_intent(sys.argv[2], 'project', 'crashed', 'SUBMITTED', {})
 
     def test_migration_refuses_corrupt_history_and_empty_receipts_without_outbox(self):
         path = self.state / SO.OUTBOX
+        path.write_text('{"key":"old","seq":4}\n')
+        receipt = self.state / SO.RECEIPTS
+        for key in ({'bad': 'shape'}, ['bad']):
+            receipt.write_text(json.dumps({'key': key, 'ref': 'fixture', 'attested': True}) + '\n')
+            self.assertIsNone(self.emit())
+            self.assertFalse((self.state / SO.OUTBOX_SEQ).exists())
+        receipt.unlink()
         for raw in ('{}\n', '{"key":"bad","seq":true}\n',
                     'garbage\n', '{"key":"old","seq":4}\ngarbage\n'):
             with self.subTest(raw=raw):
