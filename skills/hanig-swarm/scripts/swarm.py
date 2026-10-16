@@ -4482,6 +4482,25 @@ def cmd_merge(args):
     return EXIT_OK
 
 
+def cmd_seq_floor(args):
+    """Recover sequence authority without changing intents or receipts."""
+    _prepare_command_paths(args)
+    ok, holder = SS.acquire_lease(args.state_dir)
+    if not ok:
+        print(f"cannot take this project's lock: {holder}", file=sys.stderr)
+        return EXIT_HALTED
+    try:
+        record = SO.set_sequence_floor(
+            args.state_dir, args.floor, args.approver, args.reason)
+    except (OSError, ValueError, OutboxError) as exc:
+        print(f"error: seq-floor refused: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    finally:
+        SS.release_lease(args.state_dir)
+    print(json.dumps(record, sort_keys=True))
+    return EXIT_OK
+
+
 def cmd_outbox(args):
     """Show tracker intents and whether each was acknowledged.
 
@@ -4984,6 +5003,13 @@ def main():
     m.add_argument("--repo", required=True,
                    help="the repository the PR is in")
     m.set_defaults(fn=cmd_merge)
+
+    sf = sub.add_parser("seq-floor", help="record an evidence-based tracker sequence floor")
+    sf.add_argument("--state-dir", required=True)
+    sf.add_argument("--floor", type=int, required=True)
+    sf.add_argument("--approver", required=True)
+    sf.add_argument("--reason", required=True)
+    sf.set_defaults(fn=cmd_seq_floor)
 
     o = sub.add_parser("outbox", help="tracker intents, and what landed")
     o.add_argument("--state-dir", default=None)
