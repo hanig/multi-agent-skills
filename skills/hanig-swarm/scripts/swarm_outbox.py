@@ -142,6 +142,8 @@ def validate_intent(intent, connector_capabilities=None):
     if not isinstance(envelope, dict):
         return ["intent has no versioned `envelope` object"]
     problems = []
+    if "seq" in intent and (type(intent["seq"]) is not int or intent["seq"] <= 0):
+        problems.append("intent.seq must be a positive integer")
     if not _schema_is(envelope.get("schema_version"), INTENT_SCHEMA_VERSION):
         problems.append("unsupported envelope schema_version %r "
                         "(understands %d)" %
@@ -406,15 +408,24 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         return None
     key = _intent_key(project, uid, unit_state, us, verb, kind, evidence)
     path = Path(state_dir) / OUTBOX
+    max_seq = 0
     try:
         if path.is_file():
             for line in path.read_text().splitlines():
-                if line.strip() and json.loads(line).get("key") == key:
+                if not line.strip():
+                    continue
+                previous = json.loads(line)
+                if previous.get("key") == key:
                     return None          # already emitted; do not duplicate
+                seq = previous.get("seq")
+                if type(seq) is int:
+                    max_seq = max(max_seq, seq)
     except (OSError, ValueError):
         pass
     intent = {
         "key": key, "project": project, "unit": uid, "verb": verb,
+        # The coordinator lease serializes emitters in this state directory.
+        "seq": max_seq + 1,
         # Named on every intent so a drainer never has to infer which kind of
         # evidence would justify acting on it.
         "closing_evidence": closing_evidence_for(kind),

@@ -390,7 +390,8 @@ not create pull requests. Every comment has a namespaced deterministic id.
   because the issue "looks done": the drain must refuse a close without its
   authorised evidence, and the operator must report and correct the violation.
 
-The drain posts pending comments in instant/key order and reconciles every
+The drain posts pending comments by instant, then legacy before sequenced
+intents, then sequence and key, and reconciles every
 touched issue once, including issues with historical receipts. The latest
 state intent is receipted after comment and state read-back; older state
 intents remain superseded. Comment-only intents need comment read-back. A
