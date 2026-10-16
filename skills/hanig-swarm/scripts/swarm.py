@@ -4136,8 +4136,10 @@ def _scope_changed_paths(repo, base, head):
 
 def cmd_scope_check(args):
     """Advisory merge precondition; reads state, never judges or mutates it."""
+    worker_head = getattr(args, "head", None)
     report = {"unit": args.unit, "status": "unchecked", "attempt": None,
               "base": None, "head": None, "scope": None,
+              "head_source": "worker" if worker_head is not None else "judged",
               "repository": None, "target": None, "state_epoch": None,
               "out_of_scope": [], "deletions_out_of_scope": []}
     code = EXIT_SCOPE_UNCHECKED
@@ -4180,6 +4182,13 @@ def cmd_scope_check(args):
             raise PlanError(problem)
         base, repo = intent["base_commit"], intent["repo"]
         head = SE.trusted_produced_head(state, args.unit, attempt_dir)
+        if worker_head is not None:
+            # Resolve in the recorded repository, never the operator's cwd.
+            # This advisory observation is not written to produced-head state.
+            CP.resolve_paths(args.state_dir, plan=plan, cwd=os.getcwd(),
+                             extra_repos=[repo])
+            head = _scope_git(repo, "rev-parse", "--verify",
+                              worker_head + "^{commit}").strip()
         report.update({"base": base, "head": head,
                        "repository": intent.get("repository_remote"),
                        "target": intent["target_branch"]})
@@ -4887,6 +4896,8 @@ def main():
     sc.add_argument("plan")
     sc.add_argument("--state-dir", required=True)
     sc.add_argument("--unit", required=True)
+    sc.add_argument("--head", metavar="REV",
+                    help="worker advisory head, resolved in the launch repository")
     sc.add_argument("--json", action="store_true")
     sc.set_defaults(fn=cmd_scope_check)
 

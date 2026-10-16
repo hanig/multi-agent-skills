@@ -882,6 +882,24 @@ class TestMergeUnit(unittest.TestCase):
                 self.env["SCOPE_OUTPUT"] = json.dumps(payload)
                 self.assert_refused(self.invoke("--allow-unchecked-scope", "Not applicable"))
 
+    def test_worker_scope_report_refuses(self):
+        self.intercept_scope_binding({"head_source": "worker"})
+        result = self.invoke("--allow-unchecked-scope", "Cannot authorize worker evidence")
+        self.assert_refused(result)
+        self.assertIn("malformed output: head_source must be judged", result.stderr)
+
+    def test_missing_scope_head_source_refuses(self):
+        self.intercept_scope_binding(remove=("head_source",))
+        result = self.invoke("--allow-unchecked-scope", "Cannot authorize missing source")
+        self.assert_refused(result)
+        self.assertIn("malformed output: head_source must be judged", result.stderr)
+
+    def test_unknown_scope_head_source_refuses(self):
+        self.intercept_scope_binding({"head_source": "unknown"})
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertIn("malformed output: head_source must be judged", result.stderr)
+
     def test_forge_pr_url_cannot_change_repository(self):
         self.forge["pr"]["url"] = "https://other.example/example/project/pull/7"
         self.save()
