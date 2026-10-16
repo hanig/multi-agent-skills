@@ -71,12 +71,9 @@ class StopFixture:
         (self.state / SS.STATE_FILE).write_text(json.dumps(state))
 
     def swarm(self, command, *args):
-        # Execute the real entrypoint: main() parses argv and selects the handler.
         argv = [str(SWARM / 'swarm.py'), command, str(self.plan),
                 '--state-dir', str(self.state), *args]
         if getattr(self, 'clock', None):
-            # Freeze both clock APIs inside the real CLI subprocess; argv still
-            # reaches swarm.py's parser and main, with no production test hook.
             wrapper = '''
 import datetime as dt
 import os
@@ -547,7 +544,6 @@ class TestStoppedDrain(StopFixture, DrainCase):
         self.shared_issue()
         self.assert_ok(self.stop())
         self.assert_drained('canceled')
-        # Emission uses whole seconds; ensure this start follows the decision.
         time.sleep(1.01)
         state = self.load()
         state['units']['successor']['state'] = 'SUBMITTED'
@@ -581,7 +577,6 @@ class TestStoppedDrain(StopFixture, DrainCase):
                                                   '--max-new-dispatches', '0'))
                 intents = self.intents()
                 expected = 'canceled' if reverse else 'started'
-                # Check the drain before the wire contract.
                 self.assert_drained(expected)
                 sent = [LS.comment_markers({'body': v['input']['body']})['intent']
                         for v in self.writes('IntentCommentCreate')]

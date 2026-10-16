@@ -2781,7 +2781,6 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                     and us.get("attempt_dir") and SS._occupies_live_resources(u, us)
                     and (u.get("kind") != "code" or W.attempt_belongs_to_host(
                         SS.trusted_launch_host_anchor(state, uid, us["attempt_dir"])) is True)):
-                # Reuse output-claim liveness; unknown still holds.
                 live, why = SP._claim_liveness({
                     "attempt": Path(us["attempt_dir"]).name,
                     "kind": u.get("kind"), "job": us.get("job_id")})
