@@ -1,5 +1,7 @@
 """State-directory sequence ordering through emission, drain and audit."""
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -62,6 +64,30 @@ class TestSequenceDrain(DrainCase):
         self.assertEqual(sent, [legacy['key'], sequenced['key']])
         self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
 
+    def test_read_failure_defers_emission_until_sequence_can_be_read(self):
+        self.intent('z', 'start', at=AT, seq=5)
+        path = self.state / SO.OUTBOX
+        before = path.read_bytes()
+        errors = io.StringIO()
+        with mock.patch.object(SO, '_intent_key', return_value='a'), \
+                mock.patch.object(SO.time, 'strftime', return_value=AT):
+            with mock.patch.object(Path, 'read_text', side_effect=OSError('transient read failure')), \
+                    contextlib.redirect_stderr(errors):
+                key = SO.emit_intent(self.state, 'project', 'u', 'DONE', {},
+                                     evidence={'receipt': {'state': 'DONE'}}, tracker='ARC-1')
+            self.assertIsNone(key)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertIn('transient read failure', errors.getvalue())
+            self.assertEqual(SO.emit_intent(
+                self.state, 'project', 'u', 'DONE', {},
+                evidence={'receipt': {'state': 'DONE'}}, tracker='ARC-1'), 'a')
+        self.assertEqual(SO.read_outbox(self.state)[-1]['seq'], 6)
+        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
+        sent = [LS.comment_markers({'body': v['input']['body']})['intent']
+                for v in self.writes('IntentCommentCreate')]
+        self.assertEqual(sent, ['z', 'a'])
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+
     def test_legacy_and_sequenced_trailers_round_trip(self):
         for at in (AT, '2026-10-16 10:00:00+00:00'):
             for seq in (None, 7):
@@ -106,6 +132,16 @@ class TestSequenceDrain(DrainCase):
 
 
 class TestSequenceEmission(unittest.TestCase):
+    def test_partial_tail_recovers_after_the_completed_sequence_maximum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / SO.OUTBOX
+            prefix = json.dumps({'key': 'old', 'seq': 4}).encode() + b'\n'
+            path.write_bytes(prefix + b'{"key": "interrupted", "seq":')
+            self.assertIsNotNone(SO.emit_intent(tmp, 'project', 'u', 'SUBMITTED', {}))
+            after = path.read_bytes()
+            self.assertTrue(after.startswith(prefix))
+            self.assertEqual(json.loads(after[len(prefix):])['seq'], 5)
+
     def test_sequence_uses_maximum_and_preserves_legacy_bytes(self):
         for history, expected in [([], 1), ([None, None], 1), ([None, 4], 5),
                                   ([9, 4, None], 10)]:
