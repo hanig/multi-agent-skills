@@ -420,7 +420,15 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
                 seq = previous.get("seq")
                 if type(seq) is int:
                     max_seq = max(max_seq, seq)
-    except (OSError, ValueError):
+    except OSError as exc:
+        # An unreadable maximum is not zero. Leave the journal untouched so
+        # the next advance can retry without reusing an earlier sequence.
+        print(f"WARNING: could not read tracker intents to allocate a "
+              f"sequence: {exc}. It will be retried on the next advance.",
+              file=sys.stderr)
+        return None
+    except ValueError:
+        # Keep the existing interrupted-tail recovery in _fsync_append.
         pass
     intent = {
         "key": key, "project": project, "unit": uid, "verb": verb,
