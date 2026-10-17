@@ -583,6 +583,36 @@ class SlurmEvidence(unittest.TestCase):
         self.stub("scontrol", "import sys; sys.exit('Invalid job id specified')")
         self.stub("squeue", "pass")
 
+    def shell_environment(self, **overrides):
+        """Only declared shell inputs, with the fixture's closed executable path.
+
+        SSH_CLIENT/SSH2_CLIENT make bash -c read .bashrc instead of BASH_ENV.
+        A fixture must not inherit that startup choice, exported functions,
+        shell options, or the enclosing allocation's job/array identity.
+        """
+        environment = {"PATH": os.environ["PATH"], "HOME": str(self.root), "LANG": "C"}
+        environment.update(overrides)
+        return environment
+
+    def test_shell_fixture_uses_declared_startup_with_ssh_parent(self):
+        self.real_tools()
+        # Startup selection also reproduces on the system's older Bash, even
+        # when the wrapper's separate Bash 4+ requirement cannot be met.
+        bash = BASH or OLD_BASH
+        if bash is None:
+            self.skipTest("no bash on this host")
+        startup = self.root / "startup"
+        startup.write_text('trap \'builtin printf "%s\\n" WRAPPER_TRACE\' DEBUG\n')
+        for variable in ("SSH_CLIENT", "SSH2_CLIENT"):
+            with self.subTest(variable=variable), mock.patch.dict(
+                    os.environ, {variable: "192.0.2.1 12345 22", "SHLVL": "0"}):
+                result = subprocess.run(
+                    [bash, "-c", "printf produced"],
+                    env=self.shell_environment(BASH_ENV=str(startup)),
+                    capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "WRAPPER_TRACE\nproduced")
+
     def cli_advance(self, max_new=0, retry=False):
         state_dir = self.root / "state"
         self.state.setdefault("units", {}).setdefault("unit", {}).update({
@@ -662,7 +692,7 @@ class SlurmEvidence(unittest.TestCase):
         policy = S.raw_artifact_basis(stored, "unit", attempt)["slurm_exit_record"]
         self.assertEqual(policy, {"version": 1, "path": U.SLURM_EXIT_RECORD})
         result = subprocess.run([self.bash(), str(attempt / "job.sbatch")],
-                                env=dict(os.environ, SLURM_JOB_ID="42"), timeout=5)
+                                env=self.shell_environment(SLURM_JOB_ID="42"), timeout=5)
         self.assertEqual(result.returncode, 0)
         self.assertTrue((attempt / U.SLURM_EXIT_RECORD).is_file())
 
@@ -677,7 +707,7 @@ class SlurmEvidence(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(job, "42")
         result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                env=dict(os.environ, SLURM_JOB_ID="42"), timeout=10)
+                                env=self.shell_environment(SLURM_JOB_ID="42"), timeout=10)
         self.assertEqual(result.returncode, 0)
         self.assertEqual((self.attempt / U.SLURM_EXIT_RECORD).read_text(), "legacy payload")
 
@@ -785,7 +815,7 @@ class SlurmEvidence(unittest.TestCase):
                 self.assertEqual(job, "42")
                 self.exit_record(exit_status=99)
                 result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                        env=dict(os.environ, SLURM_JOB_ID="42"),
+                                        env=self.shell_environment(SLURM_JOB_ID="42"),
                                         capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertTrue((self.attempt / U.SLURM_EXIT_RECORD).is_file())
@@ -804,7 +834,7 @@ class SlurmEvidence(unittest.TestCase):
                                     state=self.state, state_dir=self.root / "state")
         self.assertIsNone(problem)
         with subprocess.Popen([self.bash(), str(self.attempt / "job.sbatch")],
-                              env=dict(os.environ, SLURM_JOB_ID="42"),
+                              env=self.shell_environment(SLURM_JOB_ID="42"),
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
             deadline = time.monotonic() + 5
             while not (self.attempt / "ready").exists() and time.monotonic() < deadline:
@@ -837,7 +867,7 @@ class SlurmEvidence(unittest.TestCase):
                     ready.unlink()
                 options = ["--posix"] if posix else []
                 with subprocess.Popen([self.bash(), *options, str(self.attempt / "job.sbatch")],
-                                      env=dict(os.environ, SLURM_JOB_ID="42"),
+                                      env=self.shell_environment(SLURM_JOB_ID="42"),
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
                     deadline = time.monotonic() + 5
                     while not ready.exists() and time.monotonic() < deadline:
@@ -878,7 +908,7 @@ class SlurmEvidence(unittest.TestCase):
                                   "os.replace(sys.argv[-2], sys.argv[-1]); "
                                   "Path(%r).write_text(str(os.getpid())); time.sleep(.3)" % str(ready))
                     with subprocess.Popen([self.bash(), str(self.attempt / "job.sbatch")],
-                                          env=dict(os.environ, SLURM_JOB_ID="42", BASH_ENV=str(startup)),
+                                          env=self.shell_environment(SLURM_JOB_ID="42", BASH_ENV=str(startup)),
                                           start_new_session=True, stdout=subprocess.PIPE,
                                           stderr=subprocess.PIPE) as process:
                         deadline = time.monotonic() + 5
@@ -907,7 +937,7 @@ class SlurmEvidence(unittest.TestCase):
             S._submit(self.plan_unit, self.attempt, False,
                       state=self.state, state_dir=self.root / "state")
         result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                env=dict(os.environ, SLURM_JOB_ID="42"),
+                                env=self.shell_environment(SLURM_JOB_ID="42"),
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         record = json.loads((self.attempt / U.SLURM_EXIT_RECORD).read_text())
@@ -926,7 +956,7 @@ class SlurmEvidence(unittest.TestCase):
                     ready.unlink()
                 with subprocess.Popen([self.bash(), "-c", 'trap "" USR1; exec ' + shlex.quote(self.bash()) + ' "$1"',
                                        "launcher", str(self.attempt / "job.sbatch")],
-                                      env=dict(os.environ, SLURM_JOB_ID="42"),
+                                      env=self.shell_environment(SLURM_JOB_ID="42"),
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
                     deadline = time.monotonic() + 5
                     while not ready.exists() and time.monotonic() < deadline:
@@ -948,7 +978,7 @@ class SlurmEvidence(unittest.TestCase):
                               state=self.state, state_dir=self.root / "state")
                 self.exit_record()
                 result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                        env=dict(os.environ, SLURM_JOB_ID="42"), timeout=5)
+                                        env=self.shell_environment(SLURM_JOB_ID="42"), timeout=5)
                 self.assertEqual(result.returncode, status)
                 self.assertFalse((self.attempt / U.SLURM_EXIT_RECORD).exists())
                 self.assertEqual(self.judge(), "INCOMPLETE")
@@ -959,7 +989,7 @@ class SlurmEvidence(unittest.TestCase):
             S._submit(self.plan_unit, self.attempt, False,
                       state=self.state, state_dir=self.root / "state")
         result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                env=dict(os.environ, SLURM_JOB_ID="43",
+                                env=self.shell_environment(SLURM_JOB_ID="43",
                                          SLURM_ARRAY_JOB_ID="42", SLURM_ARRAY_TASK_ID="1"), timeout=5)
         self.assertEqual(result.returncode, 0)
         record = json.loads((self.attempt / U.SLURM_EXIT_RECORD).read_text())
@@ -988,7 +1018,7 @@ class SlurmEvidence(unittest.TestCase):
                 if mode == "cleanup-failure":
                     record_path.unlink()
                     record_path.mkdir()
-                environment = dict(os.environ, SLURM_JOB_ID="42")
+                environment = self.shell_environment(SLURM_JOB_ID="42")
                 environment.pop("POSIXLY_CORRECT", None)
                 if mode == "posix-env":
                     environment["POSIXLY_CORRECT"] = "1"
@@ -1033,7 +1063,7 @@ class SlurmEvidence(unittest.TestCase):
                     (self.attempt / "output").unlink()
                 self.exit_record()
                 result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                        env=dict(os.environ, SLURM_JOB_ID="42", BASH_ENV=str(startup)),
+                                        env=self.shell_environment(SLURM_JOB_ID="42", BASH_ENV=str(startup)),
                                         capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertTrue(result.stdout.strip().isdigit(), result.stdout)
@@ -1062,7 +1092,7 @@ class SlurmEvidence(unittest.TestCase):
                     record.write_text(prior)
                 (self.attempt / "output").unlink(missing_ok=True)
                 result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                        env=dict(os.environ, SLURM_JOB_ID="42", BASH_ENV=str(startup)),
+                                        env=self.shell_environment(SLURM_JOB_ID="42", BASH_ENV=str(startup)),
                                         capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue((self.attempt / "output").is_file())
@@ -1108,7 +1138,7 @@ class SlurmEvidence(unittest.TestCase):
                     record.chmod(0o400)
                 try:
                     result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                            env=dict(os.environ, SLURM_JOB_ID="42", BASH_ENV=str(startup)),
+                                            env=self.shell_environment(SLURM_JOB_ID="42", BASH_ENV=str(startup)),
                                             capture_output=True, text=True, timeout=5)
                 except subprocess.TimeoutExpired:
                     self.fail("invalidation blocked on an unsafe destination")
@@ -1137,7 +1167,7 @@ class SlurmEvidence(unittest.TestCase):
         hook.assert_called_once_with(self.attempt)
         (self.attempt / "output").unlink()
         self.exit_record()
-        environment = dict(os.environ, SLURM_JOB_ID="42", BASH_ENV=str(startup))
+        environment = self.shell_environment(SLURM_JOB_ID="42", BASH_ENV=str(startup))
         for name in ("SWARM_UNIT_ID", "SWARM_UNIT_DIR", "SWARM_DEP_INPUT"):
             environment.pop(name, None)
         result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
@@ -1162,7 +1192,7 @@ class SlurmEvidence(unittest.TestCase):
                       state=self.state, state_dir=self.root / "state")
         (self.attempt / "output").unlink()
         result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                env=dict(os.environ, SLURM_JOB_ID="42", BASH_ENV=str(startup)),
+                                env=self.shell_environment(SLURM_JOB_ID="42", BASH_ENV=str(startup)),
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.attempt / "output").read_text(), "produced")
@@ -1180,7 +1210,7 @@ class SlurmEvidence(unittest.TestCase):
         (self.attempt / "output").unlink()
         self.exit_record(exit_status=99)
         result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                env=dict(os.environ, SLURM_JOB_ID="42", BASH_ENV=str(startup)),
+                                env=self.shell_environment(SLURM_JOB_ID="42", BASH_ENV=str(startup)),
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.attempt / "output").is_file())
@@ -1190,6 +1220,9 @@ class SlurmEvidence(unittest.TestCase):
         self.responses["scontrol"] = self.controller()
         self.assertEqual(self.judge(), "DONE")
 
+    # Exercise the real wrapper under the parent state that used to suppress
+    # BASH_ENV for the -c/extdebug cases. Keep the complete option/status matrix.
+    @mock.patch.dict(os.environ, {"SSH_CLIENT": "192.0.2.1 12345 22", "SHLVL": "0"})
     def test_native_debug_tracing_does_not_abort_payload(self):
         self.real_tools()
         startup = self.root / "startup"
@@ -1212,7 +1245,7 @@ class SlurmEvidence(unittest.TestCase):
                                   [self.bash(), "-c", options + '; source "$1"',
                                    "wrapper", str(self.attempt / "job.sbatch")])
                     result = subprocess.run(invocation,
-                                            env=dict(os.environ, SLURM_JOB_ID="42", BASH_ENV=str(startup)),
+                                            env=self.shell_environment(SLURM_JOB_ID="42", BASH_ENV=str(startup)),
                                             capture_output=True, text=True, timeout=5)
                     self.assertEqual(result.returncode, status, result.stderr)
                     self.assertIn("WRAPPER_TRACE", result.stdout)
@@ -1237,7 +1270,7 @@ class SlurmEvidence(unittest.TestCase):
             S._submit(self.plan_unit, self.attempt, False,
                       state=self.state, state_dir=self.root / "state")
         result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                env=dict(os.environ, SLURM_JOB_ID="42", BASH_ENV=str(startup)),
+                                env=self.shell_environment(SLURM_JOB_ID="42", BASH_ENV=str(startup)),
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.attempt / "output").read_text(), "0123456789")
@@ -1262,7 +1295,7 @@ class SlurmEvidence(unittest.TestCase):
                 self.exit_record(exit_status=99)
                 (self.attempt / "output").unlink(missing_ok=True)
                 result = subprocess.run([self.bash(), str(script)],
-                                        env=dict(os.environ, SLURM_JOB_ID="42"),
+                                        env=self.shell_environment(SLURM_JOB_ID="42"),
                                         capture_output=True, text=True, timeout=5)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertFalse((self.attempt / "output").exists())
@@ -1276,7 +1309,7 @@ class SlurmEvidence(unittest.TestCase):
             S._submit(self.plan_unit, self.attempt, False,
                       state=self.state, state_dir=self.root / "state")
         result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch"), "first argument"],
-                                env=dict(os.environ, SLURM_JOB_ID="42",
+                                env=self.shell_environment(SLURM_JOB_ID="42",
                                          swarm_signal="ready", swarm_signal_number="value"),
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1292,7 +1325,7 @@ class SlurmEvidence(unittest.TestCase):
             S._submit(self.plan_unit, self.attempt, False,
                       state=self.state, state_dir=self.root / "state")
         result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                env=dict(os.environ, SLURM_JOB_ID="43", SLURM_ARRAY_JOB_ID="42",
+                                env=self.shell_environment(SLURM_JOB_ID="43", SLURM_ARRAY_JOB_ID="42",
                                          SLURM_ARRAY_TASK_ID="1", SLURM_RESTART_COUNT="2"),
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1317,7 +1350,7 @@ class SlurmEvidence(unittest.TestCase):
                     S._submit(self.plan_unit, self.attempt, False,
                               state=self.state, state_dir=self.root / "state")
                 result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                        env=dict(os.environ, SLURM_JOB_ID="42"), timeout=5)
+                                        env=self.shell_environment(SLURM_JOB_ID="42"), timeout=5)
                 self.assertEqual(result.returncode, status)
                 self.assertEqual((self.attempt / "output").read_text(), "payload")
                 self.assertTrue((self.attempt / U.SLURM_EXIT_RECORD).is_file())
@@ -1343,7 +1376,7 @@ class SlurmEvidence(unittest.TestCase):
                                   state=self.state, state_dir=self.root / "state")
                     self.exit_record()
                     result = subprocess.run([self.bash(), str(self.attempt / "job.sbatch")],
-                                            env=dict(os.environ, SLURM_JOB_ID="42"),
+                                            env=self.shell_environment(SLURM_JOB_ID="42"),
                                             capture_output=True, text=True, timeout=5)
                     self.assertEqual(result.returncode, status, result.stderr)
                     record_path = self.attempt / U.SLURM_EXIT_RECORD
@@ -1381,7 +1414,7 @@ class SlurmEvidence(unittest.TestCase):
         record = self.attempt / U.SLURM_EXIT_RECORD
         record.write_text('{"job_id":"42","exit_status":0}')
         result = subprocess.run([OLD_BASH, str(self.attempt / "job.sbatch")],
-                                env=dict(os.environ, SLURM_JOB_ID="42"),
+                                env=self.shell_environment(SLURM_JOB_ID="42"),
                                 capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertEqual((self.attempt / "output").read_text(), "produced")
@@ -1401,7 +1434,7 @@ class SlurmEvidence(unittest.TestCase):
                     with mock.patch.object(U, "run", return_value=(0, "42", "")):
                         S._submit(self.plan_unit, self.attempt, False,
                                   state=self.state, state_dir=self.root / "state")
-                    environment = dict(os.environ)
+                    environment = self.shell_environment()
                     environment.pop("SLURM_JOB_ID", None)
                     if job_id is not None:
                         environment["SLURM_JOB_ID"] = job_id
@@ -1422,7 +1455,7 @@ class SlurmEvidence(unittest.TestCase):
                                   ('bad"value', ""), ('$(touch injected)', "")):
             with self.subTest(restart=restart):
                 self.exit_record(exit_status=99)
-                environment = dict(os.environ, SLURM_JOB_ID="42")
+                environment = self.shell_environment(SLURM_JOB_ID="42")
                 environment.pop("SLURM_RESTART_COUNT", None)
                 if restart is not None:
                     environment["SLURM_RESTART_COUNT"] = restart
