@@ -2,12 +2,13 @@
 
 import copy
 import fcntl
+import io
 import json
 import os
 import stat
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
 import coordinator_paths as CP
@@ -15,7 +16,6 @@ import swarm_code_launch as SCL
 import swarm_evidence as SE
 import swarm_plan_rules as SPR
 import swarm_preflight as SP
-import swarm_routing as SR
 import swarm_state as SS
 import unit as U
 import worktree as W
@@ -23,35 +23,66 @@ from swarm_types import PlanError
 
 
 def _git(repo, *args):
-    rc, out, err = SP._git(repo, *args, timeout=120)
+    rc, out, err = U.run(["git", "-C", str(repo), *args],
+                         timeout=120, preserve_newlines=True)
     if rc:
         raise PlanError(f"Git {args[0]} failed: {err}")
-    return out
+    return out.strip()
+
+
+def _config_text(source):
+    def quote(value):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace(
+            "\n", "\\n").replace("\t", "\\t").replace("\b", "\\b") + '"'
+
+    lines = []
+    for entry in _git(source, "config", "--null", "--list", "--includes").split("\0"):
+        if not entry:
+            continue
+        key, separator, value = entry.partition("\n")
+        if key == "include.path" or key.startswith("includeif.") or key == "core.worktree":
+            continue
+        section, name = key.rsplit(".", 1)
+        section, dot, subsection = section.partition(".")
+        lines.append("[" + section + (" " + quote(subsection) if dot else "")
+                     + "]\n" + name + (" = " + quote(value) if separator else ""))
+    return "\n".join(lines) + "\n[core]\nbare = true\n"
 
 
 class _ScratchGit:
-    """Disposable object/ref storage; the source's Git metadata stays read-only."""
+    """Freeze effective Git configuration; keep cwd, redirect all Git storage."""
 
     def __init__(self, root):
         self.root = Path(root)
         self.repos = {}
 
+    @contextmanager
     def repo(self, source):
         if source not in self.repos:
             dest = self.root / str(len(self.repos))
-            _git(source, "clone", "--quiet", "--bare", "--shared", "--",
-                 source, str(dest))
-            # Retain transport configuration; fetch only into the clone.
-            common = _git(source, "rev-parse", "--git-common-dir")
-            config = (Path(source) / common / "config").resolve()
-            _git(dest, "config", "--add", "include.path", str(config))
-            _git(dest, "config", "--add", "core.bare", "true")
+            _git(source, "-c", "protocol.file.allow=always", "clone", "--quiet",
+                 "--bare", "--shared", "--", source, str(dest))
+            (dest / "config").write_text(_config_text(source), encoding="utf-8")
             self.repos[source] = str(dest)
-        return self.repos[source]
+        # This CLI is synchronous. Restore environment before any source read.
+        keys = set(("GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE "
+                    "GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES "
+                    "GIT_NAMESPACE GIT_SHALLOW_FILE GIT_GRAFT_FILE "
+                    "GIT_REPLACE_REF_BASE GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM "
+                    "GIT_CONFIG GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT").split())
+        saved = {k: os.environ.pop(k) for k in keys if k in os.environ}
+        os.environ.update(GIT_DIR=self.repos[source], GIT_CONFIG_GLOBAL=os.devnull,
+                          GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="0")
+        try:
+            yield source
+        finally:
+            for key in keys:
+                os.environ.pop(key, None)
+            os.environ.update(saved)
 
     def check(self, seed, repo, raw, remote):
-        return SP._seed_reachability_problem(
-            seed, self.repo(repo), raw, remote)
+        with self.repo(repo) as scratch:
+            return SP._seed_reachability_problem(seed, scratch, raw, remote)
 
 
 def _remote_head(repo, raw, remote, ref):
@@ -112,9 +143,9 @@ def _continuation(plan, state, args, scratch):
                              "head": target_tip}, repo, raw, remote)
     if problem:
         raise PlanError(problem)
-    git_repo = scratch.repo(repo)
-    base = _git(git_repo, "merge-base", target_tip, head)
-    _git(git_repo, "merge-base", "--is-ancestor", base, target_tip)
+    with scratch.repo(repo) as git_repo:
+        base = _git(git_repo, "merge-base", target_tip, head)
+        _git(git_repo, "merge-base", "--is-ancestor", base, target_tip)
     seed["base"] = base
     new = copy.deepcopy(old)
     new.update(id=args.new_id, seed=seed, description="Continuation of " + args.unit,
@@ -159,9 +190,8 @@ def _append(path, before, plan, mode):
             os.unlink(temp)
 
 
-def continue_plan(args, validate, check_seeds):
+def continue_plan(args, validate):
     try:
-        SR.apply_agent_resolution(args.plan)
         path = Path(args.plan).resolve()
         with _plan_file(path, args.write) as stream:
             before = stream.read()
@@ -174,9 +204,8 @@ def continue_plan(args, validate, check_seeds):
                 scratch = _ScratchGit(tmp)
                 new = _continuation(plan, state, args, scratch)
                 plan["units"].append(new)
-                survey, _ = SPR.discover_survey(args.plan)
-                validate(plan, survey)
-                check_seeds(plan, scratch.check)
+                with redirect_stdout(io.StringIO()):
+                    validate(plan, scratch.check)
             if args.write:
                 _append(path, before, plan, os.fstat(stream.fileno()).st_mode)
         print(json.dumps(new, indent=2, ensure_ascii=True))

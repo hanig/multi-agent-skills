@@ -1,12 +1,15 @@
 """Exercise continuation seed authority and atomic plan publication via the CLI."""
+import functools
+import http.server
 import json
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
+import threading
 import unittest
 from pathlib import Path
+from tests import test_validate_seeds as seed_fixture
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / "skills/hanig-swarm/scripts/swarm.py"
@@ -14,31 +17,14 @@ SWARM = ROOT / "skills/hanig-swarm/scripts/swarm.py"
 
 class ContinueCommandTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.tmp = Path(temporary.name).resolve()
-        bindir = self.tmp / "bin"
-        bindir.mkdir()
-        git = shutil.which("git") or shutil.which("git", path=os.defpath)
-        (bindir / "git").symlink_to(git)
-        (bindir / "paseo").write_text("#!/bin/sh\nexit 127\n")
-        (bindir / "paseo").chmod(0o755)
-        self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith("GIT_")}
-        self.env.update(PATH=str(bindir), HOME=str(self.tmp),
-                        PYTHONDONTWRITEBYTECODE="1", GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull, GIT_AUTHOR_NAME="test",
-                        GIT_COMMITTER_NAME="test", GIT_AUTHOR_EMAIL="test@example.invalid",
-                        GIT_COMMITTER_EMAIL="test@example.invalid")
-        self.repo = self.tmp / "repo"
-        self.repo.mkdir()
-        self.git("init", "-q")
-        self.git("symbolic-ref", "HEAD", "refs/heads/main")
-        self.root = self.commit("root")
+        with mock.patch.dict(os.environ, {k: v for k, v in os.environ.items()
+                                          if not k.startswith("GIT_")}, clear=True):
+            seed_fixture.ValidateSeedsTests.setUp(self)
+        self.tmp = self.tmp.resolve()
+        self.repo, self.origin = self.repo.resolve(), self.origin.resolve()
+        self.git("remote", "set-url", "origin", str(self.origin))
+        self.root = self.base
         self.base = self.commit("recorded base")
-        self.origin = self.tmp / "origin.git"
-        self.git("init", "-q", "--bare", str(self.origin))
-        self.git("remote", "add", "origin", str(self.origin))
         self.git("checkout", "-qb", "swarm-a1")
         self.head = self.commit("judged head")
         self.tip = self.commit("later branch tip")
@@ -196,6 +182,48 @@ class ContinueCommandTests(unittest.TestCase):
                  str(self.origin), str(fresh))
         self.repo = fresh
         self.unit["repo"] = self.intent["repo"] = str(fresh)
+        self.save()
+        before = self.snapshot()
+        self.assertEqual(self.result_unit(self.continuation())["seed"]["head"], self.head)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_conditional_credentials_survive_scratch_fetch(self):
+        class Auth(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                if (self.headers.get("Authorization") != "Basic dGVzdDp0ZXN0"
+                        or self.headers.get_all("X-Config") != ["once"]):
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="fixture"')
+                    self.end_headers()
+                    return
+                super().do_GET()
+
+        self.git("--git-dir=" + str(self.origin), "update-server-info")
+        server = http.server.HTTPServer(
+            ("127.0.0.1", 0), functools.partial(Auth, directory=str(self.tmp)))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        remote = "http://127.0.0.1:%d/origin.git" % server.server_port
+        self.git("remote", "set-url", "origin", remote)
+        self.intent.update(repository_remote=remote, repository_remote_raw=remote)
+        helper = self.repo / "credential-helper"
+        helper.write_text("#!/bin/sh\n[ \"$GIT_CONFIG_FIXTURE\" = present ] || exit 1\nprintf 'username=test\\npassword=test\\n'\n")
+        helper.chmod(0o755)
+        included = self.tmp / "auth.config"
+        included.write_text("[credential]\nhelper = !./credential-helper\n")
+        config = self.tmp / "git.config"
+        self.git("config", "--file", str(config),
+                 "includeIf.gitdir:%s/.path" % self.repo, str(included))
+        self.git("config", "--file", str(config), "http.extraHeader", "X-Config: once")
+        self.env.update(GIT_CONFIG_GLOBAL=str(config), GIT_TERMINAL_PROMPT="0",
+                        GIT_CONFIG_FIXTURE="present")
+        self.assertIn(self.tip, self.git("ls-remote", "origin", "refs/heads/swarm-a1"))
         self.save()
         before = self.snapshot()
         self.assertEqual(self.result_unit(self.continuation())["seed"]["head"], self.head)
