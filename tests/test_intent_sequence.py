@@ -69,9 +69,14 @@ class TestSequenceDrain(DrainCase):
         path = self.state / SO.OUTBOX
         before = path.read_bytes()
         errors = io.StringIO()
+        open_file = SO.os.open
+        def unreadable(name, *args, **kwargs):
+            if Path(name) == self.state / SO.OUTBOX_SEQ:
+                raise OSError('transient read failure')
+            return open_file(name, *args, **kwargs)
         with mock.patch.object(SO, '_intent_key', return_value='a'), \
                 mock.patch.object(SO.time, 'strftime', return_value=AT):
-            with mock.patch.object(Path, 'read_text', side_effect=OSError('transient read failure')), \
+            with mock.patch.object(SO.os, 'open', side_effect=unreadable), \
                     contextlib.redirect_stderr(errors):
                 key = SO.emit_intent(self.state, 'project', 'u', 'DONE', {},
                                      evidence={'receipt': {'state': 'DONE'}}, tracker='ARC-1')
