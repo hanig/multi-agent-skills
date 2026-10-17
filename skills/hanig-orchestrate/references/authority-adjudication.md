@@ -14,6 +14,8 @@ The matrix distinguishes evidence that disproves a finding, a confirmed required
 
 For a proposed nonblocking disposition, the mandate's concurrence party receives neutral premises and an invitation to refute instead of a request to ratify. <!-- declaration: adjudication.concurrence -->
 
+The task declares its supported envelope and accepted limits before work begins and passes them to reviewers, who may refute those boundaries. Deferral at adjudication confirms or refutes that declared claim against the reproduced trigger, consequence bounds and recovery evidence under the mandate. <!-- declaration: adjudication.envelope -->
+
 The decision record answers five questions:
 
 1. Which goal, criterion, output, or downstream consumer is exposed?
