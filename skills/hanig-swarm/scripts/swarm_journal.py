@@ -25,11 +25,13 @@ def _heal_jsonl_tail(fh):
     tail = data[cut + 1:]
     try:
         json.loads(tail.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError):
         fh.truncate(0 if cut < 0 else cut + 1)
-    else:
-        fh.seek(0, os.SEEK_END)
-        fh.write(b"\n")
+        return
+    except (ValueError, RecursionError):
+        pass  # Parser limits cannot establish an incomplete tail.
+    fh.seek(0, os.SEEK_END)
+    fh.write(b"\n")
 
 
 def _fsync_append(path, record):
