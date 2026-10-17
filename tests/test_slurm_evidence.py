@@ -613,6 +613,18 @@ class SlurmEvidence(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "WRAPPER_TRACE\nproduced")
 
+    def test_debug_fixture_restores_parent_environment(self):
+        # Drive the TestCase consumer, including its registered cleanups.
+        with mock.patch.dict(os.environ):
+            before = dict(os.environ)
+            result = unittest.TestResult()
+            SlurmEvidence("test_native_debug_tracing_does_not_abort_payload").run(result)
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.failures, [])
+            changed = sorted(name for name in before.keys() | os.environ.keys()
+                             if before.get(name) != os.environ.get(name))
+            self.assertEqual(changed, [])
+
     def cli_advance(self, max_new=0, retry=False):
         state_dir = self.root / "state"
         self.state.setdefault("units", {}).setdefault("unit", {}).update({
@@ -1222,8 +1234,10 @@ class SlurmEvidence(unittest.TestCase):
 
     # Exercise the real wrapper under the parent state that used to suppress
     # BASH_ENV for the -c/extdebug cases. Keep the complete option/status matrix.
-    @mock.patch.dict(os.environ, {"SSH_CLIENT": "192.0.2.1 12345 22", "SHLVL": "0"})
     def test_native_debug_tracing_does_not_abort_payload(self):
+        parent = mock.patch.dict(os.environ, {"SSH_CLIENT": "192.0.2.1 12345 22", "SHLVL": "0"})
+        parent.start()
+        self.addCleanup(parent.stop)
         self.real_tools()
         startup = self.root / "startup"
         for options in ("set -T", "shopt -s extdebug", "shopt -s extdebug; set +T",
