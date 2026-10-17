@@ -234,10 +234,10 @@ SO.emit_intent(sys.argv[2], 'project', 'crashed', 'SUBMITTED', {})
 
     def test_corruption_recovery_and_dedup(self):
         path = self.outbox
-        for corrupt in ('garbage\n', '{"key":"bad","seq":0}\n', '[]\n'):
+        for corrupt in (b'garbage\n', b'{"key":"bad","seq":0}\n', b'[]\n', b'\xff\n'):
             with self.subTest(corrupt=corrupt):
                 old = SO.outbox_key('project', 'old', 'SUBMITTED', None)
-                before = (corrupt + json.dumps({'key': old, 'seq': 4}) + '\n').encode()
+                before = corrupt + (json.dumps({'key': old, 'seq': 4}) + '\n').encode()
                 path.write_bytes(before)
                 self.assertIsNone(self.emit())
                 self.assertEqual(self.floor(20)[0], 0)

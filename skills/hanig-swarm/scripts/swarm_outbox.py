@@ -405,7 +405,7 @@ def _sequence_history(path, strict=True):
     is published and migrates. A retained counter permits every readable key.
     """
     try:
-        raw = path.read_text()
+        raw = path.read_bytes()
     except FileNotFoundError:
         return None
     lines = raw.splitlines()
@@ -414,9 +414,9 @@ def _sequence_history(path, strict=True):
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
+            record = json.loads(line.decode("utf-8"))
         except ValueError:
-            if index == len(lines) - 1 and not raw.endswith("\n"):
+            if index == len(lines) - 1 and not raw.endswith(b"\n"):
                 break
             if strict:
                 raise OutboxError("corrupt outbox history")
