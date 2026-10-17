@@ -49,6 +49,23 @@ def _config_text(source):
     return "\n".join(lines) + "\n[core]\nbare = true\n"
 
 
+@contextmanager
+def _git_environment(**changes):
+    keys = set(("GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_CONFIG "
+                "GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES "
+                "GIT_NAMESPACE GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_PREFIX "
+                "GIT_IMPLICIT_WORK_TREE GIT_REPLACE_REF_BASE GIT_NO_REPLACE_OBJECTS").split())
+    keys.update(changes)
+    saved = {k: os.environ.pop(k) for k in keys if k in os.environ}
+    os.environ.update((k, v) for k, v in changes.items() if v is not None)
+    try:
+        yield
+    finally:
+        for key in keys:
+            os.environ.pop(key, None)
+        os.environ.update(saved)
+
+
 class _ScratchGit:
     """Freeze effective Git configuration; keep cwd, redirect all Git storage."""
 
@@ -64,21 +81,10 @@ class _ScratchGit:
                  "--bare", "--shared", "--", source, str(dest))
             (dest / "config").write_text(_config_text(source), encoding="utf-8")
             self.repos[source] = str(dest)
-        # This CLI is synchronous. Restore environment before any source read.
-        keys = set(("GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE "
-                    "GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES "
-                    "GIT_NAMESPACE GIT_SHALLOW_FILE GIT_GRAFT_FILE "
-                    "GIT_REPLACE_REF_BASE GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM "
-                    "GIT_CONFIG GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT").split())
-        saved = {k: os.environ.pop(k) for k in keys if k in os.environ}
-        os.environ.update(GIT_DIR=self.repos[source], GIT_CONFIG_GLOBAL=os.devnull,
-                          GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="0")
-        try:
+        with _git_environment(GIT_DIR=self.repos[source], GIT_CONFIG_GLOBAL=os.devnull,
+                              GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="0",
+                              GIT_CONFIG_SYSTEM=None, GIT_CONFIG_PARAMETERS=None):
             yield source
-        finally:
-            for key in keys:
-                os.environ.pop(key, None)
-            os.environ.update(saved)
 
     def check(self, seed, repo, raw, remote):
         with self.repo(repo) as scratch:
@@ -149,8 +155,7 @@ def _continuation(plan, state, args, scratch):
     seed["base"] = base
     new = copy.deepcopy(old)
     new.update(id=args.new_id, seed=seed, description="Continuation of " + args.unit,
-               # Decode bytes directly: text-mode universal newlines would
-               # silently rewrite CRLF. JSON prompts are UTF-8 strings.
+               # Byte decoding preserves CRLF in UTF-8 prompts.
                prompt=Path(args.prompt_file).read_bytes().decode("utf-8"))
     return new
 
@@ -193,7 +198,7 @@ def _append(path, before, plan, mode):
 def continue_plan(args, validate):
     try:
         path = Path(args.plan).resolve()
-        with _plan_file(path, args.write) as stream:
+        with _git_environment(), _plan_file(path, args.write) as stream:
             before = stream.read()
             plan = json.loads(before)
             state_dir, _, _ = CP.resolve_paths(args.state_dir, plan=plan)
