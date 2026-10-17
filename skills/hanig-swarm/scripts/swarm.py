@@ -5011,10 +5011,9 @@ def main():
     m.set_defaults(fn=cmd_merge)
 
     sf = sub.add_parser("seq-floor", help="record an evidence-based tracker sequence floor")
-    sf.add_argument("--state-dir", required=True)
     sf.add_argument("--floor", type=int, required=True)
-    sf.add_argument("--approver", required=True)
-    sf.add_argument("--reason", required=True)
+    for option in ("--state-dir", "--approver", "--reason"):
+        sf.add_argument(option, required=True)
     sf.set_defaults(fn=cmd_seq_floor)
 
     o = sub.add_parser("outbox", help="tracker intents, and what landed")
