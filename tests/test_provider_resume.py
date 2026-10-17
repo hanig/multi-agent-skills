@@ -1,4 +1,4 @@
-"""Real swarm/unit CLIs with injected Paseo, clock and SIGKILL boundaries."""
+"""CLI provider-resume regressions with injected Paseo, time and SIGKILL."""
 import ast
 import contextlib
 import copy
@@ -358,6 +358,10 @@ class ProviderResumeTests(Checks):
             h.ready()
             h.cli()
             self.eq((h.tmp / "observations").read_text(), "2")
+            state = S.load_state(h.sd)
+            state["units"]["code"]["attempt_dir"] = None
+            S.save_state(h.sd, state)
+            h.cli("status")
 
 
 class ProviderResumeValidationTests(Checks):

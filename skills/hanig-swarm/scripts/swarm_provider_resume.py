@@ -16,11 +16,11 @@ RETRYABLE_PROVIDER_MESSAGES = (
     "502", "503", "504", "temporarily unavailable",
 )
 RESUME_PROMPT = (
-    "Provider error interrupted you. Continue in the SAME attempt/worktree; "
+    "Provider error: continue in the SAME attempt/worktree; "
     "committed/pushed work is intact. Preserve uncommitted work, the current "
     "review round number, dispositions and interrupted reservations/results. "
     "Resume is NOT a review round. Never reset the ledger, replay the seed or "
-    "make a new attempt. Keep the original completion protocol."
+    "start another attempt. Keep the completion protocol."
 )
 
 
@@ -29,7 +29,7 @@ def _utc(now):
 
 
 def _save(state_dir, state, uid, us):
-    # Retire the stale failure seal while waiting/resuming.
+    # Retire the stale failure seal.
     SE._record_receipt_provenance(state, uid, us["attempt_dir"], None)
     SS.save_state(state_dir, state)
 
@@ -103,14 +103,14 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     if problem:
         report.append(f"{uid}: provider resume snapshot failed: {problem}")
         return False
-    # Snapshotting takes time: observe again before sending.
+    # Reobserve after snapshotting.
     if not _eligible(us["job_id"]):
         return False
     entry["snapshot_paths"].append(snapshot["snapshot_path"])
     entry["resumes_attempted"] += 1
     entry["next_not_before"] = time.time() + 900
     _save(state_dir, state, uid, us)
-    # Sync the atomic state publication before sending.
+    # Sync before sending.
     with (Path(state_dir) / SS.STATE_FILE).open("rb") as handle:
         os.fsync(handle.fileno())
     descriptor = os.open(str(state_dir), os.O_RDONLY)
@@ -132,7 +132,7 @@ def maybe_resume(state_dir, uid, u, us, report, state):
 
 
 def status(us, u):
-    entry = (us.get("provider_resumes") or {}).get(Path(us["attempt_dir"]).name)
+    entry = (us.get("provider_resumes") or {}).get(Path(us.get("attempt_dir") or "").name)
     if not entry:
         return None
     count = entry["resumes_attempted"]
