@@ -146,6 +146,7 @@ ORCHESTRATE_DECLARATIONS = (
     "review.rounds",
     "adjudication.matrix",
     "adjudication.concurrence",
+    "adjudication.envelope",
     "adjudication.record",
     "adjudication.nonoverridable",
     "adjudication.honesty",
@@ -331,6 +332,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
     "hanig-orchestrate": (
         ("references/authority-adjudication.md",
          "adjudication.concurrence", 1),
+        ("references/authority-adjudication.md", "adjudication.envelope", 1),
         ("references/authority-adjudication.md", "adjudication.matrix", 1),
         ("references/authority-adjudication.md",
          "adjudication.nonoverridable", 1),
@@ -903,6 +905,29 @@ class TestAuthoredSkillShape(unittest.TestCase):
         skill = SKILLS / "hanig-orchestrate"
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
         self.assertEqual(_reference_elaboration_problems(skill), [])
+
+    def test_orchestrate_concurrence_guidance_keeps_the_mandate_exception(self):
+        skill = SKILLS / "hanig-orchestrate"
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(skill)
+        }
+        with self.subTest(reader="adjudication matrix"):
+            self.assertIn(
+                "under the mandate's concurrence rule or its "
+                "supported-envelope exception",
+                declarations["adjudication.matrix"],
+            )
+        reference = (skill / "references" / "authority-adjudication.md")
+        concurrence_lines = [
+            line for line in reference.read_text(encoding="utf-8").splitlines()
+            if line.endswith("<!-- declaration: adjudication.concurrence -->")
+        ]
+        with self.subTest(reader="concurrence reference"):
+            self.assertEqual(len(concurrence_lines), 1)
+            self.assertTrue(concurrence_lines[0].startswith(
+                "When the mandate requires concurrence, "),
+                concurrence_lines[0])
 
     def test_every_declaration_registry_has_a_closed_inventory(self):
         registry_skills = sorted(

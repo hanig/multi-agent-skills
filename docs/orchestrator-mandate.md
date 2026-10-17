@@ -57,6 +57,7 @@ mandate; do not generalise a tool's gate into a standing obligation to consult.
 - Run the review gate, and reproduce any finding before acting on it.
 - Open pull requests from an anchored attempt ref.
 - Merge pull requests that satisfy the adjudication policy below.
+- Defer a reproduced finding outside a task's declared supported envelope, without concurrence, under *Findings outside the supported envelope* below.
 - Record merge receipts, advance the DAG, drain tracker intents.
 - File, update and close issues in this project.
 - Spend on review and committee models.
@@ -116,7 +117,7 @@ it is not a pass.
 A confirmed finding may be dispositioned nonblocking only when **the
 orchestrator and GPT-Sol (the `sol` reviewer in `reviewers.json`) agree that
 it is not a deal breaker**. If they disagree, the change goes through another
-review cycle rather than merging.
+review cycle rather than merging. The one exception is *Findings outside the supported envelope*, below.
 
 Two things keep this honest rather than ceremonial. Sol must be asked to
 assess the finding and its impact, never asked to ratify a conclusion the
@@ -157,6 +158,22 @@ later decisions. Failure of a required check on the actual candidate merge.
 candidate becomes eligible *after recorded adjudication*, and the record says
 so. An irrelevant defect may be deferred; a false delivered claim must be
 corrected or explicitly withdrawn, never silently endorsed.
+
+### Findings outside the supported envelope
+
+Every dispatched code task declares its supported envelope and accepted limits. Define them through readers and consequences, including ordinary environmental inputs, persisted state, interruption, restart and documented recovery. An input is not outside the envelope merely because the coordinator does not produce it. The review panel receives this declaration and may refute its boundaries.
+
+The concurrence rule has one narrow exception. An orchestrator that did not author the affected design or implementation may defer a reproduced finding without concurrence when evidence establishes an unsupported trigger, bounded consequences and no violation of a never-overridable requirement. Otherwise concurrence remains required. Round number and class name confer no exemption.
+
+Refusal alone is insufficient. Evidence must establish bounded termination or safe stopping, an actionable diagnosis reaching the responsible operator, preservation of work and authority, and no indefinite obstruction of unrelated work. Recovery must be written so the operator can follow it, with prerequisites and a recognizable successful result. Demonstrate recovery when it is non-obvious or touches evidence, authority or uncertain external effects. Existing demonstrations may cover equivalent cases. Uncertain bounds block deferral.
+
+The orchestrator may narrow a discretionary requirement it introduced, recording the original, replacement, provenance and reason before the next review round. Writing a requirement does not confer authority over an obligation inherited from the owner, committee, mandate or downstream contract. Changing such an obligation requires its establishing authority. This permission does not authorize weakening a test, guard or assertion to obtain a pass.
+
+Keep one canonical ledger in `deferred-edge-cases.md`, linked from the issue. Record the original verdict, tested revision, reproduction, five nonblocking answers, consequence bounds, recovery instructions and any demonstration, named maintainer and reassessment triggers. Reviewers receive applicable entries and scope changes without instructions to suppress findings. Reuse a disposition only when its mechanism and consequences fit the recorded bounds.
+
+False delivered claims must be corrected or withdrawn. Eligibility after adjudication is not `REVIEW_PASS`. All never-overridable classes remain binding, including scientific correctness, evidence integrity, authority, isolation, authorized actions, required outputs and criteria, shared guards and candidate checks. Preserve independent review, blocked work and mutation checks for fixes.
+
+Check applicable entries before dispatch. Actual occurrence, changed assumptions or failed recovery requires reassessment before affected work resumes. Release review checks stale ownership and bounds. After three substantive rounds, use the existing committee rule; attempts, retries and scope changes do not reset review history.
 
 ## How the orchestrator runs
 
