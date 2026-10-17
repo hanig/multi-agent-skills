@@ -55,6 +55,10 @@ AUTHORITY_KEYS = set(_W.AUTHORITY_KEYS)
 # Functions permitted to name an authority key, each with the reason. A
 # function absent from here may not touch one at all.
 ALLOWED = {
+    ("swarm_continue.py", "_continuation"):
+        "every value that decides the seed comes from the plan, coordinator "
+        "state, or a live Git read; never evidence.md, receipts or any "
+        "agent-writable file",
     ("merge_unit.py", "authority"):
         "reads repo and repository_remote from coordinator-state launch "
         "anchors to build the receipt binding, never from worker files",

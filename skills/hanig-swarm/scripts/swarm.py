@@ -71,6 +71,7 @@ import swarm_code_protocol as SCP
 import swarm_code_launch as SCL
 import swarm_workspaces as SW
 import swarm_dispatch as SD
+import swarm_continue as SC
 from swarm_dispatch import (
     _allocate, _dep_env, _isolation_submission, _record_isolation_facts,
     _clear_isolation_marker, _slurm_exit_trap, _bind,
@@ -3462,11 +3463,17 @@ def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False,
     return state, root
 
 
-def cmd_validate(args):
+def cmd_continue(args):
+    args.check_seeds = True
+    return SC.continue_plan(args, lambda plan: cmd_validate(args, plan))
+
+
+def cmd_validate(args, plan=None):
     SR.apply_agent_resolution(args.plan)
-    plan, err = U.read_json(args.plan)
-    if err:
-        sys.exit(f"error: no readable plan at {args.plan}: {err}")
+    if plan is None:
+        plan, err = U.read_json(args.plan)
+        if err:
+            sys.exit(f"error: no readable plan at {args.plan}: {err}")
     explicit = getattr(args, "survey", None)
     if explicit:
         # NAMED, so unreadable is an error rather than a shrug. Degrading a
@@ -4872,6 +4879,17 @@ def main():
                         "there those cluster facts are UNKNOWN and nothing "
                         "is refused on them.")
     v.set_defaults(fn=cmd_validate)
+
+    c = sub.add_parser("continue", help="derive a fresh code unit from an attempt")
+    c.add_argument("plan")
+    c.add_argument("--state-dir", required=True)
+    c.add_argument("--unit", required=True)
+    c.add_argument("--new-id", required=True)
+    c.add_argument("--prompt-file", required=True)
+    c.add_argument("--head-ref", help="exact remote refs/heads/... override")
+    c.add_argument("--write", action="store_true",
+                   help="atomically append the validated unit to the plan")
+    c.set_defaults(fn=cmd_continue)
 
     r = sub.add_parser("run", help="dispatch what is ready, then exit")
     common(r)
