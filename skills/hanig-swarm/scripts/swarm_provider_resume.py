@@ -101,6 +101,8 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         return False
     if now < entry["next_not_before"]:
         _save(state_dir, state, uid, us)
+        if SS._deadline_exceeded(u, us, state, uid):
+            return False
         report.append(f"{uid}: waiting for backoff; provider error observed "
                       f"{entry['fingerprint']['observed_at']}")
         return True

@@ -75,7 +75,7 @@ def interrupted_save(directory, state):
   if charged and cfg.get("kill") == "before_charge":
     os.kill(os.getpid(), signal.SIGKILL)
   save(directory, state)
-  if charged and cfg.pop("delay_charge", False):
+  if (charged and cfg.pop("delay_charge", False)) or (entry and cfg.pop("delay_wait", False)):
     cfg["now"] += 30
     (root / "fake.json").write_text(json.dumps(cfg))
   if charged and cfg.get("kill") == "after_charge":
@@ -253,15 +253,18 @@ class ProviderResumeTests(Checks):
       h.sent(2)
 
   def test_deadline(self):
-    for deadline in (300, 315):
-      with self.subTest(deadline=deadline), scenario(persistent=True) as h:
+    for deadline, wait in ((300, False), (315, False), (300, True)):
+      with self.subTest(deadline=deadline, wait=wait), scenario(persistent=True) as h:
         h.unit["deadline_s"] = deadline
         h.change_plan()
         state = S.load_state(h.sd)
         state["units"]["code"]["allocated_at"] = 1000
         S.U.write_json(h.sd / S.STATE_FILE, state)
-        h.ready()
-        h.cli(now=1300, delay_charge=True)
+        if wait:
+          h.cli(now=1290, delay_wait=True)
+        else:
+          h.ready()
+          h.cli(now=1300, delay_charge=True)
         h.failed()
 
   def test_refused_observations(self):
