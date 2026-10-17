@@ -383,6 +383,8 @@ def _read_sequence(state_dir):
     try:
         record = json.loads(path.read_text(), object_pairs_hook=_unique_pairs)
     except FileNotFoundError:
+        if path.is_symlink():
+            raise OutboxError("unreadable counter %s: dangling symlink" % path)
         return None
     except (OSError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         raise OutboxError("unreadable counter %s: %s" % (path, exc))

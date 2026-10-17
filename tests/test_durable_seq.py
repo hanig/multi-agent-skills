@@ -110,6 +110,29 @@ class TestDurableSequence(DrainCase):
     def test_invalid_utf8_middle(self):
         self.check_malformed(b'\xff')
 
+    def test_dangling_counter_requires_floor(self):
+        self.intent(key='old', seq=5, project='project')
+        missing = self.state / 'missing-counter'
+        self.seq.symlink_to(missing.name)
+        before = self.box.read_bytes()
+        result = self.advance('FAILED')
+        self.assertIn('unreadable counter', result[2], self.intents())
+        self.assertIn(str(self.seq), result[2])
+        self.assertIn('swarm.py seq-floor', result[2])
+        self.assertTrue(self.seq.is_symlink())
+        self.assertEqual(SO.os.readlink(self.seq), missing.name)
+        self.assertEqual(self.box.read_bytes(), before)
+        self.assertFalse(missing.exists())
+        self.assertEqual(self.floor(20)[0], 0)
+        self.assertFalse(self.seq.is_symlink())
+        self.assertIs(self.counter()['replaced_malformed_counter'], True)
+        self.assert_water(20)
+        self.assertFalse(missing.exists())
+        self.advance('FAILED')
+        self.assertEqual(self.intents()[-1]['seq'], 21)
+        self.advance('HELD')
+        self.assert_water(22)
+
     def test_malformed_middle(self):
         self.check_malformed(b'{"key":"interrupted","seq":')
 
