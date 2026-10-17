@@ -189,6 +189,14 @@ class ProviderResumeTests(unittest.TestCase):
         self.assertEqual(self.us["state"], "FAILED")
         self.assertNotIn("provider_resumes", self.us)
 
+    def test_missing_agent_with_pending_resume(self):
+        self.advance()
+        with mock.patch.object(P, "_observation", return_value=(None, "Agent not found: id")):
+            self.advance()
+        self.assertEqual(self.us["state"], "FAILED")
+        self.assertEqual(self.sends, [])
+        self.assertFalse(self.workspace.exists())
+
     def test_unknown_error_never_resumes(self):
         self.message = "invalid model configuration"
         self.advance()
@@ -242,6 +250,16 @@ class ProviderResumeTests(unittest.TestCase):
         self.advance()
         self.assertEqual(len(self.us["provider_resumes"]), 1)
         self.assertEqual(len(self.sends), 1)
+
+    def test_unsent_pending_idle_after_restart(self):
+        self.advance()
+        self.reload()
+        self.agent_status = "idle"
+        self.clock += 300
+        self.advance()
+        self.assertEqual(len(self.sends), 1)
+        self.assertEqual(len(self.us["provider_resumes"]), 1)
+        self.assertEqual(self.us["provider_resumes"][0]["observed_epoch"], 1000)
 
     def test_crash_after_send_reconciles_running_agent(self):
         self.advance()
