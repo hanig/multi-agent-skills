@@ -186,9 +186,7 @@ A unit may not be its own canary: the work would already have been dispatched.
 
 **A unit is the retry boundary.** A retry is a fresh, empty attempt and redoes
 the whole unit. Size by maximum unrecoverable work: absent a human choice, use
-one independently executable shard per unit. `max_attempts` defaults to 1.
-
-Provider resume sends are capped at `max` per attempt with delivery unconfirmed; crashes around sends can lose resumes, and persistent eligible errors consume budget.
+one independently executable shard per unit. `max_attempts` defaults to 1. Provider resumes send at most `max` per attempt without delivery confirmation; crashes may lose resumes, and persistent eligible errors spend budget.
 
 A checkpoint permits larger units only when it survives the failed attempt, is
 made available to the new attempt, has an atomic completion marker, is
