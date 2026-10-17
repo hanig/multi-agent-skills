@@ -1,4 +1,4 @@
-"""Bounded provider resumes, without judging."""
+"""Bounded provider resumes."""
 import os
 import time
 from pathlib import Path
