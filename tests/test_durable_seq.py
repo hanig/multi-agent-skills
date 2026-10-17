@@ -1,4 +1,4 @@
-"""Durable allocation through the coordinator CLI and the offline drain fixture."""
+"""Durable sequences through the CLI and fake drain."""
 import contextlib
 import io
 import json
@@ -21,9 +21,9 @@ SWARM = Path(S.__file__)
 class TestDurableSequence(DrainCase):
     def setUp(self):
         super().setUp()
-        self.outbox = self.state / SO.OUTBOX
-        self.seqfile = self.state / SO.OUTBOX_SEQ
-        self.receipt_file = self.state / SO.RECEIPTS
+        self.box = self.state / SO.OUTBOX
+        self.seq = self.state / SO.OUTBOX_SEQ
+        self.acks = self.state / SO.RECEIPTS
         self.plan.write_text(json.dumps({'name': 'project', 'units': [
             {'id': 'u', 'kind': 'slurm', 'runtime': 'none', 'command': 'true',
              'outputs': ['out'], 'write_scopes': ['u/'], 'tracker': 'ARC-1'}]}))
@@ -36,10 +36,9 @@ class TestDurableSequence(DrainCase):
                 S.main()
         return done.exception.code, out.getvalue(), err.getvalue()
 
-    def floor_args(self, value, **kwargs):
-        return ['seq-floor', '--state-dir', str(kwargs.get('directory', self.state)),
-                '--floor', str(value), '--approver', kwargs.get('approver', 'operator'),
-                '--reason', kwargs.get('reason', 'highest drained trailer')]
+    def floor_args(self, n, directory=None, approver='operator', reason='drained trailer'):
+        return ['seq-floor', '--state-dir', str(directory or self.state),
+                '--floor', str(n), '--approver', approver, '--reason', reason]
 
     def floor(self, value, **kwargs):
         return self.swarm_cli(*self.floor_args(value, **kwargs))
@@ -48,16 +47,15 @@ class TestDurableSequence(DrainCase):
         return SO.read_outbox(self.state)
 
     def counter(self):
-        return json.loads(self.seqfile.read_text())
+        return json.loads(self.seq.read_text())
 
-    def high_water(self):
-        return self.counter()['high_water']
+    def assert_water(self, n):
+        self.assertEqual(self.counter()['high_water'], n)
 
     def drain_ok(self):
         self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
 
     def advance(self, unit_state):
-        # CLI acquires the lease; max-new=0 prevents dispatch.
         (self.state / SS.STATE_FILE).write_text(json.dumps({
             'schema_version': 1, 'units': {'u': {
                 'state': unit_state, 'attempt_dir': None, 'attempts': [],
@@ -71,14 +69,18 @@ class TestDurableSequence(DrainCase):
     def emit(self, uid='new'):
         return SO.emit_intent(self.state, 'project', uid, 'SUBMITTED', {})
 
-    def test_outbox_loss_drain_order(self):
+    def assert_blocked(self):
+        self.assertIsNone(self.emit())
+        self.assertFalse(self.seq.exists())
+
+    def test_loss_order(self):
         self.intent(key='seed', seq=6, at=AT)
         self.advance('SUBMITTED')
         old = self.intents()[-1]
         self.assertEqual(old['seq'], 7)
         self.drain_ok()
         self.assertEqual(self.receipts()[0]['key'], old['key'])
-        self.outbox.unlink()
+        self.box.unlink()
         self.advance('FAILED')
         new = self.intents()[0]
         self.assertEqual(new['at'], old['at'])
@@ -89,29 +91,29 @@ class TestDurableSequence(DrainCase):
         self.assertEqual(self.fake.issues['1']['state']['type'], 'unstarted')
         self.assertEqual(len(self.writes('IntentCommentCreate')), 3)
 
-    def test_complete_history_migration(self):
+    def test_migration(self):
         old = self.intent(seq=4)
         self.drain_ok()
-        before = self.outbox.read_bytes()
+        before = self.box.read_bytes()
         self.assertIsNotNone(self.emit())
         self.assertEqual(self.intents()[-1]['seq'], 5)
-        self.assertEqual(self.high_water(), 5)
-        self.assertTrue(self.outbox.read_bytes().startswith(before))
+        self.assert_water(5)
+        self.assertTrue(self.box.read_bytes().startswith(before))
         self.assertEqual(self.receipts()[0]['key'], old['key'])
 
-    def test_incomplete_history_requires_floor(self):
+    def test_missing_history(self):
         for missing in (True, False):
             with self.subTest(missing=missing):
                 self.fake.comments.clear()
                 self.intent(key='drained', seq=7)
                 self.drain_ok()
-                path = self.outbox
+                path = self.box
                 if missing:
                     path.unlink()
                 else:
                     path.write_text(json.dumps({'key': 'other', 'seq': 4}) + '\n')
                 before = path.read_bytes() if path.exists() else None
-                receipts = self.receipt_file.read_bytes()
+                receipts = self.acks.read_bytes()
                 errors = io.StringIO()
                 with contextlib.redirect_stderr(errors):
                     self.assertIsNone(self.emit())
@@ -119,8 +121,8 @@ class TestDurableSequence(DrainCase):
                 self.assertIn(str(self.state), errors.getvalue())
                 self.assertIn('swarm.py seq-floor', errors.getvalue())
                 self.assertEqual(path.read_bytes() if path.exists() else None, before)
-                self.assertEqual(self.receipt_file.read_bytes(), receipts)
-                self.assertFalse(self.seqfile.exists())
+                self.assertEqual(self.acks.read_bytes(), receipts)
+                self.assertFalse(self.seq.exists())
                 result = self.swarm_cli('status', str(self.plan), '--state-dir', str(self.state), '--json')
                 self.assertEqual(result[0], 0, result)
                 self.assertEqual(self.floor(20)[0], 0)
@@ -129,13 +131,13 @@ class TestDurableSequence(DrainCase):
                 for filename in (SO.OUTBOX, SO.OUTBOX_SEQ, SO.RECEIPTS):
                     (self.state / filename).unlink()
 
-    def test_floor_and_record(self):
+    def test_floor(self):
         self.assertEqual(self.floor(20)[0], 0)
         record = self.counter()
         self.assertEqual(record['approver'], 'operator')
-        self.assertEqual(record['reason'], 'highest drained trailer')
+        self.assertEqual(record['reason'], 'drained trailer')
         self.assertRegex(record['at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
-        path = self.seqfile
+        path = self.seq
         before = path.read_bytes()
         for value in (19, 20):
             result = self.floor(value)
@@ -145,9 +147,9 @@ class TestDurableSequence(DrainCase):
         self.assertIsNotNone(self.emit())
         self.assertEqual(self.counter(), dict(record, high_water=21))
         self.assertEqual(self.floor(22)[0], 0)
-        self.assertEqual(self.high_water(), 22)
+        self.assert_water(22)
 
-    def test_counter_fsync_crash(self):
+    def test_crash(self):
         self.assertEqual(self.floor(4)[0], 0)
         script = """
 import os, sys
@@ -167,20 +169,20 @@ SO.emit_intent(sys.argv[2], 'project', 'crashed', 'SUBMITTED', {})
         result = subprocess.run([sys.executable, '-c', script, str(SWARM.parent), str(self.state)],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 99, result.stderr)
-        self.assertEqual(self.high_water(), 5)
+        self.assert_water(5)
         self.assertEqual(self.intents(), [])
         self.advance('SUBMITTED')
         self.assertEqual(self.intents()[0]['seq'], 6)
-        self.assertEqual(self.high_water(), 6)
+        self.assert_water(6)
 
-    def test_append_failure_and_dedup(self):
+    def test_append_failure(self):
         with mock.patch.object(SO.SJ, '_fsync_append', side_effect=OSError('append failed')):
             self.assertIsNone(self.emit())
-        self.assertEqual(self.high_water(), 1)
+        self.assert_water(1)
         self.assertIsNotNone(self.emit())
         self.assertEqual(self.intents()[0]['seq'], 2)
         self.assertIsNone(self.emit())
-        self.assertEqual(self.high_water(), 2)
+        self.assert_water(2)
 
     def comments(self):
         return [LS.genuine_comment(c, 'workspace', 'project', '1')
@@ -189,7 +191,7 @@ SO.emit_intent(sys.argv[2], 'project', 'crashed', 'SUBMITTED', {})
     def check_remigration(self, cut):
         self.advance('SUBMITTED')
         self.drain_ok()
-        before = self.outbox.read_bytes()
+        before = self.box.read_bytes()
 
         def interrupted(path, record):
             path.write_bytes(before + json.dumps(record).encode()[:cut])
@@ -197,10 +199,10 @@ SO.emit_intent(sys.argv[2], 'project', 'crashed', 'SUBMITTED', {})
 
         with mock.patch.object(SO.SJ, '_fsync_append', interrupted):
             self.advance('FAILED')
-        self.assertEqual(self.high_water(), 2)
+        self.assert_water(2)
         seqs = [row['seq'] for row in self.intents()]
         self.assertEqual(seqs, [1, 2] if cut is None else [1])
-        self.seqfile.unlink()
+        self.seq.unlink()
         self.advance('HELD')
         rows = self.intents()
         new = rows[-1]['seq']
@@ -211,17 +213,17 @@ SO.emit_intent(sys.argv[2], 'project', 'crashed', 'SUBMITTED', {})
         self.drain_ok()
         self.assertEqual(len(self.fake.comments), len(rows))
 
-    def test_unpublished_reservation_reuse(self):
+    def test_unpublished_reuse(self):
         self.check_remigration(0)
 
-    def test_incomplete_tail_discarded(self):
+    def test_incomplete_tail(self):
         self.check_remigration(-1)
 
-    def test_complete_tail_remigration(self):
+    def test_complete_tail(self):
         self.check_remigration(None)
 
-    def test_corrupt_counter_preserved(self):
-        path = self.seqfile
+    def test_corrupt_counter(self):
+        path = self.seq
         for raw in ('{', '[]', '{"schema_version":true,"high_water":3}',
                     '{"schema_version":1,"high_water":true}',
                     '{"schema_version":1,"high_water":-1}'):
@@ -229,66 +231,72 @@ SO.emit_intent(sys.argv[2], 'project', 'crashed', 'SUBMITTED', {})
                 path.write_text(raw)
                 self.assertIsNone(self.emit())
                 self.assertEqual(path.read_text(), raw)
-                self.assertFalse(self.outbox.exists())
+                self.assertFalse(self.box.exists())
                 self.assertNotEqual(self.floor(20)[0], 0)
 
-    def test_corruption_recovery_and_dedup(self):
-        path = self.outbox
-        for corrupt in (b'garbage\n', b'{"key":"bad","seq":0}\n', b'[]\n', b'\xff\n'):
-            with self.subTest(corrupt=corrupt):
-                old = SO.outbox_key('project', 'old', 'SUBMITTED', None)
-                before = corrupt + (json.dumps({'key': old, 'seq': 4}) + '\n').encode()
+    def test_corruption(self):
+        path = self.box
+        old = SO.outbox_key('project', 'old', 'SUBMITTED', None)
+        row = (json.dumps({'key': old, 'seq': 4}) + '\n').encode()
+        tails = (b"[" * 10000 + b"0" + b"]" * 10000, b"1" * 5000)
+        for corrupt in (b'garbage\n', b'{"key":"bad","seq":0}\n', b'[]\n',
+                        b'\xff\n') + tuple(t + b"\n" for t in tails):
+            with self.subTest(bytes=len(corrupt)):
+                before = corrupt + row
+                tail = corrupt[:-1] if corrupt[:-1] in tails else b''
+                if tail:
+                    path.write_bytes(row + tail)
+                    self.assertIsNone(self.emit())
                 path.write_bytes(before)
                 self.assertIsNone(self.emit())
                 self.assertEqual(self.floor(20)[0], 0)
                 self.assertIsNone(self.emit('old'))
-                self.assertEqual(self.high_water(), 20)
+                self.assert_water(20)
+                before += tail
+                path.write_bytes(before)
                 self.assertIsNotNone(self.emit())
                 after = path.read_bytes()
                 self.assertTrue(after.startswith(before))
                 self.assertEqual(json.loads(after[len(before):])['seq'], 21)
-                self.seqfile.unlink()
+                self.seq.unlink()
 
-    def test_bad_history_refused(self):
-        path = self.outbox
+    def test_bad_history(self):
+        path = self.box
         path.write_text('{"key":"old","seq":4}\n')
-        receipt = self.receipt_file
+        receipt = self.acks
         for key in ({'bad': 'shape'}, ['bad']):
             receipt.write_text(json.dumps({'key': key, 'ref': 'fixture', 'attested': True}) + '\n')
-            self.assertIsNone(self.emit())
-            self.assertFalse(self.seqfile.exists())
+            self.assert_blocked()
         receipt.unlink()
         for raw in ('{}\n', '{"key":"bad","seq":true}\n',
                     'garbage\n', '{"key":"old","seq":4}\ngarbage\n'):
             with self.subTest(raw=raw):
                 path.write_text(raw)
-                self.assertIsNone(self.emit())
+                self.assert_blocked()
                 self.assertEqual(path.read_text(), raw)
-                self.assertFalse(self.seqfile.exists())
         path.unlink()
-        self.receipt_file.touch()
-        self.assertIsNone(self.emit())
-        self.assertFalse(self.seqfile.exists())
+        self.acks.touch()
+        self.assert_blocked()
 
-    def test_floor_attribution_and_path(self):
+    def test_floor_inputs(self):
         for kwargs in ({'approver': '  '}, {'reason': '  '}):
             self.assertNotEqual(self.floor(20, **kwargs)[0], 0)
-            self.assertFalse(self.seqfile.exists())
+            self.assertFalse(self.seq.exists())
         self.assertNotEqual(self.floor(-1)[0], 0)
         inside = SWARM.parents[3] / 'forbidden-seq-state'
         self.assertFalse(inside.exists())
-        result = self.swarm_cli(*self.floor_args(20, directory=inside))
+        result = self.floor(20, directory=inside)
         self.assertNotEqual(result[0], 0)
         self.assertFalse(inside.exists())
 
-    def test_floor_obeys_coordinator_lease(self):
+    def test_floor_lease(self):
         self.assertEqual(self.floor(20)[0], 0)
         self.assertTrue(SS.acquire_lease(self.state)[0])
         try:
             result = subprocess.run([sys.executable, str(SWARM)] + self.floor_args(21), capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('lock', result.stderr)
-            self.assertEqual(self.high_water(), 20)
+            self.assert_water(20)
         finally:
             SS.release_lease(self.state)
 
