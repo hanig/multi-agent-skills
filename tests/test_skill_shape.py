@@ -146,6 +146,7 @@ ORCHESTRATE_DECLARATIONS = (
     "review.rounds",
     "adjudication.matrix",
     "adjudication.concurrence",
+    "adjudication.envelope",
     "adjudication.record",
     "adjudication.nonoverridable",
     "adjudication.honesty",
@@ -331,6 +332,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
     "hanig-orchestrate": (
         ("references/authority-adjudication.md",
          "adjudication.concurrence", 1),
+        ("references/authority-adjudication.md", "adjudication.envelope", 1),
         ("references/authority-adjudication.md", "adjudication.matrix", 1),
         ("references/authority-adjudication.md",
          "adjudication.nonoverridable", 1),

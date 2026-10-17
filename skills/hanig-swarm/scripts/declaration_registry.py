@@ -95,7 +95,7 @@ CLOSED_DECLARATIONS = {
         evidence.checkable evidence.authority review.panel-source
         review.author-exclusion review.claims review.honesty review.cost
         review.effort review.rounds adjudication.matrix
-        adjudication.concurrence adjudication.record
+        adjudication.concurrence adjudication.envelope adjudication.record
         adjudication.nonoverridable adjudication.honesty watch.facts
         watch.source watch.proof loop.quiescence loop.advance loop.yield
         preservation.before-cleanup dispatch.mechanics merge.requirements
