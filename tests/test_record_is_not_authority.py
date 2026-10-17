@@ -55,6 +55,9 @@ AUTHORITY_KEYS = set(_W.AUTHORITY_KEYS)
 # Functions permitted to name an authority key, each with the reason. A
 # function absent from here may not touch one at all.
 ALLOWED = {
+    ("swarm_provider_resume.py", "_preserve"):
+        "reads only coordinator-state launch facts to bind the worktree and "
+        "restore-checked snapshot before resume; no worker file is authority",
     ("swarm_continue.py", "_continuation"):
         "every value that decides the seed comes from the plan, coordinator "
         "state, or a live Git read; never evidence.md, receipts or any "

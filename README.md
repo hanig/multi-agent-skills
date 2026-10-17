@@ -994,7 +994,10 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `runtime` | what this executes in, and what checks it (see below) |
 | `requires_verification` | claims an authorized verifier must establish before this closes |
 | `continuation` | `{"max": N}`: bounded nudges to a code agent that settled without producing |
+| `provider_resume` | `{"max": N}`: code, int 0..3, default off; same attempt; 5 minute initial / 15 minute later backoff |
 | `pool`, `gpu_hours`, `env` | declared resource facts |
+
+Provider resumes send at most `max` per attempt without delivery confirmation; crashes may lose resumes, and persistent eligible errors spend budget.
 
 Every `code` unit runs in a coordinator-created linked worktree at its anchored
 base; Paseo receives that existing path and never owns its cleanup. Before the
