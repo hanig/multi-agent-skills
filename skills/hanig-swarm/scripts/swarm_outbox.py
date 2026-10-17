@@ -17,6 +17,8 @@ from pathlib import Path
 
 import swarm_evidence as SE
 import swarm_journal as SJ
+import swarm_state as SS
+import unit as U
 from swarm_types import OutboxError
 
 
@@ -26,7 +28,7 @@ RECONCILIATION_SCHEMA_VERSION = 1
 INTENT_CONNECTOR_CAPABILITY = (
     "tracker.intent.idempotent-mutation-readback.v1")
 INTENT_OPERATIONS = frozenset(
-    ("start", "close", "reopen", "note", "block", "open_pr"))
+    ("start", "close", "cancel", "reopen", "note", "block", "open_pr"))
 OPERATION_ACCEPTED = "operation_accepted"
 ASYNC_COMPLETED = "asynchronously_completed"
 CONFIRMED_BY_READBACK = "confirmed_by_readback"
@@ -293,21 +295,41 @@ def reconcile_observation(intent, observation):
     }
 
 
+def _has_attested_merge_receipt(uid, receipt):
+    """Receipt shape check; admission also requires coordinator binding below."""
+    return (isinstance(receipt, dict)
+            and receipt.get("unit") == uid
+            and receipt.get("merged") is True
+            and receipt.get("attested") is True
+            and SE._merge_shape_problem(receipt) is None)
+
+
 def _has_bound_merge_evidence(uid, us, evidence):
-    """Does *evidence* carry the merge already admitted for this attempt?"""
+    """Sole receipt admission for supersede, close emission and collection."""
     receipt = evidence.get("receipt") if isinstance(evidence, dict) else None
-    if not isinstance(receipt, dict) or us.get("merge_receipt") != receipt:
+    if (not isinstance(us, dict) or not _has_attested_merge_receipt(uid, receipt)
+            or us.get("merge_receipt") != receipt):
         return False
     attempt = Path(us.get("attempt_dir") or "").name
     produced = (us.get("attempt_produced_heads") or {}).get(attempt)
     return (bool(produced)
-            and receipt.get("unit") == uid
             and receipt.get("head") == produced
             and receipt.get("merged_as") == us.get("merged_as")
-            and receipt.get("pr") == us.get("merge_pr")
-            and receipt.get("merged") is True
-            and receipt.get("attested") is True
-            and SE._merge_shape_problem(receipt) is None)
+            and receipt.get("pr") == us.get("merge_pr"))
+
+
+def superseded_evidence(us, state_dir):
+    """Recheck the pinned receipt against the successor's coordinator binding."""
+    decision = us.get("terminal_decision") or {}
+    receipt = decision.get("merge_receipt")
+    successor = decision.get("successor")
+    state, error = U.read_json(Path(state_dir) / SS.STATE_FILE)
+    next_us = ((state or {}).get("units") or {}).get(successor) if not error else None
+    if (us.get("state") != "SUPERSEDED" or decision.get("state") != "SUPERSEDED"
+            or not successor
+            or not _has_bound_merge_evidence(successor, next_us, {"receipt": receipt})):
+        return None
+    return {"successor": successor, "receipt": receipt}
 
 
 def _intent_key(project, uid, unit_state, us, verb, kind, evidence):
@@ -361,6 +383,8 @@ RECEIPT_SCHEMA_VERSION = 2
 TRACKER_EVENTS = {
     "SUBMITTED": ("start", "work started"),
     "DONE": ("close", "the unit's predicate returned DONE"),
+    "ABANDONED": ("cancel", "stopped by an approver"),
+    "SUPERSEDED": ("close", "superseded by a merged successor"),
     "FAILED": ("reopen", "the command failed"),
     "FAILED_EVIDENCE": ("reopen", "no verdict arrived; evidence never landed"),
     "PREEMPTED": ("note", "preempted; a new attempt will be minted"),
@@ -538,12 +562,25 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     if unit_state == "NEEDS_HUMAN" and us.get("reason") == "deadline_exceeded":
         why = "deadline_exceeded"
 
+    decision = us.get("terminal_decision") or {}
+    if unit_state in ("ABANDONED", "SUPERSEDED"):
+        if (decision.get("state") != unit_state
+                or not str(decision.get("approver") or "").strip()
+                or not str(decision.get("reason") or "").strip()):
+            return None
+        why = decision["reason"]
+        if unit_state == "SUPERSEDED":
+            evidence = superseded_evidence(us, state_dir)
+            if evidence is None:
+                return None
+
     # A code predicate reaches READY_FOR_PR, but an admitted merge advances it
     # to DONE. Only the exact merge receipt persisted by that admission may
     # cross this last boundary into a close intent. Keeping the fallback is
     # still belt-and-braces for malformed or legacy DONE state: it may request
     # PR work, but it cannot manufacture a close without merge evidence.
-    if (verb == "close" and closing_evidence_for(kind) == "merged_pr"
+    if (verb == "close" and unit_state != "SUPERSEDED"
+            and closing_evidence_for(kind) == "merged_pr"
             and not _has_bound_merge_evidence(uid, us, evidence)):
         verb = "open_pr"
         why = ("the agent finished and its declared outputs exist, which "
@@ -586,13 +623,15 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         "seq": seq,
         # Named on every intent so a drainer never has to infer which kind of
         # evidence would justify acting on it.
-        "closing_evidence": closing_evidence_for(kind),
+        "closing_evidence": ("merged_pr" if unit_state == "SUPERSEDED"
+                             else closing_evidence_for(kind)),
         "kind": kind,
         "unit_state": unit_state, "why": why,
         # `applied` is deliberately NOT written any more. It was always
         # false, nothing ever set it true, and a permanently false field reads
         # as "this was not filed" when the truth is "this machine does not
         # know". Status is derived from outbox-receipts.jsonl instead.
+        # Decision time stays in state; one emission clock lets seq break ties.
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "job_id": us.get("job_id"), "attempt_dir": us.get("attempt_dir"),
         # A close intent MUST carry the verdict that justifies it. A drain that

@@ -629,6 +629,10 @@ python3 scripts/swarm.py status   plan.json [--json]
 python3 scripts/swarm.py scope-check plan.json --state-dir DIR --unit ID [--head REV] [--json]
 python3 scripts/swarm.py advance  plan.json
 python3 scripts/swarm.py seq-floor --state-dir DIR --floor N --approver NAME --reason TEXT
+python3 scripts/swarm.py abandon plan.json --state-dir DIR --unit ID \
+        --approver NAME --reason TEXT
+python3 scripts/swarm.py supersede plan.json --state-dir DIR --unit ID --by SUCCESSOR \
+        --approver NAME --reason TEXT
 python3 scripts/swarm.py outbox            [--all] [--json]
 python3 scripts/swarm.py outbox \
         --record-receipt KEY --ref ARC-171     # compatibility attestation after confirmation

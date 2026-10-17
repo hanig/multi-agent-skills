@@ -30,6 +30,7 @@ Python 3.8+, stdlib only, login-node safe.
 """
 
 import argparse
+import datetime as dt
 import errno
 import fcntl
 import fnmatch
@@ -223,7 +224,9 @@ from swarm_outbox import (
     require_valid_intent,
     _receipt_admissible,
     reconcile_observation,
+    _has_attested_merge_receipt,
     _has_bound_merge_evidence,
+    superseded_evidence,
     _intent_key,
     _with_intent_envelope,
     INTENT_SCHEMA_VERSION,
@@ -305,7 +308,7 @@ def __getattr__(name):
     # Read state helpers through their owner so patches reach every consumer;
     # the lock owner PID is rebound there after acquisition and fork detection.
     if name in {
-        "acquire_lease", "renew_lease", "release_lease", "load_state",
+        "acquire_lease", "bump_lease_epoch", "renew_lease", "release_lease", "load_state",
         "_LOCK_OWNER_PID",
         "save_state",
         "_unit_state",
@@ -319,7 +322,7 @@ def __getattr__(name):
         "_occupies_live_resources",
         "trusted_launch_facts",
         "trusted_launch_host_anchor",
-        "LIVE_STATES",
+        "LIVE_STATES", "OPERATOR_TERMINAL_STATES",
     }:
         return getattr(SS, name)
     # Routing resolution rebinds defaults. Read through to their owner so
@@ -2061,6 +2064,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # live/interactive attempts plus cleanup failures that remain visible.
     for uid, u in sorted(units.items()):
         us = SS._unit_state(state, uid)
+        if us.get("state") in SS.OPERATOR_TERMINAL_STATES:
+            continue
         current_attempt = (Path(us["attempt_dir"]).name
                            if us.get("attempt_dir") else None)
         current_meta = ((us.get("attempt_workspaces") or {}).get(
@@ -2133,6 +2138,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     deadline_observed_at = advance_observed_at
     for uid, u in sorted(units.items()):
         us = SS._unit_state(state, uid)
+        if us.get("state") in SS.OPERATOR_TERMINAL_STATES:
+            continue
         host_local, host_problem = SS._deadline_host_evaluation(state, uid, us)
         if (u.get("deadline_s") is not None and us.get("attempt_dir")
                 and host_local is not True):
@@ -2150,6 +2157,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # scheduler. Ask before dispatching anything else.
     for uid, u in sorted(units.items()):
         us = SS._unit_state(state, uid)
+        if us.get("state") in SS.OPERATOR_TERMINAL_STATES:
+            continue
         if dry_run or not us["attempt_dir"]:
             continue
         if (u.get("kind") == "code" and us.get("job_id")
@@ -2374,6 +2383,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             SS.save_state(state_dir, state)
             return report, dispatched, state["halted"]
         us = SS._unit_state(state, uid)
+        if us.get("state") in SS.OPERATOR_TERMINAL_STATES:
+            continue
         if not us["attempt_dir"]:
             continue
         attempt = us["attempt_dir"]
@@ -2773,7 +2784,21 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     #     and `acquire_lease` already serialises access to it.
     if not dry_run:
         for uid, u in sorted(units.items()):
-            if not SS._occupies_live_resources(u, SS._unit_state(state, uid)):
+            us = SS._unit_state(state, uid)
+            if (us.get("state") in SS.OPERATOR_TERMINAL_STATES
+                    and us.get("attempt_dir") and SS._occupies_live_resources(u, us)
+                    and (u.get("kind") != "code" or W.attempt_belongs_to_host(
+                        SS.trusted_launch_host_anchor(state, uid, us["attempt_dir"])) is True)):
+                live, why = SP._claim_liveness({
+                    "attempt": Path(us["attempt_dir"]).name,
+                    "kind": u.get("kind"), "job": us.get("job_id")})
+                if live == SP.CLAIM_FREE:
+                    us["terminal_resource_release"] = {
+                        "attempt_dir": us["attempt_dir"], "job_id": us.get("job_id"),
+                        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "basis": why}
+                    SS.save_state(state_dir, state)
+                    report.append(f"{uid}: stopped attempt released resources -- {why}")
+            if not SS._occupies_live_resources(u, us):
                 SP._release_output_claims(u, root, state_dir)
 
     # 2. Budget. Charged on DISPATCH, not on completion: a budget that only
@@ -2785,7 +2810,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     for uid, u in sorted(units.items()):
         us = SS._unit_state(state, uid)
         if us["attempt_dir"] or us["state"] in ("DONE", "FAILED",
-                                                "FAILED_EVIDENCE"):
+                                                "FAILED_EVIDENCE", "ABANDONED",
+                                                "SUPERSEDED"):
             continue
         # A root has no dependency that could clear its persisted hold.
         # Keep a held canary terminal for the ordinary upstream path below.
@@ -2799,7 +2825,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         needs = u.get("needs") or []
         failed_upstream = [d for d in needs
                            if SS._unit_state(state, d)["state"] in
-                           ("FAILED", "HELD", "FAILED_EVIDENCE")]
+                           ("FAILED", "HELD", "FAILED_EVIDENCE",
+                            "ABANDONED", "SUPERSEDED")]
         if failed_upstream:
             SS._set_unit_state(us, "HELD")
             report.append(f"{uid}: held, upstream "
@@ -3018,6 +3045,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             continue
         evidence = None
         kind = (units.get(uid) or {}).get("kind")
+        if now == "SUPERSEDED":
+            evidence = SO.superseded_evidence(us, state_dir)
         if now == "DONE" and us.get("attempt_dir"):
             # The verdict itself, so a drain never closes on a self-report.
             # Attested, or it is a self-report by the other party: an
@@ -3064,7 +3093,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             action = SO.TRACKER_EVENTS.get(now)
             if action:
                 verb = action[0]
-                if (verb == "close"
+                if (verb == "close" and now != "SUPERSEDED"
                         and SO.closing_evidence_for(kind) == "merged_pr"
                         and not SO._has_bound_merge_evidence(
                             uid, us, evidence)):
@@ -3081,8 +3110,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                         f"{uid}: DRY RUN -- would re-emit tracker {verb} "
                         f"intent from durable state {now}")
             continue
-        SO.emit_intent(state_dir, project, uid, now, us, evidence, kind=kind,
-                    tracker=units[uid].get("tracker"))
+        _emit_current_intent(state_dir, project, uid, us, units[uid], evidence)
     return report, dispatched, halted or dispatch_refusal
 
 
@@ -3252,6 +3280,8 @@ def _refresh_code_terminal_watches(state, state_dir, report):
     """Import diagnostics inside cmd_run's lease spanning load through save."""
     changed = False
     for uid, us in state.get("units", {}).items():
+        if us.get("state") in SS.OPERATOR_TERMINAL_STATES:
+            continue
         for attempt, watch in (us.get("code_terminal_watches") or {}).items():
             if not isinstance(watch, dict):
                 continue
@@ -3610,6 +3640,102 @@ def cmd_run(args):
 
 def cmd_advance(args):
     return cmd_run(args)
+
+
+def _emit_current_intent(state_dir, project, uid, us, unit, evidence=None):
+    """Both advancement and operator commands emit from their durable result."""
+    return SO.emit_intent(state_dir, project, uid, us.get("state"), us, evidence,
+                          kind=unit.get("kind"), tracker=unit.get("tracker"))
+
+
+def cmd_stop_unit(args):
+    """Record an approver's terminal disposition; preserve every attempt."""
+    if not args.approver or not args.approver.strip():
+        print("error: a non-blank approver is required", file=sys.stderr)
+        return 4
+    if not args.reason or not args.reason.strip():
+        print("error: a non-blank reason is required", file=sys.stderr)
+        return 4
+    # Disposition needs no dispatcher runtime.
+    plan, error = U.read_json(args.plan)
+    if error or not isinstance(plan, dict) or not isinstance(plan.get("units"), list):
+        print(f"error: no plan with a units list at {args.plan}: {error or 'invalid shape'}", file=sys.stderr)
+        return 4
+    units = {}
+    for unit in plan["units"]:
+        uid = unit.get("id") if isinstance(unit, dict) else None
+        if not isinstance(uid, str) or not uid.strip() or uid in units:
+            print("error: plan units require unique non-blank ids", file=sys.stderr)
+            return 4
+        units[uid] = unit
+    if args.unit not in units:
+        print(f"error: unknown unit {args.unit!r}", file=sys.stderr)
+        return 4
+    successor = getattr(args, "by", None)
+    if args.command == "supersede" and successor not in units:
+        print(f"error: unknown successor unit {successor!r} in this plan", file=sys.stderr)
+        return 4
+    _prepare_command_paths(args, plan=plan)
+    ok, holder = SS.acquire_lease(args.state_dir, bump_epoch=False)
+    if not ok:
+        print(f"error: cannot take this project's lock: {holder}", file=sys.stderr)
+        return 4
+    try:
+        state = SS.load_state(args.state_dir)
+        if not state.get("plan_digest"):
+            print("error: coordinator state is missing plan_digest; ratify the intended plan first", file=sys.stderr)
+            return 4
+        if state["plan_digest"] != SPR.plan_digest(plan):
+            print("error: plan differs from coordinator state; ratify the intended plan first", file=sys.stderr)
+            return 4
+        us = SS._unit_state(state, args.unit)
+        target = "ABANDONED" if args.command == "abandon" else "SUPERSEDED"
+        request = {"state": target, "approver": args.approver,
+                   "reason": args.reason, "successor": successor}
+        decision = us.get("terminal_decision") or {}
+        if us.get("state") in SS.OPERATOR_TERMINAL_STATES:
+            if (us.get("state") != target
+                    or any(decision.get(k) != v for k, v in request.items())):
+                print("error: conflicting terminal decision", file=sys.stderr)
+                return 4
+            # Repair a crash between persistence and append without changing
+            # the decision, its timestamp, or the state epoch.
+        else:
+            if us.get("state") == "DONE":
+                print(f"error: unit {args.unit!r} is DONE", file=sys.stderr)
+                return 4
+            receipt = None
+            if target == "SUPERSEDED":
+                next_us = state.get("units", {}).get(successor) or {}
+                if next_us.get("state") != "DONE":
+                    print(f"error: successor {successor!r} is not DONE", file=sys.stderr)
+                    return 4
+                receipt = next_us.get("merge_receipt")
+                if not SO._has_bound_merge_evidence(successor, next_us, {"receipt": receipt}):
+                    print(f"error: successor {successor!r} has no bound merge receipt", file=sys.stderr)
+                    return 4
+            decision = dict(request, prior_state=us.get("state"),
+                            at=dt.datetime.now(dt.timezone.utc).isoformat(),
+                            retains_live_resources=SS._occupies_live_resources(units[args.unit], us))
+            if receipt is not None:
+                decision["merge_receipt"] = dict(receipt)
+            SS.bump_lease_epoch(args.state_dir)
+            state = SS.load_state(args.state_dir)
+            us = SS._unit_state(state, args.unit)
+            if target == "ABANDONED":
+                SS._set_unit_state(us, "ABANDONED")
+            else:
+                SS._set_unit_state(us, "SUPERSEDED")
+            us["reason"] = args.reason
+            us["terminal_decision"] = decision
+            SS.save_state(args.state_dir, state)
+        _emit_current_intent(args.state_dir, plan.get("name") or "swarm",
+                             args.unit, us, units[args.unit])
+        print(f"{args.unit}: {target} -- {args.reason}" +
+              (f" (successor: {successor})" if successor else ""))
+        return EXIT_OK
+    finally:
+        SS.release_lease(args.state_dir)
 
 
 # --- gated promotion ------------------------------------------------------
@@ -4699,7 +4825,8 @@ def _status_rows(plan, state, state_dir, observed_at=None):
         if st == "HELD":
             held_by = [d for d in (u.get("needs") or [])
                        if (state.get("units", {}).get(d) or {}).get("state")
-                       in ("FAILED", "HELD", "FAILED_EVIDENCE")]
+                       in ("FAILED", "HELD", "FAILED_EVIDENCE",
+                            "ABANDONED", "SUPERSEDED")]
         rows.append({
             "id": uid, "kind": u.get("kind", "?"), "state": st,
             "terminal_watch": (_code_terminal_status(
@@ -4713,6 +4840,7 @@ def _status_rows(plan, state, state_dir, observed_at=None):
             "state_age_s": _elapsed_seconds(
                 observed_at, us.get("state_changed_at")),
             "reason": us.get("reason"),
+            "successor": (us.get("terminal_decision") or {}).get("successor"),
             "deadline_evaluation": deadline_evaluation,
             "deadline_host_local": deadline_host_local,
             "deadline_problem": deadline_problem,
@@ -4817,6 +4945,8 @@ def cmd_status(args):
                     print(f"  {'':{w}}      Scheduled advance remains the fallback.")
             if r["reason"]:
                 print(f"  {'':{w}}    reason: {r['reason']}")
+            if r["successor"]:
+                print(f"  {'':{w}}    successor: {r['successor']}")
             if r["deadline_evaluation"] == "not_evaluable_here":
                 print(f"  {'':{w}}    deadline: NOT EVALUABLE HERE; "
                       f"no escalation -- {r['deadline_problem']}")
@@ -4868,7 +4998,7 @@ def main():
     ap = argparse.ArgumentParser(
         prog="swarm.py", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="command", required=True)
 
     def common(p):
         p.add_argument("plan")
@@ -4948,6 +5078,17 @@ def main():
     tw.add_argument("--agent", required=True)
     tw.set_defaults(fn=cmd_advance, terminal_watch=True, dry_run=False,
                     max_new_dispatches=0)
+
+    for command in ("abandon", "supersede"):
+        stop = sub.add_parser(command, help="record an approver's terminal disposition")
+        stop.add_argument("plan")
+        stop.add_argument("--state-dir", default=None)
+        stop.add_argument("--unit", default=None)
+        stop.add_argument("--approver", default=None)
+        stop.add_argument("--reason", default=None)
+        if command == "supersede":
+            stop.add_argument("--by", default=None, help="DONE successor in this plan")
+        stop.set_defaults(fn=cmd_stop_unit)
 
     pr = sub.add_parser("promote",
                         help="copy a DONE unit's outputs to its declared "
@@ -5072,11 +5213,11 @@ def main():
 __all__ = [name for name in globals() if not name.startswith("_")] + [
     "AGENTS_FILE", "DEFAULT_AGENT_PROVIDER", "DEFAULT_AGENT_THINKING",
     "THINKING_BY_MODEL", "PINNED_AGENT_PROVIDER", "PINNED_THINKING_BY_MODEL",
-    "acquire_lease", "renew_lease", "release_lease", "load_state",
+    "acquire_lease", "bump_lease_epoch", "renew_lease", "release_lease", "load_state",
     "save_state",
     "trusted_launch_facts",
     "trusted_launch_host_anchor",
-    "LIVE_STATES",
+    "LIVE_STATES", "OPERATOR_TERMINAL_STATES",
 ]
 
 

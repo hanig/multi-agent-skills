@@ -20,6 +20,7 @@ LEASE = "lease.json"
 
 # States in which a unit is occupying a slot on the cluster right now.
 LIVE_STATES = ("ALLOCATED", "SUBMITTED", "RUNNING")
+OPERATOR_TERMINAL_STATES = ("ABANDONED", "SUPERSEDED")
 
 
 # Locks this process holds, KEYED BY PROJECT. A single global fd made
@@ -39,7 +40,7 @@ _LOCK_OWNER_PID = None
 LOCK = "lease.lock"
 
 
-def acquire_lease(state_dir):
+def acquire_lease(state_dir, bump_epoch=True):
     """One controller at a time, arbitrated by the OS. Returns (ok, holder).
 
     THE SIXTH VERSION, and the first that does not invent its own mutual
@@ -165,21 +166,38 @@ def acquire_lease(state_dir):
         epoch, err = _read_state_epoch(state_dir)
         if err:
             sys.exit(f"HALTED: {err}")
-        err = U.write_json(Path(state_dir) / STATE_EPOCH_FILE,
-                           {"epoch": epoch + 1})
-        if err:
-            sys.exit(f"HALTED: cannot persist coordinator state epoch: {err}")
-        _LOCK_EPOCHS[key] = (os.getpid(), epoch + 1)
+        _LOCK_EPOCHS[key] = (os.getpid(), epoch)
+        if bump_epoch:
+            bump_lease_epoch(state_dir)
     except BaseException:
         release_lease(state_dir)
         raise
     # Descriptive only. Nothing decides anything from this file; it exists so a
     # human blocked by the lock can see who has it.
+    if not bump_epoch:
+        return True, None  # operator no-op/refusal leaves durable bytes intact
     U.write_json(Path(state_dir) / LEASE,
                  {"owner": os.environ.get("USER", "?"),
                   "host": os.uname().nodename, "pid": os.getpid(),
                   "acquired_at": time.time()})
     return True, None
+
+
+def bump_lease_epoch(state_dir):
+    """Fence a new mutation after an operator has checked under the lock.
+
+    Reload state after this call: a snapshot loaded before it remains stale.
+    The default acquisition still bumps immediately for all existing callers.
+    """
+    key = str(Path(state_dir).resolve())
+    epoch, err = _read_state_epoch(state_dir)
+    if (err or renew_lease(state_dir) is not True
+            or _LOCK_EPOCHS.get(key) != (os.getpid(), epoch)):
+        sys.exit("HALTED: cannot bump coordinator epoch without the current lease")
+    err = U.write_json(Path(state_dir) / STATE_EPOCH_FILE, {"epoch": epoch + 1})
+    if err:
+        sys.exit(f"HALTED: cannot persist coordinator state epoch: {err}")
+    _LOCK_EPOCHS[key] = (os.getpid(), epoch + 1)
 
 
 def _holds_the_path(fd, state_dir):
@@ -392,7 +410,7 @@ def _deadline_exceeded(u, us, state, uid, observed_at=None):
         return False
     terminal = {"DONE", "FAILED", "FAILED_EVIDENCE", "READY_FOR_PR",
                 "PREFLIGHT_REFUSED", "HELD"}
-    if us.get("state") in terminal:
+    if us.get("state") in terminal or us.get("state") in OPERATOR_TERMINAL_STATES:
         return False
     now = time.time() if observed_at is None else float(observed_at)
     return now - float(allocated) >= float(deadline)
@@ -454,7 +472,8 @@ def _deadline_attempt_is_unresolved(u, us):
                 "PREFLIGHT_REFUSED", "HELD"}
     return (u.get("deadline_s") is not None
             and bool(us.get("attempt_dir"))
-            and us.get("state") not in terminal)
+            and us.get("state") not in terminal
+            and us.get("state") not in OPERATOR_TERMINAL_STATES)
 
 
 def _occupies_live_resources(u, us):
@@ -463,6 +482,14 @@ def _occupies_live_resources(u, us):
     Deadline protection depends on the declared attempt, never on whether a
     later phase has already rewritten the operator-facing state/reason.
     """
+    if us.get("state") in OPERATOR_TERMINAL_STATES:
+        # A tracker disposition does not establish process termination.
+        release = us.get("terminal_resource_release") or {}
+        released = (bool(release)
+                    and release.get("attempt_dir") == us.get("attempt_dir")
+                    and release.get("job_id") == us.get("job_id"))
+        return (bool((us.get("terminal_decision") or {}).get("retains_live_resources"))
+                and not released)
     return (us.get("state") in LIVE_STATES
             or _deadline_attempt_is_unresolved(u, us))
 

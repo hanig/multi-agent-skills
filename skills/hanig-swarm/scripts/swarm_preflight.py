@@ -262,10 +262,14 @@ def _claim_liveness(claim):
         if rc != 0:
             return CLAIM_UNKNOWN, "`paseo ls --json` failed, which proves nothing"
         try:
-            agents = json.loads(out or "[]")
+            agents = json.loads(out)
         except (ValueError, TypeError):
             return CLAIM_UNKNOWN, "`paseo ls --json` did not return JSON"
-        for a in (agents if isinstance(agents, list) else []):
+        if (not isinstance(agents, list)
+                or any(not isinstance(a, dict) or not isinstance(a.get("name"), str)
+                       for a in agents)):
+            return CLAIM_UNKNOWN, "`paseo ls --json` did not return an agent list"
+        for a in agents:
             # EXACT trailing match, for reconcile_orphan's reason: `in`
             # also matched an attempt whose id is another's prefix.
             if str((a or {}).get("name") or "").split()[-1:] == [attempt_id]:

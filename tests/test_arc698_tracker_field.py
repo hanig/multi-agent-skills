@@ -52,9 +52,28 @@ class TestTrackerField(unittest.TestCase):
 
     def emit(self, state, tracker=True):
         args = {'tracker': self.unit['tracker']} if tracker else {}
+        us = {'attempt_dir': '/runs/u/a1', 'state': state}
+        if state in ('ABANDONED', 'SUPERSEDED'):
+            decision = {'state': state, 'approver': 'owner', 'reason': 'stopped',
+                        'prior_state': 'FAILED', 'at': '2026-10-15T12:00:00+00:00',
+                        'successor': None}
+            if state == 'SUPERSEDED':
+                decision['successor'] = 'successor'
+                decision['merge_receipt'] = {
+                    'unit': 'successor', 'repo': 'owner/repo',
+                    'pr': 'https://github.com/owner/repo/pull/1',
+                    'target': 'main', 'head': 'a' * 40, 'merged_as': 'b' * 40,
+                    'method': 'merge', 'merged': True, 'attested': True}
+                receipt = decision['merge_receipt']
+                (self.state_dir / S.SS.STATE_FILE).write_text(json.dumps({'units': {
+                    'successor': {'attempt_dir': '/runs/successor/a1',
+                                  'attempt_produced_heads': {'a1': receipt['head']},
+                                  'merge_receipt': receipt, 'merge_pr': receipt['pr'],
+                                  'merged_as': receipt['merged_as']}}}))
+            us['terminal_decision'] = decision
         return S.emit_intent(
             self.state_dir, self.plan['name'], self.unit['id'], state,
-            {'attempt_dir': '/runs/u/a1'},
+            us,
             evidence={'receipt': {'state': 'DONE'}} if state == 'DONE' else None,
             kind=self.unit['kind'], **args)
 
@@ -80,6 +99,7 @@ class TestTrackerField(unittest.TestCase):
             self.emit(state)
         rows = S.load_outbox_contract(self.state_dir)
         self.assertEqual(len(rows), len(S.TRACKER_EVENTS))
+        self.assertEqual({row['unit_state'] for row in rows}, set(S.TRACKER_EVENTS))
         self.assertTrue(all(row['tracker'] == ' ARC-1 ' for row in rows))
 
     def test_validate_refuses_empty_and_non_string_tracker(self):

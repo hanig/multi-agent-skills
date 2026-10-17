@@ -514,10 +514,13 @@ def audit(args, client, filing=None):
                 added_raw, added_inputs = TA.capture([path])
                 raw.update(added_raw)
                 inputs.update(added_inputs)
+        stop_targets = {}
         try:
             comments = project_comments(reader, workspace, project, [i['id'] for i in issues])
             for issue in issues:
                 latest = latest_state(comments[issue['id']])
+                if latest and any(c['op'] in ('cancel', 'close') for c in comments[issue['id']]):
+                    stop_targets[issue['id']] = STATE_TYPE[latest['op']]
                 if latest and issue['state']['type'] != STATE_TYPE[latest['op']]:
                     finding('intent_order', 'DRIFT', {'issue': issue['identifier'],
                             'latest': latest['key'], 'expected': STATE_TYPE[latest['op']],
@@ -544,6 +547,8 @@ def audit(args, client, filing=None):
                 status = json.loads(result.stdout)
                 if not isinstance(status, dict) or not isinstance(status.get('units'), list):
                     raise ValueError('coordinator status must contain a units list')
+                stopped = {mapped[r['id']]['id'] for r in status['units']
+                           if r['state'] in ('ABANDONED', 'SUPERSEDED') and r['id'] in mapped}
                 for row in status['units']:
                     if row['id'] not in mapped:
                         continue
@@ -552,6 +557,12 @@ def audit(args, client, filing=None):
                     mismatch = ((state == 'DONE' and issue_state != 'completed') or
                                 (state in ('RUNNING', 'SUBMITTED') and issue_state != 'started') or
                                 (state in ('FAILED', 'FAILED_EVIDENCE', 'HELD', 'NEEDS_HUMAN') and issue_state == 'completed'))
+                    if state in ('ABANDONED', 'SUPERSEDED'):
+                        expected = 'canceled' if state == 'ABANDONED' else 'completed'
+                        mismatch = issue_state != expected
+                    iid = mapped[row['id']]['id']
+                    if iid in stopped and iid in stop_targets:
+                        mismatch = issue_state != stop_targets[iid]
                     if mismatch:
                         finding('swarm_state', 'DRIFT', {'unit': row['id'], 'coordinator': state, 'issue': issue_state})
             except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
@@ -589,7 +600,8 @@ def audit(args, client, filing=None):
 
 # State is reconciled once per issue. Comments, including those from other
 # hosts, are the eventually visible ordering journal; there is no CAS or loop.
-STATE_TYPE = {'start': 'started', 'close': 'completed', 'reopen': 'unstarted'}
+STATE_TYPE = {'start': 'started', 'close': 'completed', 'reopen': 'unstarted',
+              'cancel': 'canceled'}
 OPERATIONS = set(STATE_TYPE) | {'note', 'block', 'open_pr'}
 COMMENT_FIELDS = 'id body issue { id }'
 DRAIN_ISSUE_FIELDS = 'id identifier state { type } project { id } team { id }'
@@ -633,6 +645,12 @@ def comment_body(intent):
              '', '- unit state: `%s`' % intent.get('unit_state'),
              '- attempt: `%s`' % intent['envelope']['attempt']['id'],
              '- evidence digest: `%s`' % intent['envelope']['evidence_digest'], '']
+    if intent.get('unit_state') == 'SUPERSEDED':
+        evidence = intent.get('evidence') or {}
+        receipt = evidence.get('receipt') or {}
+        lines += ['- successor: `%s`' % evidence.get('successor'),
+                  '- successor PR: %s' % receipt.get('pr'),
+                  '- merged head: `%s`' % receipt.get('head'), '']
     lines.extend('`swarm-%s: %s`' % pair for pair in intent_markers(intent).items())
     return '\n'.join(lines)
 
@@ -702,7 +720,11 @@ def project_comments(reader, workspace, project, ids):
 
 
 def latest_state(comments):
-    return max((c for c in comments if c['op'] in STATE_TYPE),
+    # A cancellation cannot undo another unit's completed work on this issue.
+    # All other verbs retain their existing latest-intent-wins ordering.
+    closed = any(c['op'] == 'close' for c in comments)
+    return max((c for c in comments if c['op'] in STATE_TYPE
+                and not (closed and c['op'] == 'cancel')),
                key=lambda c: c['order'], default=None)
 
 
@@ -836,9 +858,21 @@ def collect_intents(directories, contract, report):
                     if not isinstance(receipt, dict) or not receipt:
                         raise ValueError('close evidence carries no receipt')
                     if intent.get('closing_evidence') == 'merged_pr':
-                        problem = contract.contract._merge_shape_problem(receipt)
-                        if problem or receipt.get('unit') != intent['unit']:
-                            raise ValueError('merge receipt: ' + (problem or 'names another unit'))
+                        subject = intent['unit']
+                        if intent.get('unit_state') == 'SUPERSEDED':
+                            subject = evidence.get('successor')
+                            if not subject or subject == intent['unit']:
+                                raise ValueError('superseded close names no distinct successor')
+                            state, error = contract.contract.U.read_json(
+                                Path(directory) / contract.contract.SS.STATE_FILE)
+                            successor = ((state or {}).get('units') or {}).get(subject) if not error else None
+                            if not contract.contract.SO._has_bound_merge_evidence(
+                                    subject, successor, evidence):
+                                raise ValueError('successor receipt is not a bound attested merge for the successor')
+                        else:
+                            problem = contract.contract._merge_shape_problem(receipt)
+                            if problem or receipt.get('unit') != subject:
+                                raise ValueError('merge receipt: ' + (problem or 'names another unit'))
                 grade = status.get(intent['key'], (contract.contract.UNACKNOWLEDGED, []))[0]
                 if grade == contract.contract.CONFLICT:
                     raise ValueError('conflicting acknowledgments')
@@ -1041,6 +1075,37 @@ def sources(args):
     return {k: getattr(args, k, None) for k in ('binding', 'draft', 'plan', 'state_dir')}
 
 
+def section(args):
+    """Audit summary plus separately labelled current coordinator dispositions."""
+    summary = TA.section(args.audit, **sources(args))
+    if not args.state_dir:
+        return summary
+    try:
+        state = json.loads((Path(args.state_dir) / 'swarm-state.json').read_text())
+        units = state['units']
+        if not any(us.get('state') in ('ABANDONED', 'SUPERSEDED') for us in units.values()):
+            return summary
+        groups = {name: [] for name in ('ABANDONED', 'SUPERSEDED', 'RUNNING')}
+        for uid, us in sorted(units.items()):
+            name = us.get('state')
+            if name in ('ALLOCATED', 'SUBMITTED'):
+                name = 'RUNNING'
+            if name not in groups:
+                continue
+            decision = us.get('terminal_decision') or {}
+            detail = uid
+            if name != 'RUNNING':
+                detail += ': ' + str(decision.get('reason') or us.get('reason') or '')
+                if decision.get('successor'):
+                    detail += ' (successor: %s)' % decision['successor']
+            groups[name].append(detail)
+        return summary + '\nCurrent coordinator units:\n' + '\n'.join(
+            '%s: %s' % (name, '; '.join(values) or 'none')
+            for name, values in groups.items())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return summary
+
+
 def parse_args(argv=None):
     """Parse and validate command syntax without credentials, I/O or dispatch."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1077,7 +1142,7 @@ def main(argv=None):
     key = None  # Validation can refuse before credentials are loaded.
     try:
         if args.command == 'section':
-            print(TA.section(args.audit, **sources(args)))
+            print(section(args))
             return 0
         if args.command == 'issue':
             LI.validate_request(args)
