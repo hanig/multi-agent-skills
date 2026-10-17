@@ -427,6 +427,11 @@ def _sequence_history(path, strict=True):
                         (type(record["seq"]) is not int or record["seq"] <= 0)):
                     raise ValueError("invalid history sequence")
             except (UnicodeDecodeError, RecursionError, ValueError) as exc:
+                if (not line.endswith(b"\n") and
+                        isinstance(exc, (UnicodeDecodeError, json.JSONDecodeError))):
+                    # Binary iteration reaches this only at EOF. Match the
+                    # append healer: a tear was never a collectable intent.
+                    continue
                 if strict:
                     raise OutboxError("%s line %d: incomplete outbox history: %s" %
                                       (path, number, exc))
@@ -436,6 +441,7 @@ def _sequence_history(path, strict=True):
 
 
 def _allocate_sequence(state_dir, history):
+    """Use history only to migrate; a valid counter is independent of it."""
     record = _read_sequence(state_dir)
     if record is None:
         receipts, problems = load_acknowledgments(state_dir)
@@ -467,15 +473,18 @@ def set_sequence_floor(state_dir, floor, approver, reason):
         raise OutboxError("floor must be a non-negative integer")
     if not _nonblank_text(approver) or not _nonblank_text(reason):
         raise OutboxError("seq-floor requires a non-blank approver and reason")
+    replaced_malformed = False
     try:
         previous = _read_sequence(state_dir)
     except OutboxError:
         previous = None  # Recovery uses the operator's bound, never damaged history.
+        replaced_malformed = True
     if previous is not None and floor <= previous["high_water"]:
         raise OutboxError("floor must exceed current high_water %d" %
                           previous["high_water"])
     record = {"schema_version": 1, "high_water": floor,
               "approver": approver, "reason": reason,
+              "replaced_malformed_counter": replaced_malformed,
               "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     _write_sequence(state_dir, record)
     return record
@@ -489,8 +498,11 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     same key. A connected drainer must deduplicate or read back before retrying
     a remote mutation; the key alone cannot establish what landed.
     Automatic migration assumes complete legacy history containing only
-    coordinator-serialized records or a crash-torn final line; any unparseable
-    line refuses emission with a file/line diagnostic and seq-floor recovery.
+    coordinator-serialized records or a crash-torn final line. A torn final
+    line without a newline migrates automatically; a complete final intent
+    counts even without a newline. Other unparseable lines refuse emission
+    with a file/line diagnostic and seq-floor recovery. With a valid counter,
+    allocation never reads history; key deduplication tolerantly skips damage.
     Silently lost complete records are not detected by automatic migration.
     Recovery is guaranteed only when the operator's floor bounds every issued
     seq; an arbitrary large floor is not a correctness argument.

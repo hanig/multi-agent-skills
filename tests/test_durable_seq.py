@@ -110,6 +110,104 @@ class TestDurableSequence(DrainCase):
     def test_invalid_utf8_middle(self):
         self.check_malformed(b'\xff')
 
+    def test_malformed_middle(self):
+        self.check_malformed(b'{"key":"interrupted","seq":')
+
+    def test_valid_counter_allocation_is_independent_of_history(self):
+        self.assertEqual(self.floor(20)[0], 0)
+        self.box.write_bytes(b'\xff\n{"key":"damaged","seq":\n')
+        allocate = SO._allocate_sequence
+        open_path = Path.open
+
+        def no_history(path, *args, **kwargs):
+            self.assertNotEqual(path.name, SO.OUTBOX, 'allocation read outbox history')
+            return open_path(path, *args, **kwargs)
+
+        def independent(directory, history):
+            # Dedup may read the journal, but allocation may neither reread it
+            # nor derive a value from already-decoded dedup history.
+            unusable = mock.MagicMock()
+            unusable.__iter__.side_effect = AssertionError('allocation used history')
+            with mock.patch.object(Path, 'open', no_history):
+                return allocate(directory, unusable)
+
+        with mock.patch.object(SO, '_allocate_sequence', independent):
+            self.advance('SUBMITTED')
+            self.advance('FAILED')
+        self.assertEqual([r['seq'] for r in self.intents()], [21, 22])
+        self.assert_water(22)
+
+    def test_reemitted_receipted_key_does_not_change_drain_order(self):
+        self.advance('SUBMITTED')
+        old = self.intents()[0]
+        self.drain_ok()
+        self.advance('FAILED')
+        latest = self.intents()[-1]
+        self.drain_ok()
+        receipts = self.acks.read_bytes()
+        comments = dict(self.fake.comments)
+        mutations = list(self.fake.mutations)
+        self.box.write_bytes(b'{broken}\n' + self.box.read_bytes().splitlines(True)[1])
+        self.advance('SUBMITTED')
+        duplicate = self.intents()[-1]
+        self.assertEqual(duplicate['key'], old['key'])
+        self.assertEqual(duplicate['seq'], 3)
+        self.assertEqual(LS.comment_id('workspace', 'project', '1', duplicate['key']),
+                         LS.comment_id('workspace', 'project', '1', old['key']))
+        # Drain reports the corrupt line but still processes collectable rows.
+        self.assertEqual(self.drain(), 3, self.stdout + self.stderr)
+        self.assertIn('line 1', self.stdout + self.stderr)
+        self.assertEqual(self.acks.read_bytes(), receipts)
+        self.assertEqual(self.fake.comments, comments)
+        self.assertEqual(self.fake.mutations, mutations)
+        self.assertEqual(LS.latest_state(self.comments())['key'], latest['key'])
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'unstarted')
+
+    def test_killed_final_append_migrates_automatically(self):
+        self.advance('SUBMITTED')
+        prefix = self.box.read_bytes()
+        script = """
+import fcntl, json, os, signal, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import swarm as S
+import swarm_journal as SJ
+import swarm_state as SS
+directory = Path(sys.argv[2])
+state = directory / SS.STATE_FILE
+record = json.loads(state.read_text())
+record['units']['u']['state'] = 'FAILED'
+state.write_text(json.dumps(record))
+def interrupted(path, intent):
+    with path.open('ab') as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.write(json.dumps(intent).encode()[:-1])
+        handle.flush()
+        os.fsync(handle.fileno())
+        os.kill(os.getpid(), signal.SIGKILL)
+SJ._fsync_append = interrupted
+sys.argv = ['swarm.py', 'advance', sys.argv[3], '--state-dir', str(directory),
+            '--root', sys.argv[4], '--max-new-dispatches', '0']
+S.main()
+"""
+        result = subprocess.run([sys.executable, '-c', script, str(SWARM.parent),
+            str(self.state), str(self.plan), str(self.root / 'runs')],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, -9, result.stderr)
+        self.assert_water(2)
+        torn = self.box.read_bytes()[len(prefix):]
+        self.assertTrue(torn)
+        self.assertFalse(torn.endswith(b'\n'))
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(torn)
+        self.seq.unlink()  # Exercise migration of this legacy-shaped journal.
+        self.advance('HELD')
+        self.assertTrue(self.box.read_bytes().startswith(prefix))
+        self.assertEqual([r['seq'] for r in self.intents()], [1, 2])
+        self.assertEqual(self.intents()[-1]['verb'], 'block')
+        self.drain_ok()
+        self.assertEqual(len(self.fake.comments), 2)
+
     def test_deep_json(self):
         self.check_malformed(b'[' * 10000 + b'0' + b']' * 10000)
 
@@ -287,7 +385,35 @@ SO.emit_intent(sys.argv[2], 'project', 'crashed', 'SUBMITTED', {})
                 self.assertIsNone(self.emit())
                 self.assertEqual(path.read_text(), raw)
                 self.assertFalse(self.box.exists())
-                self.assertNotEqual(self.floor(20)[0], 0)
+                write_sequence = SO._write_sequence
+                replace = SO.os.replace
+                def atomic(directory, record):
+                    with mock.patch.object(SO.os, 'fsync', wraps=SO.os.fsync) as fsync:
+                        def publish(source, target):
+                            self.assertEqual(Path(source).parent, Path(directory))
+                            self.assertNotEqual(Path(source), Path(target))
+                            self.assertEqual(Path(target), Path(directory) / SO.OUTBOX_SEQ)
+                            self.assertEqual(path.read_text(), raw)
+                            self.assertEqual(json.loads(Path(source).read_text()), record)
+                            self.assertEqual(fsync.call_count, 1)  # Temp file before rename.
+                            replace(source, target)
+                        with mock.patch.object(SO.os, 'replace', side_effect=publish) as rename, \
+                                mock.patch.object(SO.SJ, '_fsync_directory',
+                                                  wraps=SO.SJ._fsync_directory) as sync_dir:
+                            write_sequence(directory, record)
+                        rename.assert_called_once()
+                        sync_dir.assert_called_once_with(Path(directory))
+                        self.assertEqual(fsync.call_count, 2)  # Directory after rename.
+                with mock.patch.object(SO, '_write_sequence', side_effect=atomic) as write:
+                    self.assertEqual(self.floor(20)[0], 0)
+                write.assert_called_once()
+                self.assert_water(20)
+                record = self.counter()
+                self.assertEqual(record['approver'], 'operator')
+                self.assertEqual(record['reason'], 'drained trailer')
+                self.assertRegex(record['at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+                self.assertIs(record['replaced_malformed_counter'], True)
+                self.assertEqual(list(self.state.glob('.outbox-seq-*')), [])
 
     def test_corruption(self):
         path = self.box
