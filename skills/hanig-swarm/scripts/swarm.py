@@ -4489,7 +4489,7 @@ def cmd_merge(args):
 
 
 def cmd_seq_floor(args):
-    """Recover sequence authority without changing intents or receipts."""
+    """Record a sequence floor under lease."""
     _prepare_command_paths(args)
     ok, holder = SS.acquire_lease(args.state_dir)
     if not ok:
