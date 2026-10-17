@@ -997,6 +997,8 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `provider_resume` | `{"max": N}`: code only, integer 0..3, default off; resume listed transient provider errors in the same attempt after 5 minutes, then 15 minutes for each later resume |
 | `pool`, `gpu_hours`, `env` | declared resource facts |
 
+Provider resume delivery is at most `max` per attempt and never confirmed; a crash around a send can lose a resume, and a persistent eligible error consumes budget.
+
 Every `code` unit runs in a coordinator-created linked worktree at its anchored
 base; Paseo receives that existing path and never owns its cleanup. Before the
 coordinator removes it, tracked and untracked bytes must be copied outside the

@@ -188,6 +188,8 @@ A unit may not be its own canary: the work would already have been dispatched.
 the whole unit. Size by maximum unrecoverable work: absent a human choice, use
 one independently executable shard per unit. `max_attempts` defaults to 1.
 
+Provider resume delivery is at most `max` per attempt and never confirmed; a crash around a send can lose a resume, and a persistent eligible error consumes budget.
+
 A checkpoint permits larger units only when it survives the failed attempt, is
 made available to the new attempt, has an atomic completion marker, is
 validated before reuse, actually skips completed work, and still yields every

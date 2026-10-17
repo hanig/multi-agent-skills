@@ -638,7 +638,8 @@ def validate_plan(plan, survey=None, new_attempts=True):
                 raise PlanError(f"unit {u.get('id', '?')!r}: provider_resume "
                                 "must be an object with max an integer from 0 to 3")
             if u.get("kind") != "code":
-                raise PlanError("provider_resume is only supported for code units")
+                raise PlanError(f"unit {u.get('id', '?')!r}: provider_resume "
+                                "is only supported for code units")
         cont = u.get("continuation")
         if cont is not None:
             if not isinstance(cont, dict):
@@ -2486,13 +2487,12 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                          else NAME.get(rc, f"rc={rc}"))
 
         # Provider recovery precedes the failure transition and teardown.
-        # An unsent intent is retryable even if Paseo is temporarily unreadable.
         # Undeclared/zero preserves the old path, including its state bytes.
         if (not dry_run and u.get("kind") == "code"
                 and (u.get("provider_resume") or {}).get("max", 0)
                 and previous not in WORKTREE_CLEANUP_STATES
                 and not protocol_problem
-                and (rc == FAILED or SPRS.pending(us))
+                and rc == FAILED
                 and SPRS.maybe_resume(state_dir, uid, u, us, report, state)):
             continue
 
@@ -4138,9 +4138,8 @@ SCHEMA_FIELDS = [
      '{"max": N, "prompt": "..."}; bounded nudges when it settles without '
      "producing. Exhaustion FAILS the unit"),
     ("provider_resume", "code", "optional",
-     '{"max": N}; integer 0..3, default off. Resume listed transient provider '
-     "errors in the same attempt after 5 minutes, then 15 minutes per resume. "
-     "Pending sends survive restart; review rounds are unchanged"),
+     '{"max": N}; integer 0..3, default off. Same-attempt provider-error sends; '
+     "5 minute initial / 15 minute later backoff, no replay or review-round reset"),
     ("requires_verification", "code", "optional",
      "claims an authorized verifier must establish before closing. The "
      "reserved integration-tests claim runs in a disposable candidate merge "
@@ -4887,7 +4886,7 @@ def _status_rows(plan, state, state_dir, observed_at=None):
         if plan.get("canary") in rows[-1]["waiting_on"]:
             rows[-1]["waiting_reason"] = f"waiting on canary {plan['canary']}"
         if us.get("provider_resumes"):
-            rows[-1]["provider_resume"] = SPRS.status(us)
+            rows[-1]["provider_resume"] = SPRS.status(us, u)
     rows.sort(key=lambda r: r["id"])
     return rows
 
@@ -4952,7 +4951,7 @@ def cmd_status(args):
             if resume:
                 print(f"  {'':{w}}    resumed {resume['resumed']}/{resume['max']} "
                       f"after provider error; observed {resume['observed_at']} "
-                      f"(delivery, not progress); pending={resume['pending']}")
+                      f"(delivery unconfirmed, not progress)")
             if watch:
                 process = (watch.get("process_state") if watch.get("status")
                            in ("starting", "waiting") else None)

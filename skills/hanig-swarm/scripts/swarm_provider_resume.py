@@ -1,30 +1,26 @@
-"""Bounded provider-error turns inside an existing code attempt (no judging)."""
-import re
+"""Bounded provider resumes, without judging."""
+import os
 import time
 from pathlib import Path
 
 import paseo_io as PIO
 import recovery as R
 import swarm_evidence as SE
-import swarm_preflight as SP
 import swarm_state as SS
 import unit as U
 import worktree as W
 
 
 RETRYABLE_PROVIDER_MESSAGES = (
-    "is at capacity", "rate limit", "Rate limit", "overloaded", "Overloaded",
+    "is at capacity", "rate limit", "overloaded",
     "502", "503", "504", "temporarily unavailable",
 )
 RESUME_PROMPT = (
-    "Your session was interrupted by a transient provider error. Your committed "
-    "and pushed work is intact in the SAME attempt and worktree. Continue from "
-    "where you stopped, including the current review round number and its "
-    "dispositions in your session and gate ledger. This resume is NOT a review "
-    "round: do not reset the round counter, replay the seed, or start a new "
-    "attempt. Preserve any uncommitted work. If a review was interrupted, inspect "
-    "its existing reservation and results before proceeding; never erase or "
-    "recreate the ledger to rerun round 1. Keep the original completion protocol."
+    "Provider error interrupted you. Continue in the SAME attempt/worktree; "
+    "committed/pushed work is intact. Preserve uncommitted work, the current "
+    "review round number, dispositions and interrupted reservations/results. "
+    "Resume is NOT a review round. Never reset the ledger, replay the seed or "
+    "make a new attempt. Keep the original completion protocol."
 )
 
 
@@ -33,157 +29,113 @@ def _utc(now):
 
 
 def _save(state_dir, state, uid, us):
-    # A past error receipt must not outrank the retained/resumed attempt.
+    # Retire the stale failure seal while waiting/resuming.
     SE._record_receipt_provenance(state, uid, us["attempt_dir"], None)
     SS.save_state(state_dir, state)
 
 
-def pending(us):
-    return next((e for e in us.get("provider_resumes", [])
-                 if e["status"] == "pending"), None)
-
-
-def _observation(agent):
-    """Read status and only the last System Error, never conversation text."""
-    rc, out, err = U.run(["paseo", "inspect", str(agent), "--json"], timeout=60)
+def _eligible(agent):
+    """Read live lifecycle and only the last System Error."""
+    rc, out, _ = U.run(["paseo", "inspect", str(agent), "--json"], timeout=60)
     rec = PIO.first_json_object(out) if rc == 0 else None
-    if not rec:
-        return None, err or out or "Paseo observation unavailable"
-    status = rec.get("Status", rec.get("status"))
-    observation = {"status": status,
-                   "updated_at": rec.get("UpdatedAt", rec.get("updatedAt")),
-                   "message": ""}
-    if status != "error" or rec.get("PendingPermissions", rec.get("pendingPermissions")):
-        return observation, None
-    rc, out, err = U.run(["paseo", "logs", str(agent), "--tail", "1"], timeout=60)
-    if rc:
-        return None, err or out or "Paseo error log unavailable"
+    if (not rec or str(rec.get("Status") or rec.get("status")).lower() != "error"
+            or rec.get("PendingPermissions") or rec.get("pendingPermissions")):
+        return None
+    rc, out, _ = U.run(["paseo", "logs", str(agent), "--tail", "1"], timeout=60)
     prefix = "[System Error] "
-    if out.startswith(prefix):
-        message = out[len(prefix):].strip()
-        payload = PIO.first_json_object(message)
-        if payload:
-            error = payload.get("error", payload)
-            message = error.get("message", "") if isinstance(error, dict) else error
-        observation["message"] = message if isinstance(message, str) else ""
-    return observation, None
+    if rc or not out.startswith(prefix):
+        return None
+    message = out[len(prefix):].strip()
+    payload = PIO.first_json_object(message)
+    if payload:
+        error = payload.get("error", payload)
+        message = error.get("message", "") if isinstance(error, dict) else error
+    if not isinstance(message, str):
+        return None
+    message = message.lower()
+    if "flagged for possible cybersecurity risk" in message:
+        return None
+    return next((s for s in RETRYABLE_PROVIDER_MESSAGES if s in message), None)
 
 
-def _preserve(state, uid, us, state_dir, entry):
-    """Require the anchored checkout; snapshot dirty bytes before sending."""
+def _preserve(state, uid, us, state_dir):
     attempt = Path(us["attempt_dir"]).name
     facts = SS.trusted_launch_facts(state, uid, attempt)
     if not facts:
-        return "coordinator has no launch facts for this attempt"
+        return None, "missing coordinator launch facts"
     problem = W.workspace_identity_problem(U.run, facts)
     if problem:
-        return problem
-    workspace = facts["execution_workspace"]
-    rc, dirty, err = SP._git(workspace, "status", "--porcelain", "--untracked-files=all", "--ignored")
-    if rc:
-        return err or "cannot inspect attempt worktree"
-    if dirty:
-        identity = facts["workspace_identity"]
-        snapshot, problem = R.preserve_worktree(
-            workspace, Path(state_dir) / "recovery-snapshots", uid, attempt,
-            facts["base_commit"], facts["base_tree"],
-            expected_git_dir=identity.get("git_dir"),
-            expected_git_pointer_sha256=identity.get("git_pointer_sha256"))
-        if problem:
-            return problem
-        entry["recovery_snapshot"] = snapshot
-        _save(state_dir, state, uid, us)
-    return None
+        return None, problem
+    identity = facts["workspace_identity"]
+    return R.preserve_worktree(
+        facts["execution_workspace"], Path(state_dir) / "recovery-snapshots",
+        uid, attempt, facts["base_commit"], facts["base_tree"],
+        expected_git_dir=identity.get("git_dir"),
+        expected_git_pointer_sha256=identity.get("git_pointer_sha256"))
 
 
 def maybe_resume(state_dir, uid, u, us, report, state):
-    """Retain waiting/resumed attempts. Pending sends survive crashes.
-
-    Paseo has no idempotency key: a crash after send may duplicate delivery.
-    """
     limit = (u.get("provider_resume") or {}).get("max", 0)
     if not limit or u.get("kind") != "code" or not us.get("job_id"):
         return False
-    entry = pending(us)
-    observed, problem = _observation(us["job_id"])
-    if problem:
-        if entry is None or "Agent not found:" in problem:
-            return False
-        _save(state_dir, state, uid, us)
-        report.append(f"{uid}: provider resume observation unavailable: {problem}; retry next advance")
-        return True
-    if observed["status"] != "error":
-        if entry is None:
-            return False
-        if observed["status"] not in ("running", "idle", "done", "complete", "completed"):
-            return False
-        # Reconcile an accepted send after a crash.
-        if entry.get("sending_at"):
-            entry.update(status="sent", sent_at=entry["sending_at"])
-            _save(state_dir, state, uid, us)
-            return True
-        # An unsent durable intent still needs delivery after restart.
-        observed = entry["observation"]
-    message = observed["message"]
-    matched = next((s for s in RETRYABLE_PROVIDER_MESSAGES if s in message), None)
-    if re.search("flagged for possible cybersecurity risk", message, re.IGNORECASE) or not matched:
+    matched = _eligible(us["job_id"])
+    if not matched:
         return False
     now = time.time()
-    if (entry and entry.get("sending_at") and observed["updated_at"]
-            and observed["updated_at"] != entry["observation"]["updated_at"]):
-        entry.update(status="sent", sent_at=entry["sending_at"])
-        _save(state_dir, state, uid, us)
-        entry = None
-    entries = us.get("provider_resumes", [])
+    attempt = Path(us["attempt_dir"]).name
+    records = us.setdefault("provider_resumes", {})
+    entry = records.get(attempt)
     if entry is None:
-        # Do not spend another slot on an old asynchronous observation.
-        if entries and entries[-1]["observation"] == observed:
-            _save(state_dir, state, uid, us)
-            report.append(f"{uid}: waiting for a new observation after provider resume")
-            return True
-        if len(entries) >= limit:
-            report.append(f"{uid}: spent {len(entries)}/{limit} provider resumes; next error fails")
-            return False
-        entry = {"n": len(entries) + 1, "of": limit, "agent_id": us["job_id"],
-                 "attempt": Path(us["attempt_dir"]).name,
-                 "message": message, "matched": matched, "observation": observed,
-                 "at": _utc(now), "observed_epoch": now, "status": "pending"}
-        us.setdefault("provider_resumes", []).append(entry)
+        entry = {"fingerprint": {"message_class": matched, "observed_at": _utc(now)},
+                 "resumes_attempted": 0, "next_not_before": now + 300,
+                 "snapshot_paths": []}
+        records[attempt] = entry
+    if entry["resumes_attempted"] >= limit:
+        report.append(f"{uid}: spent {entry['resumes_attempted']}/{limit} provider resumes; "
+                      "next error fails")
+        return False
+    if now < entry["next_not_before"]:
         _save(state_dir, state, uid, us)
-    _save(state_dir, state, uid, us)
-    delay = 300 if entry["n"] == 1 else 900
-    if now < entry["observed_epoch"] + delay:
-        report.append(f"{uid}: waiting for backoff for provider resume {entry['n']}/{entry['of']}; "
-                      f"error observed {entry['at']}")
+        report.append(f"{uid}: waiting for backoff; provider error observed "
+                      f"{entry['fingerprint']['observed_at']}")
         return True
-    problem = _preserve(state, uid, us, state_dir, entry)
+    snapshot, problem = _preserve(state, uid, us, state_dir)
     if problem:
-        report.append(f"{uid}: provider resume retained without send: {problem}; "
-                      "restore the anchored worktree or repair preservation, then advance")
-        return True
-    entry["sending_at"] = _utc(now)
+        report.append(f"{uid}: provider resume snapshot failed: {problem}")
+        return False
+    # Snapshotting takes time: observe again before sending.
+    if not _eligible(us["job_id"]):
+        return False
+    entry["snapshot_paths"].append(snapshot["snapshot_path"])
+    entry["resumes_attempted"] += 1
+    entry["next_not_before"] = time.time() + 900
     _save(state_dir, state, uid, us)
+    # Sync the atomic state publication before sending.
+    with (Path(state_dir) / SS.STATE_FILE).open("rb") as handle:
+        os.fsync(handle.fileno())
+    descriptor = os.open(str(state_dir), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     rc, out, err = U.run(["paseo", "send", str(us["job_id"]), "--no-wait", RESUME_PROMPT], timeout=120)
+    report.append(f"{uid}: resumed {entry['resumes_attempted']}/{limit} after provider error; "
+                  f"charge observed {_utc(entry['next_not_before'] - 900)} "
+                  "(delivery unconfirmed, not progress)")
     if rc:
-        entry["send_error"] = err or out
-        report.append(f"{uid}: provider resume send failed: {err or out}; retry same entry next advance")
-    else:
-        entry.update(status="sent", sent_at=_utc(time.time()))
-        entry.pop("send_error", None)
-        SS._set_unit_state(us, "RUNNING")
-        us.pop("incomplete_since", None)
-        report.append(f"{uid}: resumed {entry['n']}/{entry['of']} after provider error; "
-                      f"observed {entry['sent_at']} (delivery, not progress)")
+        report.append(f"{uid}: provider resume send failed: {err or out}; slot remains charged")
+        return False
+    SS._set_unit_state(us, "RUNNING")
+    us.pop("incomplete_since", None)
     _save(state_dir, state, uid, us)
     return True
 
 
-def status(us):
-    entries = us.get("provider_resumes") or []
-    if not entries:
+def status(us, u):
+    entry = (us.get("provider_resumes") or {}).get(Path(us["attempt_dir"]).name)
+    if not entry:
         return None
-    sent = [e for e in entries if e["status"] == "sent"]
-    last = entries[-1]
-    return {"resumed": len(sent), "max": last["of"],
-            "observed_at": sent[-1]["sent_at"] if sent else last["at"],
-            "pending": last["status"] == "pending"}
+    count = entry["resumes_attempted"]
+    return {"resumed": count, "max": (u.get("provider_resume") or {}).get("max", 0),
+            "observed_at": (_utc(entry["next_not_before"] - 900) if count
+                            else entry["fingerprint"]["observed_at"])}
