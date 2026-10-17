@@ -501,18 +501,7 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     Deterministic from state: replaying the same local transition produces the
     same key. A connected drainer must deduplicate or read back before retrying
     a remote mutation; the key alone cannot establish what landed.
-    Automatic migration assumes complete legacy history containing only
-    coordinator-serialized records or a crash-torn final line. A torn final
-    line without a newline migrates automatically; a complete final intent
-    counts even without a newline. Other unparseable lines refuse emission
-    with a file/line diagnostic and seq-floor recovery. With a valid counter,
-    allocation never reads history; key deduplication tolerantly skips damage.
-    Silently lost complete records are not detected by automatic migration.
-    Recovery is guaranteed only when the operator's floor bounds every issued
-    seq; an arbitrary large floor is not a correctness argument.
-    No guarantee spans clock rollback or restored stale coordinator state.
-    Under these premises, published sequences rise after migration.
-    Counter loss may reuse reserved-but-unpublished values.
+    Durability and recovery premises: capability.tracker in declarations.json.
     """
     action = TRACKER_EVENTS.get(unit_state)
     if not action:
