@@ -225,6 +225,9 @@ class ContinueCommandTests(unittest.TestCase):
                         GIT_CONFIG_FIXTURE="present")
         self.assertIn(self.tip, self.git("ls-remote", "origin", "refs/heads/swarm-a1"))
         self.save()
+        other = self.tmp / "other.git"
+        self.git("init", "--bare", "-q", str(other))
+        self.env.update(GIT_DIR=str(other), GIT_WORK_TREE=str(self.home))
         before = self.snapshot()
         self.assertEqual(self.result_unit(self.continuation())["seed"]["head"], self.head)
         self.assertEqual(self.snapshot(), before)
