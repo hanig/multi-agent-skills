@@ -4,6 +4,7 @@ from pathlib import Path
 
 import paseo_io as PIO
 import recovery as R
+import swarm_evidence as SE
 import swarm_preflight as SP
 import swarm_state as SS
 import unit as U
@@ -28,6 +29,12 @@ RESUME_PROMPT = (
 
 def _utc(now):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+
+
+def _save(state_dir, state, uid, us):
+    # A past error receipt must not outrank the retained/resumed attempt.
+    SE._record_receipt_provenance(state, uid, us["attempt_dir"], None)
+    SS.save_state(state_dir, state)
 
 
 def pending(us):
@@ -84,7 +91,7 @@ def _preserve(state, uid, us, state_dir, entry):
         if problem:
             return problem
         entry["recovery_snapshot"] = snapshot
-        SS.save_state(state_dir, state)
+        _save(state_dir, state, uid, us)
     return None
 
 
@@ -99,17 +106,21 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     entry = pending(us)
     observed, problem = _observation(us["job_id"])
     if problem:
+        _save(state_dir, state, uid, us)
         report.append(f"{uid}: provider resume observation unavailable: {problem}; retry next advance")
         return True
     if observed["status"] != "error":
+        if observed["status"] not in ("running", "idle", "done", "complete", "completed"):
+            return False
         # Reconcile an accepted send after a crash.
         if entry and entry.get("sending_at"):
             entry.update(status="sent", sent_at=entry["sending_at"])
-            SS.save_state(state_dir, state)
+            _save(state_dir, state, uid, us)
         elif entry:
             us["provider_resumes"].remove(entry)
-            SS.save_state(state_dir, state)
+            _save(state_dir, state, uid, us)
         # Let the next check judge this newer lifecycle.
+        _save(state_dir, state, uid, us)
         return True
     message = observed["message"]
     matched = next((s for s in RETRYABLE_PROVIDER_MESSAGES if s in message), None)
@@ -119,12 +130,13 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     if (entry and entry.get("sending_at") and observed["updated_at"]
             and observed["updated_at"] != entry["observation"]["updated_at"]):
         entry.update(status="sent", sent_at=entry["sending_at"])
-        SS.save_state(state_dir, state)
+        _save(state_dir, state, uid, us)
         entry = None
     entries = us.get("provider_resumes", [])
     if entry is None:
         # Do not spend another slot on an old asynchronous observation.
         if entries and entries[-1]["observation"] == observed:
+            _save(state_dir, state, uid, us)
             report.append(f"{uid}: waiting for a new observation after provider resume")
             return True
         if len(entries) >= limit:
@@ -135,7 +147,8 @@ def maybe_resume(state_dir, uid, u, us, report, state):
                  "message": message, "matched": matched, "observation": observed,
                  "at": _utc(now), "observed_epoch": now, "status": "pending"}
         us.setdefault("provider_resumes", []).append(entry)
-        SS.save_state(state_dir, state)
+        _save(state_dir, state, uid, us)
+    _save(state_dir, state, uid, us)
     delay = 300 if entry["n"] == 1 else 900
     if now < entry["observed_epoch"] + delay:
         report.append(f"{uid}: waiting for backoff for provider resume {entry['n']}/{entry['of']}; "
@@ -147,7 +160,7 @@ def maybe_resume(state_dir, uid, u, us, report, state):
                       "restore the anchored worktree or repair preservation, then advance")
         return True
     entry["sending_at"] = _utc(now)
-    SS.save_state(state_dir, state)
+    _save(state_dir, state, uid, us)
     rc, out, err = U.run(["paseo", "send", str(us["job_id"]), "--no-wait", RESUME_PROMPT], timeout=120)
     if rc:
         entry["send_error"] = err or out
@@ -159,7 +172,7 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         us.pop("incomplete_since", None)
         report.append(f"{uid}: resumed {entry['n']}/{entry['of']} after provider error; "
                       f"observed {entry['sent_at']} (delivery, not progress)")
-    SS.save_state(state_dir, state)
+    _save(state_dir, state, uid, us)
     return True
 
 

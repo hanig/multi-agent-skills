@@ -1,6 +1,8 @@
 """Provider-error resumes through advance, using real attempt worktrees."""
 import copy
+import importlib.util
 import json
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -84,7 +86,10 @@ class ProviderResumeTests(unittest.TestCase):
         notes = []
         status = S.U._code_state(str(self.attempt), {"job_id": self.us["job_id"]},
                                  [], ["evidence.md"], notes)
-        return S.U.STATES[status], "\n".join(notes), "", ""
+        result = S.CHECK_RESULT_PREFIX + " " + json.dumps({
+            "produced_head": None, "receipt_sha256": "f" * 64,
+        }, sort_keys=True, separators=(",", ":"))
+        return S.U.STATES[status], "\n".join(notes), "", result
 
     def advance(self):
         report, dispatched, _ = S.advance(
@@ -106,6 +111,16 @@ class ProviderResumeTests(unittest.TestCase):
         before = {p: p.read_bytes() for p in [*ledger.iterdir(), dispositions]}
         original = copy.deepcopy(self.us)
         self.assertIn("waiting for backoff", self.advance())
+        self.assertNotIn(self.attempt.name, self.us.get("attempt_receipt_seals", {}))
+        project = F.ROOT / "skills/hanig-project/scripts"
+        sys.path.insert(0, str(project))
+        spec = importlib.util.spec_from_file_location("resume_report", project / "report.py")
+        reporter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reporter)
+        row = reporter.unit_rows({"plan": self.plan, "state": self.state,
+                                  "receipts": {"code": {"state": "FAILED"}},
+                                  "receipt_provenance": {"code": (self.attempt.name, "f" * 64)}})[0]
+        self.assertEqual(row["state"], "RUNNING")
         self.clock = 1299
         self.reload()
         self.assertIn("waiting for backoff", self.advance())
@@ -151,6 +166,12 @@ class ProviderResumeTests(unittest.TestCase):
         self.assertNotIn("provider_resumes", self.us)
         self.assertEqual(self.sends, [])
         self.assertFalse(self.workspace.exists())
+
+    def test_failed_lifecycle_is_not_error(self):
+        self.agent_status = "failed"
+        self.advance()
+        self.assertEqual(self.us["state"], "FAILED")
+        self.assertNotIn("provider_resumes", self.us)
 
     def test_unknown_error_never_resumes(self):
         self.message = "invalid model configuration"
