@@ -399,11 +399,7 @@ def _write_sequence(state_dir, record):
 
 
 def _sequence_history(path, strict=True):
-    """Read keys and migration history without changing bytes.
-
-    Append drops incomplete JSON tails; complete JSON, even without a newline,
-    is published and migrates. A retained counter permits every readable key.
-    """
+    """Read migration history; complete newline-less JSON is published too."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -415,11 +411,12 @@ def _sequence_history(path, strict=True):
             continue
         try:
             record = json.loads(line.decode("utf-8"))
-        except ValueError:
-            if index == len(lines) - 1 and not raw.endswith(b"\n"):
+        except (ValueError, RecursionError) as exc:
+            if (isinstance(exc, (UnicodeDecodeError, json.JSONDecodeError))
+                    and index == len(lines) - 1 and not raw.endswith(b"\n")):
                 break
             if strict:
-                raise OutboxError("corrupt outbox history")
+                raise OutboxError("unreadable outbox history")
             continue
         if not isinstance(record, dict) or not _nonblank_text(record.get("key")):
             if strict:
@@ -439,7 +436,7 @@ def _allocate_sequence(state_dir, history):
         if problems:
             raise OutboxError("incomplete receipt history")
         if history is None:
-            # An empty receipt file still rules out the new-directory case.
+            # Even empty receipts rule out genesis.
             try:
                 (Path(state_dir) / RECEIPTS).stat()
             except FileNotFoundError:
@@ -482,10 +479,9 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     Deterministic from state: replaying the same local transition produces the
     same key. A connected drainer must deduplicate or read back before retrying
     a remote mutation; the key alone cannot establish what landed.
-    Allocation never reuses or decreases published outbox values after migration.
-    A reserved-but-unpublished value may be reused after the counter is lost.
-    There is no ordering guarantee across clock rollback, restoring stale
-    coordinator state, or simultaneous loss of outbox-seq.json and the outbox.
+    Published sequences never repeat or decrease after migration, excluding
+    clock rollback, stale restoration and joint counter/outbox loss.
+    Counter loss may reuse reserved-but-unpublished values.
     """
     action = TRACKER_EVENTS.get(unit_state)
     if not action:
@@ -528,7 +524,7 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         seq = _allocate_sequence(state_dir, history)
     except (OSError, ValueError, OutboxError) as exc:
         print(f"WARNING: cannot allocate tracker sequence in {state_dir}: "
-              f"{exc}. Restore readable history or recover with "
+              f"{exc}. Restore any corrupt counter first; otherwise recover with "
               f"swarm.py seq-floor --state-dir {shlex.quote(str(state_dir))} "
               f"--floor N --approver NAME --reason TEXT; choose N from "
               f"evidence. Intent emission will retry on the next advance.",
