@@ -16,7 +16,7 @@ import swarm as S
 import swarm_outbox as SO
 
 DEFINITIONS = (
-    "_read_sequence", "_write_sequence", "_sequence_history",
+    "_unique_pairs", "_read_sequence", "_write_sequence", "_sequence_history",
     "_allocate_sequence", "set_sequence_floor",
     "emit_intent", "backfill_tracker_intents", "_parse_receipt_text",
     "_read_receipts_raw", "_receipt_shape_problem", "load_acknowledgments",

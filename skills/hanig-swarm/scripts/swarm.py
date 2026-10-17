@@ -180,6 +180,7 @@ from swarm_plan_rules import (
     MEM_FLAGS,
 )
 from swarm_outbox import (
+    _unique_pairs,
     _read_sequence,
     _write_sequence,
     _sequence_history,
