@@ -107,7 +107,7 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     entry = pending(us)
     observed, problem = _observation(us["job_id"])
     if problem:
-        if entry is None:
+        if entry is None or "Agent not found:" in problem:
             return False
         _save(state_dir, state, uid, us)
         report.append(f"{uid}: provider resume observation unavailable: {problem}; retry next advance")
@@ -118,15 +118,12 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         if observed["status"] not in ("running", "idle", "done", "complete", "completed"):
             return False
         # Reconcile an accepted send after a crash.
-        if entry and entry.get("sending_at"):
+        if entry.get("sending_at"):
             entry.update(status="sent", sent_at=entry["sending_at"])
             _save(state_dir, state, uid, us)
-        elif entry:
-            us["provider_resumes"].remove(entry)
-            _save(state_dir, state, uid, us)
-        # Let the next check judge this newer lifecycle.
-        _save(state_dir, state, uid, us)
-        return True
+            return True
+        # An unsent durable intent still needs delivery after restart.
+        observed = entry["observation"]
     message = observed["message"]
     matched = next((s for s in RETRYABLE_PROVIDER_MESSAGES if s in message), None)
     if re.search("flagged for possible cybersecurity risk", message, re.IGNORECASE) or not matched:
