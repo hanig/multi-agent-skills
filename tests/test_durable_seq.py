@@ -136,6 +136,26 @@ class TestDurableSequence(DrainCase):
     def test_malformed_middle(self):
         self.check_malformed(b'{"key":"interrupted","seq":')
 
+    def test_fifo_counter_requires_floor(self):
+        fifo = self.state / 'fifo'
+        SO.os.mkfifo(fifo)
+        for link in (False, True):
+            with self.subTest(symlink=link):
+                if self.seq.exists():
+                    self.seq.unlink()
+                if link:
+                    self.seq.symlink_to(fifo.name)
+                else:
+                    SO.os.mkfifo(self.seq)
+                result = subprocess.run([sys.executable, str(SWARM)] + self.floor_args(20),
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(self.seq.is_file())
+                self.assertFalse(self.seq.is_symlink())
+                self.assert_water(20)
+                self.assertIs(self.counter()['replaced_malformed_counter'], True)
+                self.assertTrue(SO.stat.S_ISFIFO(fifo.stat().st_mode))
+
     def test_valid_counter_allocation_is_independent_of_history(self):
         self.assertEqual(self.floor(20)[0], 0)
         self.box.write_bytes(b'\xff\n{"key":"damaged","seq":\n')
@@ -147,8 +167,7 @@ class TestDurableSequence(DrainCase):
             return open_path(path, *args, **kwargs)
 
         def independent(directory, history):
-            # Dedup may read the journal, but allocation may neither reread it
-            # nor derive a value from already-decoded dedup history.
+            # Allocation cannot reuse even predecoded dedup history.
             unusable = mock.MagicMock()
             unusable.__iter__.side_effect = AssertionError('allocation used history')
             with mock.patch.object(Path, 'open', no_history):

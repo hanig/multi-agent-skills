@@ -381,7 +381,10 @@ def _unique_pairs(pairs):
 def _read_sequence(state_dir):
     path = Path(state_dir) / OUTBOX_SEQ
     try:
-        record = json.loads(path.read_text(), object_pairs_hook=_unique_pairs)
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK)) as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise OutboxError("unreadable counter %s: not a regular file" % path)
+            record = json.load(handle, object_pairs_hook=_unique_pairs)
     except FileNotFoundError:
         if path.is_symlink():
             raise OutboxError("unreadable counter %s: dangling symlink" % path)
@@ -431,8 +434,7 @@ def _sequence_history(path, strict=True):
             except (UnicodeDecodeError, RecursionError, ValueError) as exc:
                 if (not line.endswith(b"\n") and
                         isinstance(exc, (UnicodeDecodeError, json.JSONDecodeError))):
-                    # Binary iteration reaches this only at EOF. Match the
-                    # append healer: a tear was never a collectable intent.
+                    # Only EOF lacks a newline; match the append healer.
                     continue
                 if strict:
                     raise OutboxError("%s line %d: incomplete outbox history: %s" %
