@@ -3463,36 +3463,17 @@ def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False,
     return state, root
 
 
-def _check_plan_seeds(plan, check=None):
-    """The same live seed admission for validate and continuation previews."""
-    check = check or SP._seed_reachability_problem
-    problems = []
-    for u in plan["units"]:
-        if "seed" not in u:
-            continue
-        target, problem = SP._resolve_dispatch_target(u)
-        if not problem:
-            source, problem = SP._dispatch_source_identity(u, target)
-        if not problem:
-            problem = check(u["seed"], source["repo"],
-                            source["repository_remote_raw"],
-                            source["repository_remote"])
-        if problem:
-            detail = " ".join(problem.splitlines())
-            problems.append(f"unit {u['id']!r}: {detail}")
-    if problems:
-        raise PlanError("\n" + "\n".join(problems))
-
-
 def cmd_continue(args):
-    return SC.continue_plan(args, validate_plan, _check_plan_seeds)
+    args.check_seeds = True
+    return SC.continue_plan(args, lambda plan, check: cmd_validate(args, plan, check))
 
 
-def cmd_validate(args):
+def cmd_validate(args, plan=None, seed_check=None):
     SR.apply_agent_resolution(args.plan)
-    plan, err = U.read_json(args.plan)
-    if err:
-        sys.exit(f"error: no readable plan at {args.plan}: {err}")
+    if plan is None:
+        plan, err = U.read_json(args.plan)
+        if err:
+            sys.exit(f"error: no readable plan at {args.plan}: {err}")
     explicit = getattr(args, "survey", None)
     if explicit:
         # NAMED, so unreadable is an error rather than a shrug. Degrading a
@@ -3506,10 +3487,26 @@ def cmd_validate(args):
         survey, note = SPR.discover_survey(args.plan)
     try:
         summary = validate_plan(plan, survey)
-        if getattr(args, "check_seeds", False):
-            _check_plan_seeds(plan)
     except PlanError as e:
         sys.exit(f"error: invalid plan: {e}")
+    if getattr(args, "check_seeds", False):
+        problems = []
+        for u in plan["units"]:
+            if "seed" not in u:
+                continue
+            target, problem = SP._resolve_dispatch_target(u)
+            if not problem:
+                source, problem = SP._dispatch_source_identity(u, target)
+            if not problem:
+                problem = (seed_check or SP._seed_reachability_problem)(
+                    u["seed"], source["repo"], source["repository_remote_raw"],
+                    source["repository_remote"])
+            if problem:
+                # Render one diagnostic line per unit, after the decision.
+                detail = " ".join(problem.splitlines())
+                problems.append(f"unit {u['id']!r}: {detail}")
+        if problems:
+            sys.exit("error: invalid plan:\n" + "\n".join(problems))
     print(f"plan is valid: {summary['units']} unit(s), "
           f"{summary['with_deps']} with dependencies")
     # WHICH CLUSTER FACTS WERE CONSULTED, in both directions. A pass here
