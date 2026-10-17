@@ -75,6 +75,9 @@ def interrupted_save(directory, state):
   if charged and cfg.get("kill") == "before_charge":
     os.kill(os.getpid(), signal.SIGKILL)
   save(directory, state)
+  if charged and cfg.get("switch"):
+    cfg.update(cfg.pop("switch"))
+    (root / "fake.json").write_text(json.dumps(cfg))
   if (charged and cfg.pop("delay_charge", False)) or (entry and cfg.pop("delay_wait", False)):
     cfg["now"] += 30
     (root / "fake.json").write_text(json.dumps(cfg))
@@ -83,6 +86,13 @@ def interrupted_save(directory, state):
 S.SS.save_state = interrupted_save
 if cfg.get("snapshot_failure"):
   S.SPRS.R.preserve_worktree = lambda *a, **k: (None, "injected disk full")
+run = S.U.run
+def delayed(*args, **kw):
+  result = run(*args, **kw)
+  if args[0][:2] == ["paseo", "send"]:
+    cfg["now"] += cfg.get("send_delay", 0)
+  return result
+S.U.run = delayed
 sys.exit(S.main())
 """
 
@@ -252,6 +262,12 @@ class ProviderResumeTests(Checks):
       h.cli(now=first + 900)
       h.sent(2)
 
+    with scenario(send_delay=60) as h:
+      h.ready()
+      h.cli()
+      self.contains(P._utc(1300), h.cli("status", now=1360))
+      self.eq(h.record()["next_not_before"], 2260)
+
   def test_deadline(self):
     for deadline, wait in ((300, False), (315, False), (300, True)):
       with self.subTest(deadline=deadline, wait=wait), scenario(persistent=True) as h:
@@ -288,12 +304,15 @@ class ProviderResumeTests(Checks):
           self.assertFalse(h.work.exists())
 
   def test_changed_observation(self):
-    for status in ("idle", "running", "done", "complete", "completed", "unreadable", "error"):
-      with self.subTest(status=status), scenario() as h:
-        h.ready()
-        h.cli(change_at=2, fresh_status=status, fresh_message="invalid model")
-        h.failed()
-        self.assertFalse(h.work.exists())
+    for stage in ("snapshot", "charge"):
+      for status in ("idle", "running", "done", "complete", "completed", "unreadable", "error"):
+        with self.subTest(stage=stage, status=status), scenario() as h:
+          h.ready()
+          cfg = (dict(switch=dict(status=status, message="invalid model")) if stage == "charge"
+                 else dict(change_at=2, fresh_status=status, fresh_message="invalid model"))
+          h.cli(**cfg)
+          h.failed()
+          self.assertFalse(h.work.exists())
 
   def test_sigkill_boundaries(self):
     for boundary, lost, first in (("before_charge", 0, 0), ("after_charge", 1, 0), ("after_send", 1, 1)):

@@ -16,11 +16,10 @@ RETRYABLE_PROVIDER_MESSAGES = (
     "502", "503", "504", "temporarily unavailable",
 )
 RESUME_PROMPT = (
-    "Provider interruption: continue in SAME attempt/worktree from the current "
-    "review round number, dispositions and interrupted reservations/results. "
-    "Committed/pushed work is intact; preserve uncommitted work. Resume is NOT "
-    "a review round: never reset the ledger, replay the seed or start another "
-    "attempt. Keep the completion protocol."
+    "Provider interruption. Continue in SAME attempt/worktree. Committed/pushed "
+    "work is intact; preserve uncommitted work, current review round number, "
+    "dispositions and interrupted reservations/results. Resume is NOT a review "
+    "round: do not reset ledger, replay seed or start an attempt. Keep completion protocol."
 )
 
 
@@ -29,13 +28,12 @@ def _utc(now):
 
 
 def _save(state_dir, state, uid, us):
-    # Retire the stale failure seal.
     SE._record_receipt_provenance(state, uid, us["attempt_dir"], None)
     SS.save_state(state_dir, state)
 
 
 def _eligible(agent):
-    """Read live lifecycle and only the last System Error."""
+    """Read the current error."""
     rc, out, _ = U.run(["paseo", "inspect", str(agent), "--json"], timeout=60)
     rec = PIO.first_json_object(out) if rc == 0 else None
     if (not rec or str(rec.get("Status") or rec.get("status")).lower() != "error"
@@ -62,15 +60,13 @@ def _preserve(state, uid, us, state_dir):
     attempt = Path(us["attempt_dir"]).name
     facts = SS.trusted_launch_facts(state, uid, attempt)
     if not facts:
-        return None, "missing coordinator launch facts"
+        return None, "missing launch facts"
     problem = W.workspace_identity_problem(U.run, facts)
     if problem:
         return None, problem
     identity = facts["workspace_identity"]
-    return R.preserve_worktree(
-        facts["execution_workspace"], Path(state_dir) / "recovery-snapshots",
-        uid, attempt, facts["base_commit"], facts["base_tree"],
-        expected_git_dir=identity.get("git_dir"),
+    return R.preserve_worktree(facts["execution_workspace"], Path(state_dir) / "recovery-snapshots",
+        uid, attempt, facts["base_commit"], facts["base_tree"], expected_git_dir=identity.get("git_dir"),
         expected_git_pointer_sha256=identity.get("git_pointer_sha256"))
 
 
@@ -89,15 +85,13 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     entry = records.get(attempt)
     if entry is None:
         entry = {"fingerprint": {"message_class": matched, "observed_at": _utc(now)},
-                 "resumes_attempted": 0, "next_not_before": now + 300,
-                 "snapshot_paths": []}
+                 "resumes_attempted": 0, "next_not_before": now + 300, "snapshot_paths": []}
         records[attempt] = entry
     if entry["resumes_attempted"] >= limit:
-        report.append(f"{uid}: spent {entry['resumes_attempted']}/{limit} provider resumes; "
-                      "next error fails")
+        report.append(f"{uid}: spent {entry['resumes_attempted']}/{limit} provider resumes")
         return False
     if entry["next_not_before"] is None:
-        report.append(f"{uid}: charged resume has no backoff bound; failing closed")
+        report.append(f"{uid}: resume backoff unknown; slot retained")
         return False
     if now < entry["next_not_before"]:
         _save(state_dir, state, uid, us)
@@ -108,17 +102,14 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         return True
     snapshot, problem = _preserve(state, uid, us, state_dir)
     if problem:
-        report.append(f"{uid}: provider resume snapshot failed: {problem}")
-        return False
-    # Reobserve after snapshotting.
-    if not _eligible(us["job_id"]):
+        report.append(f"{uid}: snapshot failed: {problem}")
         return False
     entry["snapshot_paths"].append(snapshot["snapshot_path"])
     entry["resumes_attempted"] += 1
-    # An interrupted invocation has no safe backoff bound: never resume it.
+    # Unknown backoff fails closed.
     entry["next_not_before"] = None
     _save(state_dir, state, uid, us)
-    # Sync before sending.
+    # Sync charge.
     with (Path(state_dir) / SS.STATE_FILE).open("rb") as handle:
         os.fsync(handle.fileno())
     descriptor = os.open(str(state_dir), os.O_RDONLY)
@@ -126,12 +117,14 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    if SS._deadline_exceeded(u, us, state, uid):
+    matched = _eligible(us["job_id"])
+    if not matched or SS._deadline_exceeded(u, us, state, uid):
         return False
+    entry["fingerprint"] = {"message_class": matched, "observed_at": _utc(time.time())}
     rc, out, err = U.run(["paseo", "send", str(us["job_id"]), "--no-wait", RESUME_PROMPT], timeout=120)
     entry["next_not_before"] = time.time() + 900
     report.append(f"{uid}: resumed {entry['resumes_attempted']}/{limit} after provider error; "
-                  f"observed {_utc(entry['next_not_before'] - 900)} "
+                  f"observed {entry['fingerprint']['observed_at']} "
                   "(delivery unconfirmed, not progress)")
     if rc:
         report.append(f"{uid}: provider resume send failed: {err or out}; slot remains charged")
@@ -146,8 +139,5 @@ def status(us, u):
     entry = (us.get("provider_resumes") or {}).get(Path(us.get("attempt_dir") or "").name)
     if not entry:
         return None
-    count = entry["resumes_attempted"]
-    deadline = entry["next_not_before"]
-    return {"resumed": count, "max": (u.get("provider_resume") or {}).get("max", 0),
-            "observed_at": (_utc(deadline - 900) if count and deadline is not None
-                            else entry["fingerprint"]["observed_at"])}
+    return {"resumed": entry["resumes_attempted"], "max": (u.get("provider_resume") or {}).get("max", 0),
+            "observed_at": entry["fingerprint"]["observed_at"]}
