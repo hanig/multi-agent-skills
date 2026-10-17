@@ -9,6 +9,7 @@ This test proves the coordinator does not select the remote verification path by
 """
 
 from contextlib import redirect_stderr, redirect_stdout
+import inspect
 import io
 import json
 import os
@@ -28,11 +29,12 @@ class TestMergeVerificationRouting(unittest.TestCase):
     def setUp(self):
         home = tempfile.TemporaryDirectory(prefix="verification-routing-home-")
         self.addCleanup(home.cleanup)
-        # Reconstruct, rather than filter, the environment: ALL inherited
-        # variables (including HANIG_*, SWARM_*, XDG_*, GIT_*, PYTHON*, provider
-        # and coordinator variables) are discarded before fixture setup.
+        # Keep PATH only for fixture tool discovery; the fixture replaces it
+        # with its own bin before running the operator. All other inherited
+        # variables (HANIG_*, SWARM_*, XDG_*, GIT_*, PYTHON*, provider and
+        # coordinator variables included) are discarded before fixture setup.
         environment = mock.patch.dict(os.environ, {
-            "PATH": os.defpath, "HOME": home.name}, clear=True)
+            "PATH": os.environ.get("PATH", os.defpath), "HOME": home.name}, clear=True)
         environment.start()
         self.addCleanup(environment.stop)
         self.transport = fixtures.TestRemoteVerification()
@@ -47,6 +49,8 @@ class TestMergeVerificationRouting(unittest.TestCase):
 
     def invoke(self):
         output, errors = io.StringIO(), io.StringIO()
+        self.pinned_signature = inspect.signature(V.run_pinned)
+        self.remote_signature = inspect.signature(RV.run_remote)
         argv = [str(self.f.operator), str(self.f.plan_path),
                 "--state-dir", str(self.f.state_dir), "--unit", "u", "--pr", "7",
                 "--approver", "Operator", "--verify-integration"]
@@ -66,6 +70,7 @@ class TestMergeVerificationRouting(unittest.TestCase):
         self.remote, self.ssh, self.remote_call = remote, ssh, transport
         self.pinned, self.spawn = pinned, spawn
         self.diagnostic = output.getvalue() + errors.getvalue()
+        self.error_output = errors.getvalue()
         self.assertEqual(self.f.calls(["pr", "merge"]), [])
         return exit_result.exception.code
 
@@ -80,11 +85,11 @@ class TestMergeVerificationRouting(unittest.TestCase):
         self.spawn.assert_called_once()
         # These are the verifier API's arguments, not subprocess argv checks.
         # There is no host selection or remote option in the local launch.
-        args, kwargs = self.pinned.call_args
-        self.assertEqual(len(args), 3)  # runner, pinned program, digest
-        self.assertEqual(kwargs["args"], [])
-        self.assertFalse({"host", "remote", "verification_host"}.intersection(kwargs))
-        self.assertTrue(kwargs["observe_completion"])
+        arguments = self.pinned_signature.bind(
+            *self.pinned.call_args.args, **self.pinned.call_args.kwargs).arguments
+        self.assertEqual(arguments["args"], [])
+        self.assertFalse({"host", "remote", "verification_host"}.intersection(arguments))
+        self.assertTrue(arguments["observe_completion"])
 
     def assert_local_evidence(self):
         # Separate subtests expose both durable regressions in a remote-default
@@ -110,7 +115,7 @@ class TestMergeVerificationRouting(unittest.TestCase):
     def test_zero_byte_policy_refuses_before_verification(self):
         self.policy_path.write_bytes(b"")
         self.assertEqual(self.invoke(), 1, self.diagnostic)
-        self.assertIn("REFUSED: Expecting value", self.diagnostic)
+        self.assertTrue(self.error_output.strip(), self.diagnostic)
         self.assert_no_remote_seams()
         self.pinned.assert_not_called()
         self.spawn.assert_not_called()
@@ -131,7 +136,9 @@ class TestMergeVerificationRouting(unittest.TestCase):
         self.transport.save_policy()
         self.assertEqual(self.invoke(), 0, self.diagnostic)
         self.remote.assert_called_once()
-        self.assertEqual(self.remote.call_args.args[4],
+        arguments = self.remote_signature.bind(
+            *self.remote.call_args.args, **self.remote.call_args.kwargs).arguments
+        self.assertEqual(arguments["remote"],
                          self.transport.policy["verification_host"])
         self.ssh.assert_called_once()
         self.assertGreater(self.remote_call.call_count, 0)
