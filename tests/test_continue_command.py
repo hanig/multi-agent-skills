@@ -177,7 +177,7 @@ class ContinueCommandTests(unittest.TestCase):
 
     def test_remote_only_objects_use_shared_fetch_without_publishing(self):
         fresh = self.tmp / "fresh"
-        self.git("clone", "-q", "--single-branch", "--branch", "main",
+        self.git("clone", "-q", "--no-local", "--single-branch", "--branch", "main",
                  str(self.origin), str(fresh))
         self.repo = fresh
         self.unit["repo"] = self.intent["repo"] = str(fresh)
