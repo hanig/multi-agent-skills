@@ -628,6 +628,7 @@ python3 scripts/swarm.py run      plan.json [--dry-run]
 python3 scripts/swarm.py status   plan.json [--json]
 python3 scripts/swarm.py scope-check plan.json --state-dir DIR --unit ID [--head REV] [--json]
 python3 scripts/swarm.py advance  plan.json
+python3 scripts/swarm.py seq-floor --state-dir DIR --floor N --approver NAME --reason TEXT
 python3 scripts/swarm.py outbox            [--all] [--json]
 python3 scripts/swarm.py outbox \
         --record-receipt KEY --ref ARC-171     # compatibility attestation after confirmation

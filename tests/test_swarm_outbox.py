@@ -16,6 +16,8 @@ import swarm as S
 import swarm_outbox as SO
 
 DEFINITIONS = (
+    "_unique_pairs", "_read_sequence", "_write_sequence", "_sequence_history",
+    "_allocate_sequence", "set_sequence_floor",
     "emit_intent", "backfill_tracker_intents", "_parse_receipt_text",
     "_read_receipts_raw", "_receipt_shape_problem", "load_acknowledgments",
     "_receipt_grade", "_append_receipt_atomic", "record_receipt",
@@ -27,6 +29,7 @@ DEFINITIONS = (
     "_has_bound_merge_evidence", "_intent_key",
 )
 CONSTANTS = (
+    "OUTBOX_SEQ",
     "OUTBOX", "RECEIPT_SCHEMA_VERSION", "TRACKER_EVENTS", "RECEIPTS",
     "RECEIPT_CONFIRMED", "RECEIPT_CONFIRMING_SOURCES", "UNACKNOWLEDGED",
     "ATTESTED_UNSPECIFIED", "ATTESTED_CONFIRMED", "ACKNOWLEDGED", "CONFLICT",
