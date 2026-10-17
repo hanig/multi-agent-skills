@@ -994,6 +994,7 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `runtime` | what this executes in, and what checks it (see below) |
 | `requires_verification` | claims an authorized verifier must establish before this closes |
 | `continuation` | `{"max": N}`: bounded nudges to a code agent that settled without producing |
+| `provider_resume` | `{"max": N}`: code only, integer 0..3, default off; resume listed transient provider errors in the same attempt after 5 minutes, then 15 minutes for each later resume |
 | `pool`, `gpu_hours`, `env` | declared resource facts |
 
 Every `code` unit runs in a coordinator-created linked worktree at its anchored
