@@ -370,7 +370,6 @@ TRACKER_EVENTS = {
 }
 
 def _read_sequence(state_dir):
-    """Read the coordinator-owned counter."""
     try:
         record = json.loads((Path(state_dir) / OUTBOX_SEQ).read_text())
     except FileNotFoundError:
@@ -384,7 +383,6 @@ def _read_sequence(state_dir):
 
 
 def _write_sequence(state_dir, record):
-    """Persist the counter atomically, including its directory entry."""
     directory = Path(state_dir)
     directory.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".outbox-seq-", dir=str(directory))
@@ -401,11 +399,10 @@ def _write_sequence(state_dir, record):
 
 
 def _sequence_history(path, strict=True):
-    """Read dedup keys and migration history without changing journal bytes.
+    """Read keys and migration history without changing bytes.
 
-    A torn final append is not a published intent; the append primitive heals
-    it only after allocation succeeds. Migration requires valid history;
-    a retained counter permits deduplication using every readable key.
+    Append drops incomplete JSON tails; complete JSON, even without a newline,
+    is published and migrates. A retained counter permits every readable key.
     """
     try:
         raw = path.read_text()
@@ -436,7 +433,6 @@ def _sequence_history(path, strict=True):
 
 
 def _allocate_sequence(state_dir, history):
-    """Reserve durably under the coordinator lease; gaps are allowed."""
     record = _read_sequence(state_dir)
     if record is None:
         receipts, problems = load_acknowledgments(state_dir)
@@ -464,7 +460,6 @@ def _allocate_sequence(state_dir, history):
 
 
 def set_sequence_floor(state_dir, floor, approver, reason):
-    """Record an operator's floor under the coordinator lease."""
     if type(floor) is not int or floor < 0:
         raise OutboxError("floor must be a non-negative integer")
     if not _nonblank_text(approver) or not _nonblank_text(reason):
@@ -487,6 +482,8 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     Deterministic from state: replaying the same local transition produces the
     same key. A connected drainer must deduplicate or read back before retrying
     a remote mutation; the key alone cannot establish what landed.
+    Allocation never reuses or decreases published outbox values after migration.
+    A reserved-but-unpublished value may be reused after the counter is lost.
     There is no ordering guarantee across clock rollback, restoring stale
     coordinator state, or simultaneous loss of outbox-seq.json and the outbox.
     """
