@@ -65,6 +65,7 @@ class TestDurableSequence(DrainCase):
                 '--state-dir', str(self.state), '--root', str(self.root / 'runs'),
                 '--max-new-dispatches', '0')
         self.assertEqual(result[0], 0, result)
+        return result
 
     def emit(self, uid='new'):
         return SO.emit_intent(self.state, 'project', uid, 'SUBMITTED', {})
@@ -72,6 +73,60 @@ class TestDurableSequence(DrainCase):
     def assert_blocked(self):
         self.assertIsNone(self.emit())
         self.assertFalse(self.seq.exists())
+
+    def check_malformed(self, raw):
+        self.advance('SUBMITTED')
+        row = self.box.read_bytes()
+        self.seq.unlink()
+        before = row + raw + b'\n' + row
+        self.box.write_bytes(before)
+        result = self.advance('FAILED')
+        self.assertIn(str(self.box) + ' line 2:', result[2])
+        self.assertIn('swarm.py seq-floor', result[2])
+        self.assertFalse(self.seq.exists())
+        self.assertEqual(self.box.read_bytes(), before)
+        self.assertEqual(self.floor(20)[0], 0)
+        self.advance('FAILED')
+        self.assertEqual(json.loads(self.box.read_bytes()[len(before):])['seq'], 21)
+        self.advance('HELD')
+        self.assert_water(22)
+
+    def test_counter_refusal_and_recovery(self):
+        self.advance('SUBMITTED')
+        before = self.box.read_bytes()
+        for raw in (b'{', b'\xff', b'[' * 10000 + b'0' + b']' * 10000):
+            with self.subTest(size=len(raw)):
+                self.seq.write_bytes(raw)
+                result = self.advance('FAILED')
+                self.assertIn(str(self.seq), result[2])
+                self.assertIn('swarm.py seq-floor', result[2])
+                self.assertEqual(self.seq.read_bytes(), raw)
+                self.assertEqual(self.box.read_bytes(), before)
+                self.assertEqual(self.floor(20)[0], 0)
+                self.assert_water(20)
+        self.advance('FAILED')
+        self.assertEqual(self.intents()[-1]['seq'], 21)
+
+    def test_invalid_utf8_middle(self):
+        self.check_malformed(b'\xff')
+
+    def test_deep_json(self):
+        self.check_malformed(b'[' * 10000 + b'0' + b']' * 10000)
+
+    def test_duplicate_members(self):
+        self.check_malformed(b'{"key":"higher","seq":20,"seq":1}')
+
+    def test_parser_limit(self):
+        # 3.9 lacks the integer-conversion limit; exercise the same ValueError
+        # at the parser boundary there, and the real runtime limit on 3.12.
+        raw = b'{"key":"huge","seq":' + b'1' * 5000 + b'}'
+        loads = json.loads
+        def limited(data, *args, **kwargs):
+            if not hasattr(sys, 'set_int_max_str_digits') and data.strip() == raw.decode():
+                raise ValueError('integer string conversion limit')
+            return loads(data, *args, **kwargs)
+        with mock.patch.object(SO.json, 'loads', limited):
+            self.check_malformed(raw)
 
     def test_loss_order(self):
         self.intent(key='seed', seq=6, at=AT)
