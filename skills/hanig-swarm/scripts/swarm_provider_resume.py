@@ -1,4 +1,5 @@
 """Bounded provider-error turns inside an existing code attempt (no judging)."""
+import re
 import time
 from pathlib import Path
 
@@ -106,10 +107,14 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     entry = pending(us)
     observed, problem = _observation(us["job_id"])
     if problem:
+        if entry is None:
+            return False
         _save(state_dir, state, uid, us)
         report.append(f"{uid}: provider resume observation unavailable: {problem}; retry next advance")
         return True
     if observed["status"] != "error":
+        if entry is None:
+            return False
         if observed["status"] not in ("running", "idle", "done", "complete", "completed"):
             return False
         # Reconcile an accepted send after a crash.
@@ -124,7 +129,7 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         return True
     message = observed["message"]
     matched = next((s for s in RETRYABLE_PROVIDER_MESSAGES if s in message), None)
-    if "flagged for possible cybersecurity risk" in message or not matched:
+    if re.search("flagged for possible cybersecurity risk", message, re.IGNORECASE) or not matched:
         return False
     now = time.time()
     if (entry and entry.get("sending_at") and observed["updated_at"]

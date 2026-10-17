@@ -167,6 +167,22 @@ class ProviderResumeTests(unittest.TestCase):
         self.assertEqual(self.sends, [])
         self.assertFalse(self.workspace.exists())
 
+    def test_capitalized_filter_never_resumes(self):
+        self.message = "Flagged for possible cybersecurity risk (503)"
+        self.advance()
+        self.assertEqual(self.us["state"], "FAILED")
+        self.assertEqual(self.sends, [])
+
+    def test_nonerror_observation_needs_a_pending_resume(self):
+        with mock.patch.object(P, "_observation", return_value=({"status": "idle"}, None)):
+            self.advance()
+        self.assertEqual(self.us["state"], "FAILED")
+
+    def test_unreadable_observation_needs_a_pending_resume(self):
+        with mock.patch.object(P, "_observation", return_value=(None, "agent not found")):
+            self.advance()
+        self.assertEqual(self.us["state"], "FAILED")
+
     def test_failed_lifecycle_is_not_error(self):
         self.agent_status = "failed"
         self.advance()
