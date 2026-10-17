@@ -4,6 +4,7 @@ Python 3.8+, standard library only.
 """
 
 import fcntl
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -353,6 +354,7 @@ def _intent_key(project, uid, unit_state, us, verb, kind, evidence):
 #     self-assertion this whole family refuses.
 OUTBOX = "outbox.jsonl"
 OUTBOX_SEQ = "outbox-seq.json"
+OUTBOX_RECOVERING = "outbox-seq.recovering"
 RECEIPT_SCHEMA_VERSION = 2
 
 # Unit states that justify a tracker mutation, and what each means to a reader.
@@ -399,7 +401,7 @@ def _read_sequence(state_dir):
     return record
 
 
-def _write_sequence(state_dir, record):
+def _write_sequence(state_dir, record, name=OUTBOX_SEQ):
     directory = Path(state_dir)
     directory.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".outbox-seq-", dir=str(directory))
@@ -408,7 +410,7 @@ def _write_sequence(state_dir, record):
             handle.write(json.dumps(record, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, directory / OUTBOX_SEQ)
+        os.replace(temporary, directory / name)
         SJ._fsync_directory(directory)
     finally:
         if os.path.exists(temporary):
@@ -477,20 +479,47 @@ def set_sequence_floor(state_dir, floor, approver, reason):
         raise OutboxError("floor must be a non-negative integer")
     if not _nonblank_text(approver) or not _nonblank_text(reason):
         raise OutboxError("seq-floor requires a non-blank approver and reason")
-    replaced_malformed = False
+    directory = Path(state_dir)
+    path, marker = directory / OUTBOX_SEQ, directory / OUTBOX_RECOVERING
+    recovering = os.path.lexists(marker)
+    pending = json.loads(marker.read_text()) if recovering else {}
     try:
-        previous = _read_sequence(state_dir)
+        obstruction = not stat.S_ISREG(path.lstat().st_mode)
+    except FileNotFoundError:
+        obstruction = False
+    replaced_malformed = obstruction or pending.get("replaced_malformed_counter", False)
+    try:
+        previous = None if obstruction else _read_sequence(state_dir)
     except OutboxError:
         previous = None  # Recovery uses the operator's bound, never damaged history.
         replaced_malformed = True
-    if previous is not None and floor <= previous["high_water"]:
+    if previous is not None and floor <= previous["high_water"] and not recovering:
         raise OutboxError("floor must exceed current high_water %d" %
                           previous["high_water"])
+    if recovering:
+        floor = max(floor, pending["high_water"],
+                    previous["high_water"] if previous else 0)
     record = {"schema_version": 1, "high_water": floor,
               "approver": approver, "reason": reason,
               "replaced_malformed_counter": replaced_malformed,
               "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if obstruction or recovering:
+        record["replaced_obstruction"] = pending.get("replaced_obstruction") or (
+            "outbox-seq.obstruction-" + datetime.now(timezone.utc).strftime(
+                "%Y%m%dT%H%M%S.%fZ"))
+        # Persist intent before removing the counter path; resume from this
+        # record even when the counter was installed before interruption.
+        _write_sequence(directory, record, OUTBOX_RECOVERING)
+        if obstruction:
+            quarantine = directory / record["replaced_obstruction"]
+            if os.path.lexists(quarantine):
+                raise OutboxError("quarantine already exists: %s" % quarantine)
+            os.rename(path, quarantine)
+            SJ._fsync_directory(directory)
     _write_sequence(state_dir, record)
+    if obstruction or recovering:
+        marker.unlink()
+        SJ._fsync_directory(directory)
     return record
 
 
@@ -538,6 +567,8 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     key = _intent_key(project, uid, unit_state, us, verb, kind, evidence)
     path = Path(state_dir) / OUTBOX
     try:
+        if os.path.lexists(Path(state_dir) / OUTBOX_RECOVERING):
+            raise OutboxError("sequence recovery is incomplete")
         history = _sequence_history(path, strict=_read_sequence(state_dir) is None)
         if any(previous["key"] == key for previous in history or []):
             return None          # already emitted; do not duplicate

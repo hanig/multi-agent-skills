@@ -136,6 +136,107 @@ class TestDurableSequence(DrainCase):
     def test_malformed_middle(self):
         self.check_malformed(b'{"key":"interrupted","seq":')
 
+    def recover_obstruction(self, kind, stage=''):
+        import socket
+        self.advance('SUBMITTED')  # Complete history must not bypass the marker.
+        before = self.box.read_bytes()
+        self.seq.unlink()
+        target = self.state / 'target'
+        target.write_bytes(b'untouched')
+        if kind == 'link':
+            self.seq.symlink_to(target)
+        elif kind == 'fifo':
+            SO.os.mkfifo(self.seq)
+        elif kind == 'socket':
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.bind(str(self.seq))
+        else:
+            self.seq.mkdir()
+            if kind == 'nonempty':
+                (self.seq / 'payload').write_bytes(b'preserve me')
+        original = self.seq.lstat()
+        script = """
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv.pop(1))
+import swarm as S
+import swarm_outbox as SO
+stage = sys.argv.pop(1)
+write, rename, open_file = SO._write_sequence, os.rename, os.open
+def guarded(path, *args, **kwargs):
+    if Path(path).name == SO.OUTBOX_SEQ:
+        raise AssertionError('opened obstruction')
+    return open_file(path, *args, **kwargs)
+def writing(directory, record, name=SO.OUTBOX_SEQ):
+    write(directory, record, name)
+    if (stage == 'a' and name == SO.OUTBOX_RECOVERING or
+            stage == 'c' and name == SO.OUTBOX_SEQ):
+        os._exit(99)
+def moving(source, destination):
+    rename(source, destination)
+    if stage == 'b':
+        os._exit(99)
+os.open, SO._write_sequence, os.rename = guarded, writing, moving
+S.main()
+"""
+        result = subprocess.run([sys.executable, '-c', script, str(SWARM.parent), stage]
+                                + self.floor_args(20), capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 99 if stage else 0, result.stderr)
+        marker = self.state / 'outbox-seq.recovering'
+        if stage:
+            pending = json.loads(marker.read_text())
+            self.assertEqual(pending['high_water'], 20)
+            self.assertEqual(pending['approver'], 'operator')
+            self.assertEqual(pending['reason'], 'drained trailer')
+            self.assertRegex(pending['at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+            result = self.advance('FAILED')
+            self.assertIn('sequence recovery is incomplete', result[2])
+            self.assertIn('swarm.py seq-floor', result[2])
+            self.assertEqual(self.box.read_bytes(), before)
+            if stage == 'b':
+                self.assertFalse(self.seq.exists())
+            if stage == 'c':
+                self.assert_water(20)
+            self.assertEqual(self.floor(10)[0], 0)  # Resume cannot lower the floor.
+        self.assertFalse(marker.exists())
+        self.assert_water(20)
+        quarantine = self.state / self.counter()['replaced_obstruction']
+        self.assertEqual(quarantine.lstat().st_ino, original.st_ino)
+        self.assertEqual(quarantine.lstat().st_mode, original.st_mode)
+        if kind == 'nonempty':
+            self.assertEqual((quarantine / 'payload').read_bytes(), b'preserve me')
+        if kind == 'empty':
+            self.assertEqual(list(quarantine.iterdir()), [])
+        if kind == 'link':
+            self.assertEqual(SO.os.readlink(quarantine), str(target))
+        self.assertEqual(target.read_bytes(), b'untouched')
+        self.advance('FAILED')
+        self.assertEqual(self.intents()[-1]['seq'], 21)
+
+    def test_empty_directory_recovery(self):
+        self.recover_obstruction('empty')
+
+    def test_nonempty_directory_recovery(self):
+        self.recover_obstruction('nonempty')
+
+    def test_symlink_quarantine(self):
+        self.recover_obstruction('link')
+
+    def test_fifo_quarantine(self):
+        self.recover_obstruction('fifo')
+
+    def test_socket_quarantine(self):
+        self.recover_obstruction('socket')
+
+    def test_interruption_after_marker(self):
+        self.recover_obstruction('nonempty', 'a')
+
+    def test_interruption_after_quarantine(self):
+        self.recover_obstruction('nonempty', 'b')
+
+    def test_interruption_after_counter(self):
+        self.recover_obstruction('nonempty', 'c')
+
     def test_fifo_counter_requires_floor(self):
         fifo = self.state / 'fifo'
         SO.os.mkfifo(fifo)
