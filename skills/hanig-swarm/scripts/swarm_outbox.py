@@ -418,7 +418,7 @@ def _write_sequence(state_dir, record, name=OUTBOX_SEQ):
 
 
 def _sequence_history(path, strict=True):
-    """Read migration history; complete newline-less JSON is published too."""
+    """Read history, including complete newline-less JSON."""
     try:
         handle = path.open("rb")
     except FileNotFoundError:
@@ -436,7 +436,6 @@ def _sequence_history(path, strict=True):
             except (UnicodeDecodeError, RecursionError, ValueError) as exc:
                 if (not line.endswith(b"\n") and
                         isinstance(exc, (UnicodeDecodeError, json.JSONDecodeError))):
-                    # Only EOF lacks a newline; match the append healer.
                     continue
                 if strict:
                     raise OutboxError("%s line %d: incomplete outbox history: %s" %
@@ -447,7 +446,7 @@ def _sequence_history(path, strict=True):
 
 
 def _allocate_sequence(state_dir, history):
-    """Use history only to migrate; a valid counter is independent of it."""
+    """Use history only for counter-less migration."""
     record = _read_sequence(state_dir)
     if record is None:
         receipts, problems = load_acknowledgments(state_dir)
@@ -491,7 +490,7 @@ def set_sequence_floor(state_dir, floor, approver, reason):
     try:
         previous = None if obstruction else _read_sequence(state_dir)
     except OutboxError:
-        previous = None  # Recovery uses the operator's bound, never damaged history.
+        previous = None
         replaced_malformed = True
     if previous is not None and floor <= previous["high_water"] and not recovering:
         raise OutboxError("floor must exceed current high_water %d" %
@@ -507,13 +506,13 @@ def set_sequence_floor(state_dir, floor, approver, reason):
         record["replaced_obstruction"] = pending.get("replaced_obstruction") or (
             "outbox-seq.obstruction-" + datetime.now(timezone.utc).strftime(
                 "%Y%m%dT%H%M%S.%fZ"))
-        # Persist intent before removing the counter path; resume from this
-        # record even when the counter was installed before interruption.
+        stem, suffix = record["replaced_obstruction"], 0
+        while obstruction and os.path.lexists(directory / record["replaced_obstruction"]):
+            suffix += 1
+            record["replaced_obstruction"] = "%s-%d" % (stem, suffix)
         _write_sequence(directory, record, OUTBOX_RECOVERING)
         if obstruction:
             quarantine = directory / record["replaced_obstruction"]
-            if os.path.lexists(quarantine):
-                raise OutboxError("quarantine already exists: %s" % quarantine)
             os.rename(path, quarantine)
             SJ._fsync_directory(directory)
     _write_sequence(state_dir, record)

@@ -136,9 +136,9 @@ class TestDurableSequence(DrainCase):
     def test_malformed_middle(self):
         self.check_malformed(b'{"key":"interrupted","seq":')
 
-    def recover_obstruction(self, kind, stage=''):
+    def recover(self, kind, stage=''):
         import socket
-        self.advance('SUBMITTED')  # Complete history must not bypass the marker.
+        self.advance('SUBMITTED')
         before = self.box.read_bytes()
         self.seq.unlink()
         target = self.state / 'target'
@@ -154,7 +154,7 @@ class TestDurableSequence(DrainCase):
             self.seq.mkdir()
             if kind == 'nonempty':
                 (self.seq / 'payload').write_bytes(b'preserve me')
-        original = self.seq.lstat()
+        prior = self.seq.lstat()
         script = """
 import os, sys
 from pathlib import Path
@@ -167,13 +167,13 @@ def guarded(path, *args, **kwargs):
     if Path(path).name == SO.OUTBOX_SEQ:
         raise AssertionError('opened obstruction')
     return open_file(path, *args, **kwargs)
-def writing(directory, record, name=SO.OUTBOX_SEQ):
-    write(directory, record, name)
+def writing(root, record, name=SO.OUTBOX_SEQ):
+    write(root, record, name)
     if (stage == 'a' and name == SO.OUTBOX_RECOVERING or
             stage == 'c' and name == SO.OUTBOX_SEQ):
         os._exit(99)
-def moving(source, destination):
-    rename(source, destination)
+def moving(source, target):
+    rename(source, target)
     if stage == 'b':
         os._exit(99)
 os.open, SO._write_sequence, os.rename = guarded, writing, moving
@@ -197,45 +197,60 @@ S.main()
                 self.assertFalse(self.seq.exists())
             if stage == 'c':
                 self.assert_water(20)
-            self.assertEqual(self.floor(10)[0], 0)  # Resume cannot lower the floor.
+            self.assertEqual(self.floor(10)[0], 0)
         self.assertFalse(marker.exists())
         self.assert_water(20)
-        quarantine = self.state / self.counter()['replaced_obstruction']
-        self.assertEqual(quarantine.lstat().st_ino, original.st_ino)
-        self.assertEqual(quarantine.lstat().st_mode, original.st_mode)
+        saved = self.state / self.counter()['replaced_obstruction']
+        self.assertEqual(saved.lstat().st_ino, prior.st_ino)
+        self.assertEqual(saved.lstat().st_mode, prior.st_mode)
         if kind == 'nonempty':
-            self.assertEqual((quarantine / 'payload').read_bytes(), b'preserve me')
+            self.assertEqual((saved / 'payload').read_bytes(), b'preserve me')
         if kind == 'empty':
-            self.assertEqual(list(quarantine.iterdir()), [])
+            self.assertEqual(list(saved.iterdir()), [])
         if kind == 'link':
-            self.assertEqual(SO.os.readlink(quarantine), str(target))
+            self.assertEqual(SO.os.readlink(saved), str(target))
         self.assertEqual(target.read_bytes(), b'untouched')
         self.advance('FAILED')
         self.assertEqual(self.intents()[-1]['seq'], 21)
 
     def test_empty_directory_recovery(self):
-        self.recover_obstruction('empty')
+        self.recover('empty')
 
     def test_nonempty_directory_recovery(self):
-        self.recover_obstruction('nonempty')
+        self.recover('nonempty')
 
     def test_symlink_quarantine(self):
-        self.recover_obstruction('link')
+        self.recover('link')
 
     def test_fifo_quarantine(self):
-        self.recover_obstruction('fifo')
+        self.recover('fifo')
 
     def test_socket_quarantine(self):
-        self.recover_obstruction('socket')
+        self.recover('socket')
 
     def test_interruption_after_marker(self):
-        self.recover_obstruction('nonempty', 'a')
+        self.recover('nonempty', 'a')
 
     def test_interruption_after_quarantine(self):
-        self.recover_obstruction('nonempty', 'b')
+        self.recover('nonempty', 'b')
 
     def test_interruption_after_counter(self):
-        self.recover_obstruction('nonempty', 'c')
+        self.recover('nonempty', 'c')
+
+    def test_occupied_quarantine_recovery(self):
+        self.floor(20)
+        pending = self.counter()
+        self.seq.unlink()
+        self.seq.mkdir()
+        occupied = self.state / 'outbox-seq.obstruction-20260101T000000Z'
+        occupied.write_text('keep')
+        pending['replaced_obstruction'] = occupied.name
+        (self.state / SO.OUTBOX_RECOVERING).write_text(json.dumps(pending))
+        self.assertEqual(self.floor(20)[0], 0)
+        self.assertEqual(occupied.read_text(), 'keep')
+        self.assertTrue((self.state / self.counter()['replaced_obstruction']).is_dir())
+        self.advance('SUBMITTED')
+        self.assert_water(21)
 
     def test_fifo_counter_requires_floor(self):
         fifo = self.state / 'fifo'
@@ -268,7 +283,7 @@ S.main()
             return open_path(path, *args, **kwargs)
 
         def independent(directory, history):
-            # Allocation cannot reuse even predecoded dedup history.
+            # Guard predecoded history too.
             unusable = mock.MagicMock()
             unusable.__iter__.side_effect = AssertionError('allocation used history')
             with mock.patch.object(Path, 'open', no_history):
@@ -297,7 +312,7 @@ S.main()
         self.assertEqual(duplicate['seq'], 3)
         self.assertEqual(LS.comment_id('workspace', 'project', '1', duplicate['key']),
                          LS.comment_id('workspace', 'project', '1', old['key']))
-        # Drain reports the corrupt line but still processes collectable rows.
+        # The corrupt line is still reported.
         self.assertEqual(self.drain(), 3, self.stdout + self.stderr)
         self.assertIn('line 1', self.stdout + self.stderr)
         self.assertEqual(self.acks.read_bytes(), receipts)
@@ -358,8 +373,7 @@ S.main()
         self.check_malformed(b'{"key":"higher","seq":20,"seq":1}')
 
     def test_parser_limit(self):
-        # 3.9 lacks the integer-conversion limit; exercise the same ValueError
-        # at the parser boundary there, and the real runtime limit on 3.12.
+        # Simulate the integer limit on 3.9; use the real limit on 3.12.
         raw = b'{"key":"huge","seq":' + b'1' * 5000 + b'}'
         loads = json.loads
         def limited(data, *args, **kwargs):
