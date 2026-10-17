@@ -370,7 +370,7 @@ TRACKER_EVENTS = {
 }
 
 def _read_sequence(state_dir):
-    """Only coordinator state supplies allocation authority after migration."""
+    """Read the coordinator-owned counter."""
     try:
         record = json.loads((Path(state_dir) / OUTBOX_SEQ).read_text())
     except FileNotFoundError:
@@ -384,7 +384,7 @@ def _read_sequence(state_dir):
 
 
 def _write_sequence(state_dir, record):
-    """Publish a file-fsynced counter, then fsync its directory before return."""
+    """Persist the counter atomically, including its directory entry."""
     directory = Path(state_dir)
     directory.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".outbox-seq-", dir=str(directory))
@@ -400,11 +400,12 @@ def _write_sequence(state_dir, record):
             os.unlink(temporary)
 
 
-def _sequence_history(path):
+def _sequence_history(path, strict=True):
     """Read dedup keys and migration history without changing journal bytes.
 
     A torn final append is not a published intent; the append primitive heals
-    it only after allocation succeeds. Complete malformed records refuse.
+    it only after allocation succeeds. Migration requires valid history;
+    a retained counter permits deduplication using every readable key.
     """
     try:
         raw = path.read_text()
@@ -420,11 +421,16 @@ def _sequence_history(path):
         except ValueError:
             if index == len(lines) - 1 and not raw.endswith("\n"):
                 break
-            raise OutboxError("corrupt outbox history")
-        if (not isinstance(record, dict) or not _nonblank_text(record.get("key"))
-                or ("seq" in record and
-                    (type(record["seq"]) is not int or record["seq"] <= 0))):
-            raise OutboxError("invalid outbox history key or sequence")
+            if strict:
+                raise OutboxError("corrupt outbox history")
+            continue
+        if not isinstance(record, dict) or not _nonblank_text(record.get("key")):
+            if strict:
+                raise OutboxError("invalid outbox history key")
+            continue
+        if (strict and "seq" in record and
+                (type(record["seq"]) is not int or record["seq"] <= 0)):
+            raise OutboxError("invalid outbox history sequence")
         records.append(record)
     return records
 
@@ -437,8 +443,7 @@ def _allocate_sequence(state_dir, history):
         if problems:
             raise OutboxError("incomplete receipt history")
         if history is None:
-            # Even an empty receipt file distinguishes missing history from
-            # the specified new-directory case. stat errors are not absence.
+            # An empty receipt file still rules out the new-directory case.
             try:
                 (Path(state_dir) / RECEIPTS).stat()
             except FileNotFoundError:
@@ -459,7 +464,7 @@ def _allocate_sequence(state_dir, history):
 
 
 def set_sequence_floor(state_dir, floor, approver, reason):
-    """Record an operator's evidence-based floor under the coordinator lease."""
+    """Record an operator's floor under the coordinator lease."""
     if type(floor) is not int or floor < 0:
         raise OutboxError("floor must be a non-negative integer")
     if not _nonblank_text(approver) or not _nonblank_text(reason):
@@ -520,7 +525,7 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     key = _intent_key(project, uid, unit_state, us, verb, kind, evidence)
     path = Path(state_dir) / OUTBOX
     try:
-        history = _sequence_history(path)
+        history = _sequence_history(path, strict=_read_sequence(state_dir) is None)
         if any(previous["key"] == key for previous in history or []):
             return None          # already emitted; do not duplicate
         seq = _allocate_sequence(state_dir, history)
