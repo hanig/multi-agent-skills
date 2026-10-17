@@ -16,11 +16,11 @@ RETRYABLE_PROVIDER_MESSAGES = (
     "502", "503", "504", "temporarily unavailable",
 )
 RESUME_PROMPT = (
-    "Provider error: continue in the SAME attempt/worktree; "
-    "committed/pushed work is intact. Preserve uncommitted work, the current "
+    "Provider interruption: continue in SAME attempt/worktree from the current "
     "review round number, dispositions and interrupted reservations/results. "
-    "Resume is NOT a review round. Never reset the ledger, replay the seed or "
-    "start another attempt. Keep the completion protocol."
+    "Committed/pushed work is intact; preserve uncommitted work. Resume is NOT "
+    "a review round: never reset the ledger, replay the seed or start another "
+    "attempt. Keep the completion protocol."
 )
 
 
@@ -78,6 +78,8 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     limit = (u.get("provider_resume") or {}).get("max", 0)
     if not limit or u.get("kind") != "code" or not us.get("job_id"):
         return False
+    if SS._deadline_exceeded(u, us, state, uid):
+        return False
     matched = _eligible(us["job_id"])
     if not matched:
         return False
@@ -94,6 +96,9 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         report.append(f"{uid}: spent {entry['resumes_attempted']}/{limit} provider resumes; "
                       "next error fails")
         return False
+    if entry["next_not_before"] is None:
+        report.append(f"{uid}: charged resume has no backoff bound; failing closed")
+        return False
     if now < entry["next_not_before"]:
         _save(state_dir, state, uid, us)
         report.append(f"{uid}: waiting for backoff; provider error observed "
@@ -108,7 +113,8 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         return False
     entry["snapshot_paths"].append(snapshot["snapshot_path"])
     entry["resumes_attempted"] += 1
-    entry["next_not_before"] = time.time() + 900
+    # An interrupted invocation has no safe backoff bound: never resume it.
+    entry["next_not_before"] = None
     _save(state_dir, state, uid, us)
     # Sync before sending.
     with (Path(state_dir) / SS.STATE_FILE).open("rb") as handle:
@@ -118,9 +124,12 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    if SS._deadline_exceeded(u, us, state, uid):
+        return False
     rc, out, err = U.run(["paseo", "send", str(us["job_id"]), "--no-wait", RESUME_PROMPT], timeout=120)
+    entry["next_not_before"] = time.time() + 900
     report.append(f"{uid}: resumed {entry['resumes_attempted']}/{limit} after provider error; "
-                  f"charge observed {_utc(entry['next_not_before'] - 900)} "
+                  f"observed {_utc(entry['next_not_before'] - 900)} "
                   "(delivery unconfirmed, not progress)")
     if rc:
         report.append(f"{uid}: provider resume send failed: {err or out}; slot remains charged")
@@ -136,6 +145,7 @@ def status(us, u):
     if not entry:
         return None
     count = entry["resumes_attempted"]
+    deadline = entry["next_not_before"]
     return {"resumed": count, "max": (u.get("provider_resume") or {}).get("max", 0),
-            "observed_at": (_utc(entry["next_not_before"] - 900) if count
+            "observed_at": (_utc(deadline - 900) if count and deadline is not None
                             else entry["fingerprint"]["observed_at"])}
