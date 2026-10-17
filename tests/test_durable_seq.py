@@ -182,6 +182,23 @@ SO.emit_intent(sys.argv[2], 'project', 'crashed', 'SUBMITTED', {})
                 self.assertFalse((self.state / SO.OUTBOX).exists())
                 self.assertNotEqual(self.floor(20)[0], 0)
 
+    def test_floor_recovers_corrupt_journal_and_dedup_reads_past_corruption(self):
+        path = self.state / SO.OUTBOX
+        for corrupt in ('garbage\n', '{"key":"bad","seq":0}\n', '[]\n'):
+            with self.subTest(corrupt=corrupt):
+                old = SO.outbox_key('project', 'old', 'SUBMITTED', None)
+                before = (corrupt + json.dumps({'key': old, 'seq': 4}) + '\n').encode()
+                path.write_bytes(before)
+                self.assertIsNone(self.emit())  # no counter: migration refuses
+                self.assertEqual(self.floor(20)[0], 0)
+                self.assertIsNone(self.emit('old'))
+                self.assertEqual(self.counter()['high_water'], 20)
+                self.assertIsNotNone(self.emit())
+                after = path.read_bytes()
+                self.assertTrue(after.startswith(before))
+                self.assertEqual(json.loads(after[len(before):])['seq'], 21)
+                (self.state / SO.OUTBOX_SEQ).unlink()
+
     def test_migration_refuses_corrupt_history_and_empty_receipts_without_outbox(self):
         path = self.state / SO.OUTBOX
         path.write_text('{"key":"old","seq":4}\n')
