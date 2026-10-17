@@ -1,4 +1,5 @@
 """Opt-in seed admission checks run before allocating any attempt."""
+import io
 import json
 import os
 import shutil
@@ -6,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -123,6 +125,23 @@ class ValidateSeedsTests(unittest.TestCase):
                                check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("plan is valid", result.stdout)
+
+    def test_cli_only_calls_reachability_with_check_seeds(self):
+        import swarm
+        self.plan.write_text(json.dumps({"units": [self.unit()]}))
+        for flags, calls in (([], 0), (["--check-seeds"], 1)):
+            with self.subTest(flags=flags), mock.patch.dict(
+                    os.environ, self.env, clear=True), mock.patch.object(
+                    sys, "argv", [str(SWARM), "validate", str(self.plan)] + flags), \
+                    mock.patch.object(swarm.SP, "_seed_reachability_problem",
+                                      return_value=None) as reachability, \
+                    redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as exited:
+                    swarm.main()
+                self.assertEqual(exited.exception.code, 0)
+                self.assertEqual(reachability.call_count, calls)
+                if calls:
+                    self.assertEqual(reachability.call_args.args[0], self.seed)
 
     def test_without_seed_flag_passes_without_git(self):
         unit = self.unit(repo=str(self.tmp / "nonexistent"))

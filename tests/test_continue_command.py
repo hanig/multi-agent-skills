@@ -1,11 +1,8 @@
 """Exercise continuation seed authority and atomic plan publication via the CLI."""
-import functools
-import http.server
 import json
 import os
 import subprocess
 import sys
-import threading
 import unittest
 from pathlib import Path
 from tests import test_validate_seeds as seed_fixture
@@ -94,12 +91,14 @@ class ContinueCommandTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def snapshot(self):
-        return {str(p.relative_to(self.tmp)):
-                ("link", os.readlink(str(p))) if p.is_symlink() else
-                ("dir",) if p.is_dir() else ("file", p.read_bytes())
-                for p in self.tmp.rglob("*")}
+        # The shared seed check may write fetch metadata, as validate does.
+        # Include checkout/index/ref identities alongside all non-Git bytes.
+        return (seed_fixture.ValidateSeedsTests.snapshot(self),
+                self.git("rev-parse", "HEAD"),
+                self.git("ls-files", "--stage"), self.git("show-ref"),
+                self.git("worktree", "list", "--porcelain"))
 
-    def test_preview_matches_hand_computation_and_changes_nothing(self):
+    def test_preview_matches_hand_computation_without_publishing(self):
         before = self.snapshot()
         unit = self.result_unit(self.continuation())
         expected_base = self.git("merge-base", "origin/main", self.head)
@@ -176,7 +175,7 @@ class ContinueCommandTests(unittest.TestCase):
         self.assertEqual(self.result_unit(self.continuation())["seed"]["head"], self.head)
         self.assertEqual(self.snapshot(), before)
 
-    def test_remote_only_objects_do_not_mutate_source_git(self):
+    def test_remote_only_objects_use_shared_fetch_without_publishing(self):
         fresh = self.tmp / "fresh"
         self.git("clone", "-q", "--single-branch", "--branch", "main",
                  str(self.origin), str(fresh))
@@ -184,59 +183,18 @@ class ContinueCommandTests(unittest.TestCase):
         self.unit["repo"] = self.intent["repo"] = str(fresh)
         self.save()
         before = self.snapshot()
+        absent = subprocess.run(["git", "-C", str(fresh), "cat-file", "-e", self.head],
+                                env=self.env, capture_output=True)
+        self.assertNotEqual(absent.returncode, 0)
         self.assertEqual(self.result_unit(self.continuation())["seed"]["head"], self.head)
-        self.assertEqual(self.snapshot(), before)
-
-    def test_conditional_credentials_survive_scratch_fetch(self):
-        class Auth(http.server.SimpleHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def do_GET(self):
-                if (self.headers.get("Authorization") != "Basic dGVzdDp0ZXN0"
-                        or self.headers.get_all("X-Config") != ["once"]):
-                    self.send_response(401)
-                    self.send_header("WWW-Authenticate", 'Basic realm="fixture"')
-                    self.end_headers()
-                    return
-                super().do_GET()
-
-        self.git("--git-dir=" + str(self.origin), "update-server-info")
-        server = http.server.HTTPServer(
-            ("127.0.0.1", 0), functools.partial(Auth, directory=str(self.tmp)))
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(thread.join)
-        self.addCleanup(server.shutdown)
-        remote = "http://127.0.0.1:%d/origin.git" % server.server_port
-        self.git("remote", "set-url", "origin", remote)
-        self.intent.update(repository_remote=remote, repository_remote_raw=remote)
-        helper = self.repo / "credential-helper"
-        helper.write_text("#!/bin/sh\n[ \"$GIT_CONFIG_FIXTURE\" = present ] || exit 1\nprintf 'username=test\\npassword=test\\n'\n")
-        helper.chmod(0o755)
-        included = self.tmp / "auth.config"
-        included.write_text("[credential]\nhelper = !./credential-helper\n")
-        config = self.tmp / "git.config"
-        self.git("config", "--file", str(config),
-                 "includeIf.gitdir:%s/.path" % self.repo, str(included))
-        self.git("config", "--file", str(config), "http.extraHeader", "X-Config: once")
-        self.env.update(GIT_CONFIG_GLOBAL=str(config), GIT_TERMINAL_PROMPT="0",
-                        GIT_CONFIG_FIXTURE="present")
-        self.assertIn(self.tip, self.git("ls-remote", "origin", "refs/heads/swarm-a1"))
-        self.save()
-        other = self.tmp / "other.git"
-        self.git("init", "--bare", "-q", str(other))
-        self.env.update(GIT_DIR=str(other), GIT_WORK_TREE=str(self.home))
-        before = self.snapshot()
-        self.assertEqual(self.result_unit(self.continuation())["seed"]["head"], self.head)
+        self.assertEqual(self.git("cat-file", "-t", self.head), "commit")
+        self.assertEqual(self.git("for-each-ref", "refs/hanig-swarm-seeds/"), "")
         self.assertEqual(self.snapshot(), before)
 
     def test_validation_failure_does_not_publish(self):
         self.unit["inputs"] = "not a list"
         self.save()
         self.assert_refusal("inputs")
-
 
 
 if __name__ == "__main__":

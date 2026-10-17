@@ -18,77 +18,7 @@ import swarm_plan_rules as SPR
 import swarm_preflight as SP
 import swarm_state as SS
 import unit as U
-import worktree as W
 from swarm_types import PlanError
-
-
-def _git(repo, *args):
-    rc, out, err = U.run(["git", "-C", str(repo), *args],
-                         timeout=120, preserve_newlines=True)
-    if rc:
-        raise PlanError(f"Git {args[0]} failed: {err}")
-    return out.strip()
-
-
-def _config_text(source):
-    def quote(value):
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace(
-            "\n", "\\n").replace("\t", "\\t").replace("\b", "\\b") + '"'
-
-    lines = []
-    for entry in _git(source, "config", "--null", "--list", "--includes").split("\0"):
-        if not entry:
-            continue
-        key, separator, value = entry.partition("\n")
-        if key == "include.path" or key.startswith("includeif.") or key == "core.worktree":
-            continue
-        section, name = key.rsplit(".", 1)
-        section, dot, subsection = section.partition(".")
-        lines.append("[" + section + (" " + quote(subsection) if dot else "")
-                     + "]\n" + name + (" = " + quote(value) if separator else ""))
-    return "\n".join(lines) + "\n[core]\nbare = true\n"
-
-
-@contextmanager
-def _git_environment(**changes):
-    keys = set(("GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_CONFIG "
-                "GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES "
-                "GIT_NAMESPACE GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_PREFIX "
-                "GIT_IMPLICIT_WORK_TREE GIT_REPLACE_REF_BASE GIT_NO_REPLACE_OBJECTS").split())
-    keys.update(changes)
-    saved = {k: os.environ.pop(k) for k in keys if k in os.environ}
-    os.environ.update((k, v) for k, v in changes.items() if v is not None)
-    try:
-        yield
-    finally:
-        for key in keys:
-            os.environ.pop(key, None)
-        os.environ.update(saved)
-
-
-class _ScratchGit:
-    """Freeze effective Git configuration; keep cwd, redirect all Git storage."""
-
-    def __init__(self, root):
-        self.root = Path(root)
-        self.repos = {}
-
-    @contextmanager
-    def repo(self, source):
-        if source not in self.repos:
-            dest = self.root / str(len(self.repos))
-            _git(source, "-c", "protocol.file.allow=always", "clone", "--quiet",
-                 "--bare", "--shared", "--", source, str(dest))
-            (dest / "config").write_text(_config_text(source), encoding="utf-8")
-            self.repos[source] = str(dest)
-        with _git_environment(GIT_DIR=self.repos[source], GIT_CONFIG_GLOBAL=os.devnull,
-                              GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="0",
-                              GIT_CONFIG_SYSTEM=None, GIT_CONFIG_PARAMETERS=None):
-            yield source
-
-    def check(self, seed, repo, raw, remote):
-        with self.repo(repo) as scratch:
-            return SP._seed_reachability_problem(seed, scratch, raw, remote)
 
 
 def _remote_head(repo, raw, remote, ref):
@@ -102,7 +32,7 @@ def _remote_head(repo, raw, remote, ref):
     return head
 
 
-def _continuation(plan, state, args, scratch):
+def _continuation(plan, state, args):
     units = plan.get("units")
     if not isinstance(units, list):
         raise PlanError("plan units must be a JSON list")
@@ -125,33 +55,36 @@ def _continuation(plan, state, args, scratch):
         raise PlanError(problem)
     repo, recorded_base = intent["repo"], intent["base_commit"]
     CP.resolve_paths(args.state_dir, plan=plan, extra_repos=[repo])
-    declared_repo, problem = SP._plan_workspace(old)
-    if problem or str(Path(declared_repo).resolve()) != repo:
-        raise PlanError("plan repository differs from the anchored repository")
-    raw, problem = W._anchored_remote_transport(U.run, intent)
+    target, problem = SP._resolve_dispatch_target(old)
     if problem:
         raise PlanError(problem)
-    remote = intent["repository_remote"]
+    if target["repo"] != repo:
+        raise PlanError("plan repository differs from the anchored repository")
+    remote, raw = intent["repository_remote"], target["repository_remote_raw"]
+    if (target["repository_remote"] != remote
+            or (intent.get("repository_remote_raw") is not None
+                and intent["repository_remote_raw"] != raw)):
+        raise PlanError("origin push destination differs from the anchored repository")
     ref = (args.head_ref if args.head_ref is not None
            else "refs/heads/" + intent["branch"])
-    tip = _remote_head(repo, raw, remote, ref)
     judged = SE.trusted_produced_head(state, args.unit, attempt_dir)
-    head = tip if args.head_ref is not None or judged is None else judged
+    head = (_remote_head(repo, raw, remote, ref)
+            if args.head_ref is not None or judged is None else judged)
     seed = {"ref": ref, "head": head, "base": recorded_base,
             "evidence": str(Path(attempt_dir) / "evidence.md")}
     SPR.declared_seed({"id": args.new_id, "kind": "code", "seed": seed})
-    problem = scratch.check(seed, repo, raw, remote)
+    problem = SP._seed_reachability_problem(seed, repo, raw, remote)
     if problem:
         raise PlanError("recorded base/head ancestry check failed: " + problem)
-    target_ref = "refs/heads/" + intent["target_branch"]
-    target_tip = _remote_head(repo, raw, remote, target_ref)
-    problem = scratch.check({"ref": target_ref, "base": target_tip,
-                             "head": target_tip}, repo, raw, remote)
+    target_tip = target["target_commit"]
+    problem = SP._seed_reachability_problem(
+        {"ref": target["target_ref"], "base": target_tip, "head": target_tip},
+        repo, raw, remote)
     if problem:
         raise PlanError(problem)
-    with scratch.repo(repo) as git_repo:
-        base = _git(git_repo, "merge-base", target_tip, head)
-        _git(git_repo, "merge-base", "--is-ancestor", base, target_tip)
+    rc, base, err = SP._git(repo, "merge-base", target_tip, head)
+    if rc:
+        raise PlanError("target/head ancestry check failed: " + err)
     seed["base"] = base
     new = copy.deepcopy(old)
     new.update(id=args.new_id, seed=seed, description="Continuation of " + args.unit,
@@ -198,19 +131,17 @@ def _append(path, before, plan, mode):
 def continue_plan(args, validate):
     try:
         path = Path(args.plan).resolve()
-        with _git_environment(), _plan_file(path, args.write) as stream:
+        with _plan_file(path, args.write) as stream:
             before = stream.read()
             plan = json.loads(before)
             state_dir, _, _ = CP.resolve_paths(args.state_dir, plan=plan)
             state, error = U.read_json(state_dir / SS.STATE_FILE)
             if error or not isinstance(state, dict):
                 raise PlanError(f"no readable coordinator state: {error}")
-            with tempfile.TemporaryDirectory(prefix="swarm-continue-") as tmp:
-                scratch = _ScratchGit(tmp)
-                new = _continuation(plan, state, args, scratch)
-                plan["units"].append(new)
-                with redirect_stdout(io.StringIO()):
-                    validate(plan, scratch.check)
+            new = _continuation(plan, state, args)
+            plan["units"].append(new)
+            with redirect_stdout(io.StringIO()):
+                validate(plan)
             if args.write:
                 _append(path, before, plan, os.fstat(stream.fileno()).st_mode)
         print(json.dumps(new, indent=2, ensure_ascii=True))

@@ -3465,10 +3465,10 @@ def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False,
 
 def cmd_continue(args):
     args.check_seeds = True
-    return SC.continue_plan(args, lambda plan, check: cmd_validate(args, plan, check))
+    return SC.continue_plan(args, lambda plan: cmd_validate(args, plan))
 
 
-def cmd_validate(args, plan=None, seed_check=None):
+def cmd_validate(args, plan=None):
     SR.apply_agent_resolution(args.plan)
     if plan is None:
         plan, err = U.read_json(args.plan)
@@ -3498,7 +3498,7 @@ def cmd_validate(args, plan=None, seed_check=None):
             if not problem:
                 source, problem = SP._dispatch_source_identity(u, target)
             if not problem:
-                problem = (seed_check or SP._seed_reachability_problem)(
+                problem = SP._seed_reachability_problem(
                     u["seed"], source["repo"], source["repository_remote_raw"],
                     source["repository_remote"])
             if problem:
