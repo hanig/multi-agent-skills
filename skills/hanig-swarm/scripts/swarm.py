@@ -73,6 +73,7 @@ import swarm_code_launch as SCL
 import swarm_workspaces as SW
 import swarm_dispatch as SD
 import swarm_continue as SC
+import swarm_provider_resume as SPRS
 from swarm_dispatch import (
     _allocate, _dep_env, _isolation_submission, _record_isolation_facts,
     _clear_isolation_marker, _slurm_exit_trap, _bind,
@@ -630,6 +631,14 @@ def validate_plan(plan, survey=None, new_attempts=True):
     for u in units:
         if not isinstance(u, dict):
             continue
+        if "provider_resume" in u:
+            resume = u["provider_resume"]
+            mx = resume.get("max") if isinstance(resume, dict) else None
+            if type(mx) is not int or not 0 <= mx <= 3:
+                raise PlanError(f"unit {u.get('id', '?')!r}: provider_resume "
+                                "must be an object with max an integer from 0 to 3")
+            if u.get("kind") != "code":
+                raise PlanError("provider_resume is only supported for code units")
         cont = u.get("continuation")
         if cont is not None:
             if not isinstance(cont, dict):
@@ -2476,6 +2485,17 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         checked_state = ("FAILED_EVIDENCE" if protocol_problem
                          else NAME.get(rc, f"rc={rc}"))
 
+        # Provider recovery precedes the failure transition and teardown.
+        # An unsent intent is retryable even if Paseo is temporarily unreadable.
+        # Undeclared/zero preserves the old path, including its state bytes.
+        if (not dry_run and u.get("kind") == "code"
+                and (u.get("provider_resume") or {}).get("max", 0)
+                and previous not in WORKTREE_CLEANUP_STATES
+                and not protocol_problem
+                and (rc == FAILED or SPRS.pending(us))
+                and SPRS.maybe_resume(state_dir, uid, u, us, report, state)):
+            continue
+
         # A deadline is a reason to inspect, never a reason to skip the only
         # checker. Apply terminal execution evidence first. For a non-terminal
         # result, re-evaluate after the check so PREEMPTED cannot mint a fresh
@@ -4117,6 +4137,10 @@ SCHEMA_FIELDS = [
     ("continuation", "code", "optional",
      '{"max": N, "prompt": "..."}; bounded nudges when it settles without '
      "producing. Exhaustion FAILS the unit"),
+    ("provider_resume", "code", "optional",
+     '{"max": N}; integer 0..3, default off. Resume listed transient provider '
+     "errors in the same attempt after 5 minutes, then 15 minutes per resume. "
+     "Pending sends survive restart; review rounds are unchanged"),
     ("requires_verification", "code", "optional",
      "claims an authorized verifier must establish before closing. The "
      "reserved integration-tests claim runs in a disposable candidate merge "
@@ -4862,6 +4886,8 @@ def _status_rows(plan, state, state_dir, observed_at=None):
         })
         if plan.get("canary") in rows[-1]["waiting_on"]:
             rows[-1]["waiting_reason"] = f"waiting on canary {plan['canary']}"
+        if us.get("provider_resumes"):
+            rows[-1]["provider_resume"] = SPRS.status(us)
     rows.sort(key=lambda r: r["id"])
     return rows
 
@@ -4922,6 +4948,11 @@ def cmd_status(args):
                   f"{job[:14]:14} {r['gpu_hours']:>5g} {r['attempts']} "
                   f"{age:>8} {state_age:>8}")
             watch = r["terminal_watch"]
+            resume = r.get("provider_resume")
+            if resume:
+                print(f"  {'':{w}}    resumed {resume['resumed']}/{resume['max']} "
+                      f"after provider error; observed {resume['observed_at']} "
+                      f"(delivery, not progress); pending={resume['pending']}")
             if watch:
                 process = (watch.get("process_state") if watch.get("status")
                            in ("starting", "waiting") else None)
