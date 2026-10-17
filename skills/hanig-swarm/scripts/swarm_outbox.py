@@ -369,16 +369,28 @@ TRACKER_EVENTS = {
                                 "closed by a merged pull request."),
 }
 
+def _unique_pairs(pairs):
+    record = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError("duplicate JSON member %r" % key)
+        record[key] = value
+    return record
+
+
 def _read_sequence(state_dir):
+    path = Path(state_dir) / OUTBOX_SEQ
     try:
-        record = json.loads((Path(state_dir) / OUTBOX_SEQ).read_text())
+        record = json.loads(path.read_text(), object_pairs_hook=_unique_pairs)
     except FileNotFoundError:
         return None
+    except (OSError, UnicodeDecodeError, RecursionError, ValueError) as exc:
+        raise OutboxError("unreadable counter %s: %s" % (path, exc))
     if (not isinstance(record, dict)
             or not _schema_is(record.get("schema_version"), 1)
             or type(record.get("high_water")) is not int
             or record["high_water"] < 0):
-        raise OutboxError("invalid outbox sequence counter")
+        raise OutboxError("invalid outbox sequence counter %s" % path)
     return record
 
 
@@ -401,31 +413,25 @@ def _write_sequence(state_dir, record):
 def _sequence_history(path, strict=True):
     """Read migration history; complete newline-less JSON is published too."""
     try:
-        raw = path.read_bytes()
+        handle = path.open("rb")
     except FileNotFoundError:
         return None
-    lines = raw.splitlines()
     records = []
-    for index, line in enumerate(lines):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line.decode("utf-8"))
-        except (ValueError, RecursionError) as exc:
-            if (isinstance(exc, (UnicodeDecodeError, json.JSONDecodeError))
-                    and index == len(lines) - 1 and not raw.endswith(b"\n")):
-                break
-            if strict:
-                raise OutboxError("unreadable outbox history")
-            continue
-        if not isinstance(record, dict) or not _nonblank_text(record.get("key")):
-            if strict:
-                raise OutboxError("invalid outbox history key")
-            continue
-        if (strict and "seq" in record and
-                (type(record["seq"]) is not int or record["seq"] <= 0)):
-            raise OutboxError("invalid outbox history sequence")
-        records.append(record)
+    with handle:
+        for number, line in enumerate(handle, 1):
+            try:
+                record = json.loads(line.decode("utf-8"), object_pairs_hook=_unique_pairs)
+                if not isinstance(record, dict) or not _nonblank_text(record.get("key")):
+                    raise ValueError("invalid history key")
+                if (strict and "seq" in record and
+                        (type(record["seq"]) is not int or record["seq"] <= 0)):
+                    raise ValueError("invalid history sequence")
+            except (UnicodeDecodeError, RecursionError, ValueError) as exc:
+                if strict:
+                    raise OutboxError("%s line %d: incomplete outbox history: %s" %
+                                      (path, number, exc))
+                continue
+            records.append(record)
     return records
 
 
@@ -461,7 +467,10 @@ def set_sequence_floor(state_dir, floor, approver, reason):
         raise OutboxError("floor must be a non-negative integer")
     if not _nonblank_text(approver) or not _nonblank_text(reason):
         raise OutboxError("seq-floor requires a non-blank approver and reason")
-    previous = _read_sequence(state_dir)
+    try:
+        previous = _read_sequence(state_dir)
+    except OutboxError:
+        previous = None  # Recovery uses the operator's bound, never damaged history.
     if previous is not None and floor <= previous["high_water"]:
         raise OutboxError("floor must exceed current high_water %d" %
                           previous["high_water"])
@@ -479,8 +488,14 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     Deterministic from state: replaying the same local transition produces the
     same key. A connected drainer must deduplicate or read back before retrying
     a remote mutation; the key alone cannot establish what landed.
-    Published sequences never repeat or decrease after migration, excluding
-    clock rollback, stale restoration and joint counter/outbox loss.
+    Automatic migration assumes complete legacy history containing only
+    coordinator-serialized records or a crash-torn final line; any unparseable
+    line refuses emission with a file/line diagnostic and seq-floor recovery.
+    Silently lost complete records are not detected by automatic migration.
+    Recovery is guaranteed only when the operator's floor bounds every issued
+    seq; an arbitrary large floor is not a correctness argument.
+    No guarantee spans clock rollback or restored stale coordinator state.
+    Under these premises, published sequences rise after migration.
     Counter loss may reuse reserved-but-unpublished values.
     """
     action = TRACKER_EVENTS.get(unit_state)
@@ -524,7 +539,7 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
         seq = _allocate_sequence(state_dir, history)
     except (OSError, ValueError, OutboxError) as exc:
         print(f"WARNING: cannot allocate tracker sequence in {state_dir}: "
-              f"{exc}. Restore any corrupt counter first; otherwise recover with "
+              f"{exc}. Recover with "
               f"swarm.py seq-floor --state-dir {shlex.quote(str(state_dir))} "
               f"--floor N --approver NAME --reason TEXT; choose N from "
               f"evidence. Intent emission will retry on the next advance.",
@@ -958,11 +973,11 @@ def read_outbox(state_dir):
     if not p.is_file():
         return out
     try:
-        for line in p.read_text().splitlines():
+        for line in p.read_bytes().splitlines():
             if line.strip():
                 try:
-                    out.append(_with_intent_envelope(json.loads(line)))
-                except ValueError:
+                    out.append(_with_intent_envelope(json.loads(line.decode("utf-8"))))
+                except (UnicodeDecodeError, RecursionError, ValueError):
                     continue
     except OSError:
         pass
@@ -973,7 +988,7 @@ def load_outbox_contract(state_dir):
     """Read every persisted intent or fail closed for drain decisions."""
     path = Path(state_dir) / OUTBOX
     try:
-        raw = path.read_text()
+        raw = path.read_bytes()
     except FileNotFoundError:
         return []
     except OSError as exc:
@@ -984,8 +999,8 @@ def load_outbox_contract(state_dir):
         if not line.strip():
             continue
         try:
-            intent = normalize_intent(json.loads(line))
-        except ValueError as exc:
+            intent = normalize_intent(json.loads(line.decode("utf-8")))
+        except (UnicodeDecodeError, RecursionError, ValueError) as exc:
             raise OutboxError("outbox line %d is not JSON: %s" %
                               (number, exc))
         problems = validate_intent(intent)
