@@ -3656,8 +3656,7 @@ def cmd_stop_unit(args):
     if not args.reason or not args.reason.strip():
         print("error: a non-blank reason is required", file=sys.stderr)
         return 4
-    # This command never dispatches. A stopped code plan remains operable on
-    # a host without Paseo, its runtime, or its old working repository.
+    # Disposition needs no dispatcher runtime.
     plan, error = U.read_json(args.plan)
     if error or not isinstance(plan, dict) or not isinstance(plan.get("units"), list):
         print(f"error: no plan with a units list at {args.plan}: {error or 'invalid shape'}", file=sys.stderr)

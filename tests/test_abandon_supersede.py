@@ -39,7 +39,8 @@ class StopFixture:
         self.runs = self.root / 'runs'
         self.attempt = self.runs / 'old' / 'attempt1'
         self.attempt.mkdir(parents=True, exist_ok=True)
-        for path in (self.state / SO.OUTBOX, self.state / SS.STATE_EPOCH_FILE,
+        for path in (self.state / SO.OUTBOX, self.state / "outbox-seq.json",
+                     self.state / SS.STATE_EPOCH_FILE,
                      self.attempt / "receipt.json"):
             path.unlink(missing_ok=True)
         (self.attempt / 'preserved.patch').write_bytes(b'preserved implementation\x00\xff')
@@ -280,7 +281,9 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                 self.setup_stop()
                 self.assert_ok(self.stop(command))
                 outbox = self.state / SO.OUTBOX
-                intent = outbox.read_bytes()
+                intent = json.loads(outbox.read_bytes())
+                intent["seq"] += 1
+                intent = (json.dumps(intent, sort_keys=True) + "\n").encode()
                 paths = [self.state / name for name in (SS.STATE_FILE, SS.STATE_EPOCH_FILE)]
                 before = {p: p.read_bytes() for p in paths}
                 outbox.unlink()
@@ -340,7 +343,7 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                 (self.state / SO.OUTBOX).unlink()
                 self.assert_ok(self.swarm('advance', '--root', str(self.runs)))
                 repaired = next(i for i in self.intents() if i['unit'] == 'old')
-                self.assertEqual(repaired, intent)
+                self.assertEqual(repaired, dict(intent, seq=intent["seq"] + 1))
 
     def test_delayed_disposition_repair_uses_emission_time_and_next_sequence(self):
         for command in ('abandon', 'supersede'):
@@ -358,10 +361,10 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                 self.clock = '2026-10-16T20:00:02.900000+00:00'
                 self.assert_ok(self.stop(command))
                 start, repaired = self.intents()
-                self.assertEqual([start['seq'], repaired['seq']], [1, 2])
+                self.assertEqual([start['seq'], repaired['seq']], [2, 3])
                 self.assertEqual(repaired['at'], '2026-10-16T20:00:02+0000')
                 self.assertEqual(original['at'], '2026-10-16T20:00:00+0000')
-                self.assertEqual(repaired, dict(original, seq=2, at='2026-10-16T20:00:02+0000'))
+                self.assertEqual(repaired, dict(original, seq=3, at='2026-10-16T20:00:02+0000'))
                 self.assertEqual({p: p.read_bytes() for p in paths}, before)
                 outbox = (self.state / SO.OUTBOX).read_bytes()
                 self.assert_ok(self.stop(command))
@@ -506,7 +509,7 @@ class TestOperatorTerminal(StopFixture, unittest.TestCase):
                     self.assertIn('successor: successor', rendered)
 
 
-class TestStoppedDrain(StopFixture, DrainCase):
+class StoppedDrainFixture(StopFixture, DrainCase):
     def setUp(self):
         super().setUp()
         self.setup_stop()
@@ -542,6 +545,8 @@ class TestStoppedDrain(StopFixture, DrainCase):
         self.draft.write_text(json.dumps({'project': {'linear_id': 'project', 'team': 'ARC'},
             'issues': [{'unit': u, 'identifier': 'ARC-1'} for u in ('old', 'successor')]}))
 
+
+class TestStoppedDrain(StoppedDrainFixture):
     def test_shared_issue_live_start_then_all_abandoned(self):
         self.shared_issue()
         self.history()
