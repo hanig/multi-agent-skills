@@ -209,6 +209,7 @@ class TestPlanExchange(unittest.TestCase):
     def test_maker_contrast_uses_vendor_or_bare_model_provider(self):
         for members in (
                 [MEMBERS[0], dict(MEMBERS[1], model='openai/stub-beta')],
+                [dict(MEMBERS[0], model='/stub-alpha'), dict(MEMBERS[1], model='openai/stub-beta')],
                 [dict(MEMBERS[0], model='stub/alpha'), MEMBERS[1]],
                 [MEMBERS[0], dict(MEMBERS[1], model='stub-beta', provider='openai')]):
             with self.subTest(members=members):
