@@ -14,7 +14,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'skills/hanig-orchestrate/scripts
 sys.path.insert(0, str(SCRIPT.parent))
 import flake_triage as F
 ID = 'tests.test_x.C.test_x'
-SOURCE = '''import os, time, unittest
+SOURCE = '''import os, time, unittest, subprocess, sys
 from pathlib import Path
 from mode import MODE
 class C(unittest.TestCase):
@@ -27,6 +27,11 @@ class C(unittest.TestCase):
    p.write_text(str(n+1))
    self.assertEqual(n % 2, 1)
   if MODE == 'timeout': time.sleep(30)
+  if MODE == 'detached':
+   child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+   Path(os.environ['CHILD_PID']).write_text(str(child.pid))
+   Path(os.environ['READY']).write_text(str(Path.cwd()))
+   time.sleep(60)
   if MODE == 'interrupt':
    Path(os.environ['READY']).write_text(str(Path.cwd()))
    time.sleep(30)
@@ -115,6 +120,77 @@ class TestFlakeTriage(unittest.TestCase):
                        '--test', 'tests.test_new.C.test_x', index=1)
         self.assertTrue(d['touched'])
         self.assertIn('unavailable comparison evidence', d['issue_body'])
+
+    def test_three_dot_and_module_class_ids(self):
+        self.head = self.save('pass')
+        self.git('checkout', '-q', '--detach', self.base)
+        self.testfile.write_text(SOURCE + '\n# target-only edit\n')
+        self.base = self.save('pass')
+        for name in ('tests.test_x', 'tests.test_x.C'):
+            d = self.check('INCONCLUSIVE', [['pass']*2]*2, '--test', name, index=1)
+            self.assertFalse(d['touched'])
+
+    def test_worktree_creation_failure_cleanup(self):
+        hook = self.repo / '.git/hooks/post-checkout'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        self.check('SETUP_ERROR', [[], []], code=2)
+
+    def test_load_errors_on_both_sides(self):
+        good = self.base
+        for bad in ("raise ImportError('broken')", 'import missing_dependency', 'invalid syntax !'):
+            self.testfile.write_text(bad)
+            self.head = self.save('pass')
+            self.base = good
+            self.check('CONSISTENT_FAILURE', [['error']*2, ['pass']*2])
+            self.base, self.head = self.head, good
+            self.check('FAILS_ON_BASE', [['pass']*2, ['error']*2])
+
+    def test_missing_attributes_and_empty_class(self):
+        for before, after in [('class C', 'class D'), ('def test_x', 'def test_other')]:
+            self.testfile.write_text(SOURCE.replace(before, after))
+            self.head = self.save('pass')
+            self.check('SETUP_ERROR', [['absent']*2, ['pass']*2], code=2)
+        self.testfile.write_text(SOURCE + '\nclass Empty(unittest.TestCase): pass\n')
+        self.head = self.save('pass')
+        # Python versions differ on whether an empty suite exits zero or five.
+        result = SP.run([sys.executable, '-m', 'unittest', 'tests.test_x.Empty'],
+                        cwd=str(self.repo), env=self.env, capture_output=True)
+        label, outcome = ('CONSISTENT_FAILURE', 'error') if result.returncode else ('INCONCLUSIVE', 'pass')
+        self.check(label, [[outcome]*2, ['absent']*2], '--test', 'tests.test_x.Empty', index=1)
+
+    def test_detached_output_timeout_and_interrupt(self):
+        self.head = self.save('detached')
+        before = self.trees()
+        for interrupt in (False, True):
+            pidfile, ready = self.repo.parent / 'child', self.repo.parent / 'ready'
+            for path in (pidfile, ready):
+                if path.exists(): path.unlink()
+            p = SP.Popen([sys.executable, str(SCRIPT), *self.argv('--json', '--runs', '1', '--timeout', '1')],
+                         env=dict(self.env, CHILD_PID=str(pidfile), READY=str(ready)),
+                         stdout=SP.PIPE, stderr=SP.PIPE)
+            try:
+                end = time.monotonic() + 10
+                while not ready.exists() and p.poll() is None and time.monotonic() < end:
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists())
+                scratch = Path(ready.read_text())
+                if interrupt: p.send_signal(signal.SIGINT)
+                out, err = p.communicate(timeout=10)
+                self.assertEqual(p.returncode, 2 if interrupt else 0, (out, err))
+                if not interrupt:
+                    self.assertEqual(json.loads(out)['tests'][0]['head'][0]['outcome'], 'timeout')
+                self.assertFalse(scratch.parent.exists())
+                self.assertEqual(self.trees(), before)
+            finally:
+                if pidfile.exists():
+                    try: os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError: pass
+                # Releasing the inherited pipe also lets the unfixed mutant clean up.
+                try: p.communicate(timeout=10)
+                except SP.TimeoutExpired:
+                    p.kill()
+                    p.communicate()
 
     def test_interrupt_cleanup(self):
         self.head = self.save('interrupt')

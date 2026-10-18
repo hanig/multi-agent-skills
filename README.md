@@ -309,8 +309,8 @@ selective install names all five bundles:
 host scheduler repeats it; the orchestrating session performs connected review,
 merge, tracker, and reporting work around those passes.
 
-Before requesting a CI or merge-verifier rerun, triage the failed unittest id
-on the pinned head and chosen base (normally the current target tip):
+`flake_triage.py` compares a failed unittest id on the pinned head and chosen
+base (normally the current target tip), to guide a CI or merge-verifier rerun:
 
 ```sh
 python3 "$HANIG_ORCHESTRATE_DIR/scripts/flake_triage.py" --repo "$REPO" \

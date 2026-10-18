@@ -44,23 +44,27 @@ def signals_ignored():
             signal.signal(s, handler)
 
 def execute(argv, cwd, timeout):
-    p = SP.Popen(argv, cwd=str(cwd), env=child_env(), stdin=SP.DEVNULL,
-                 stdout=SP.PIPE, stderr=SP.PIPE, start_new_session=True)
-    expired = False
-    try:
+    # Regular files cannot be held open as pipes by a detached descendant.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        p = SP.Popen(argv, cwd=str(cwd), env=child_env(), stdin=SP.DEVNULL,
+                     stdout=out, stderr=err, start_new_session=True)
+        expired = False
         try:
-            p.communicate(timeout=timeout)
-        except SP.TimeoutExpired:
-            expired = True
-    finally:
-        with signals_ignored():
             try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            out, err = p.communicate()
-    return dict(returncode=p.returncode, stdout=out.decode('utf-8', 'replace'),
-                stderr=err.decode('utf-8', 'replace'), timed_out=expired)
+                p.wait(timeout=timeout)
+            except SP.TimeoutExpired:
+                expired = True
+        finally:
+            with signals_ignored():
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                p.wait()
+        out.seek(0)
+        err.seek(0)
+        return dict(returncode=p.returncode, stdout=out.read().decode('utf-8', 'replace'),
+                    stderr=err.read().decode('utf-8', 'replace'), timed_out=expired)
 
 def git(repo, *args, check=True):
     r = execute(['git', '-C', str(repo), *args], repo, 60)
@@ -90,14 +94,20 @@ def scratch_worktree(repo, sha):
                 raise SetupError('Cleanup failed; retained {}: {}'.format(root, r['stderr']))
             shutil.rmtree(str(root))
 
-def outcome(r):
+def outcome(r, module_file):
     if r['timed_out']:
         return 'timeout'
     err = r['stderr']
-    if re.search(r'^ERROR: .*\(unittest\.loader\._FailedTest[.)]|^Ran 0 tests? in ', err, re.M):
-        return 'absent'
+    if re.search(r'^ERROR: .*\(unittest\.loader\._FailedTest[.)]', err, re.M):
+        frames = re.findall(r'File "([^"]+)", line \d+, in (\w+)', err)
+        loader_origin = not frames or (frames[-1][0].endswith('/unittest/loader.py')
+                                       and frames[-1][1] == 'loadTestsFromName')
+        missing_attribute = loader_origin and re.search(
+            r'^AttributeError: (?:module|type object) .* has no attribute ', err, re.M)
+        if not module_file.is_file() or missing_attribute:
+            return 'absent'
     if r['returncode'] == 0:
-        return 'pass' if re.search(r'^Ran [1-9][0-9]* tests? in ', err, re.M) else 'error'
+        return 'pass' if re.search(r'^Ran [0-9]+ tests? in ', err, re.M) else 'error'
     summaries = re.findall(r'^FAILED \(([^\n]*)\)$', err, re.M)
     return 'fail' if summaries and 'failures=' in summaries[-1] and 'errors=' not in summaries[-1] else 'error'
 
@@ -140,7 +150,7 @@ def triage(a):
                 with scratch_worktree(repo, sha) as tree:
                     for _ in range(a.runs):
                         r = execute([python, '-m', 'unittest', name], tree, a.timeout)
-                        r['outcome'] = outcome(r)
+                        r['outcome'] = outcome(r, tree / file)
                         d[side].append(r)
             except (OSError, SetupError, SP.SubprocessError) as exc:
                 d['setup_errors'].append(side + ': ' + str(exc))
