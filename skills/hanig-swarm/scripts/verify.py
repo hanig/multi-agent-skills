@@ -854,7 +854,7 @@ def run_merge_preconditions(runner, repo, produced_head, target_commit,
                 "stdout_tail": outcome["stdout"], "stderr_tail": outcome["stderr"],
                 "schema_version": 2,
             })
-            receipt.update(output_evidence(outcome, state_dir))
+            receipt.update(output_evidence(outcome, state_dir, unittest_modules(tree)))
             receipts.append(receipt)
         return receipts, None
     finally:
@@ -926,7 +926,28 @@ def outcome_result(outcome):
     return {"result": "pass" if outcome["exit_code"] == 0 else "fail"}
 
 
-def output_evidence(outcome, state_dir):
+def unittest_modules(tree):
+    """Audit-only module names from candidate paths; never import candidate code.
+
+    Discovery uses tests/ as its top level; imported helpers can use tests.
+    qualification instead. Ambiguous or unresolvable identities remain unknown.
+    """
+    names = set()
+    root = Path(tree) / "tests"
+    try:
+        for path in root.rglob("*.py"):
+            parts = list(path.relative_to(root).with_suffix("").parts)
+            if parts[-1] == "__init__":
+                parts.pop()
+            if parts:
+                name = ".".join(parts)
+                names.update((name, "tests." + name))
+    except OSError:
+        return None
+    return names
+
+
+def output_evidence(outcome, state_dir, test_modules=None):
     """Audit-only diagnostics; neither text nor storage success decides admission.
 
     Local merge execution retains the original bytes separately from the
@@ -954,27 +975,38 @@ def output_evidence(outcome, state_dir):
     # arbitrary duration-shaped output. Normal verbosity hides < 0.001s;
     # these totals inherit unittest's rounding and visibility limits.
     totals = {}
-    found_block = False
-    for data in streams.values():
-        in_block = False
-        for line in data.decode("utf-8", "replace").splitlines():
-            if line == "Slowest test durations":
-                in_block = found_block = True
-                continue
-            if not in_block:
-                continue
-            if line and set(line) == {"-"}:
-                continue
-            match = re.fullmatch(r"([0-9]+\.[0-9]+)s\s+\S+ \(([\w.]+)\)", line)
-            if not match:
-                in_block = False
-                continue
-            seconds, test_id = match.groups()
-            module = test_id.rsplit(".", 2)[0]
-            if test_id == "tests.review_sandbox_worker.DelegatedReviewTests.runTest":
-                module = "test_review"
-            totals[module] = totals.get(module, 0.0) + float(seconds)
-    if found_block:
+    # The pinned discover command uses stderr. A test may print a copied
+    # block before the runner's own block: consume only the final one.
+    # This is reported text, not authenticated execution evidence.
+    lines = streams.get("stderr", b"").decode("utf-8", "replace").splitlines()
+    headers = [i for i, line in enumerate(lines) if line == "Slowest test durations"]
+    found_block = bool(headers)
+    attribution_error = None
+    for line in lines[headers[-1] + 1:] if headers else ():
+        if line and set(line) == {"-"}:
+            continue
+        match = re.fullmatch(r"([0-9]+\.[0-9]+)s\s+\S+ \((.+)\)", line)
+        if not match:
+            if re.match(r"[0-9]+\.[0-9]+s\s", line):
+                attribution_error = "duration row has no parseable test identity"
+            break
+        seconds, test_id = match.groups()
+        if test_id == "tests.review_sandbox_worker.DelegatedReviewTests.runTest":
+            module = "test_review"
+        else:
+            # Qualnames may contain nested classes. The duration string alone
+            # cannot distinguish those components from package/module names.
+            matches = [name for name in (test_modules or ())
+                       if test_id.startswith(name + ".")
+                       and "." in test_id[len(name) + 1:]]
+            if len(matches) != 1:
+                attribution_error = "duration row has no unique candidate test-module attribution"
+                break
+            module = matches[0]
+        totals[module] = totals.get(module, 0.0) + float(seconds)
+    if attribution_error:
+        evidence["unittest_durations_unavailable"] = attribution_error
+    elif found_block:
         modules = sorted(totals, key=lambda name: (-totals[name], name))
         evidence["unittest_module_durations"] = [
             {"module": name, "seconds": round(totals[name], 3)}

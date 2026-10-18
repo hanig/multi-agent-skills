@@ -89,6 +89,10 @@ class IntegrationRepo(unittest.TestCase):
 
 class TestVerifierOutputEvidence(IntegrationRepo):
     def receipt(self, stdout, stderr, exit_code=1, blocked_output=False):
+        tests = self.repo / 'tests'
+        tests.mkdir()
+        for name in ('test_alpha.py', 'test_beta.py'):
+            (tests / name).write_text('# captured duration fixture module\n')
         verifier = self.repo / V.MERGE_VERIFIER_PATH
         verifier.parent.mkdir()
         verifier.write_text(

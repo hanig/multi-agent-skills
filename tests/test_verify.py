@@ -903,11 +903,14 @@ class TestUnittestDurations(unittest.TestCase):
              "0.001s     test_small (test_beta.Checks.test_small)\n"
              "0.000s     test_tiny (test_beta.Checks.test_tiny)\n\n")
 
-    def evidence(self, stderr, stdout='', full=True):
+    def evidence(self, stderr, stdout='', full=True, modules=None):
         outcome = dict(stdout=stdout, stderr=stderr, exit_code=0)
         if full:
             outcome['_full_output'] = dict(stdout=stdout.encode(), stderr=stderr.encode())
-        return V.output_evidence(outcome, None)
+        if modules is None:
+            modules = {'test_alpha', 'tests.test_alpha', 'test_beta', 'test_sample'}
+            modules.update('test_m%02d' % i for i in range(55))
+        return V.output_evidence(outcome, None, modules)
 
     def test_captured_block_aggregates_and_counts_delegate_once(self):
         evidence = self.evidence(
@@ -938,6 +941,51 @@ class TestUnittestDurations(unittest.TestCase):
         self.assertEqual(evidence['unittest_module_durations'], [
             {'module': 'test_review', 'seconds': 2.125},
             {'module': 'test_sample', 'seconds': 0.0}])
+
+    def test_nested_classes_share_the_module_total(self):
+        block = ('Slowest test durations\n'
+                 '0.020s test_two (tests.test_alpha.Flat.test_two)\n'
+                 '0.010s test_one (tests.test_alpha.Outer.Checks.test_one)\n'
+                 '0.005s test_local (tests.test_alpha.make.<locals>.Checks.test_local)\n')
+        self.assertEqual(self.evidence(block)['unittest_module_durations'],
+                         [{'module': 'tests.test_alpha', 'seconds': 0.035}])
+
+    def test_unresolvable_and_ambiguous_rows_are_unavailable(self):
+        for test_id, modules in (
+                ('check', {'tests.test_alpha'}),
+                ('<lambda>', {'tests.test_alpha'}),
+                ('tests.test_alpha.C.test_x', set()),
+                ('tests.test_alpha.Outer.C.test_x',
+                 {'tests.test_alpha', 'tests.test_alpha.Outer'})):
+            with self.subTest(test_id=test_id, modules=modules):
+                evidence = self.evidence('Slowest test durations\n0.010s test_x (' +
+                                         test_id + ')\n', modules=modules)
+                self.assertIn('attribution', evidence['unittest_durations_unavailable'])
+                self.assertNotIn('unittest_module_durations', evidence)
+
+    def test_unparseable_duration_row_cannot_silently_drop_a_test(self):
+        evidence = self.evidence('Slowest test durations\n'
+                                 '0.010s test_one (test_alpha.C.test_one)\n'
+                                 '0.020s custom test identity\n')
+        self.assertIn('no parseable test identity', evidence['unittest_durations_unavailable'])
+        self.assertNotIn('unittest_module_durations', evidence)
+
+    def test_only_final_stderr_block_is_counted(self):
+        fake = ('Slowest test durations\n'
+                '900.000s test_fake (test_alpha.Checks.test_fake)\n\n')
+        before = self.evidence(self.BLOCK)['unittest_module_durations']
+        after = self.evidence(fake + self.BLOCK, stdout=fake)
+        self.assertEqual(after['unittest_module_durations'], before)
+
+    def test_candidate_module_inventory_does_not_import_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'tests'
+            (root / 'pkg').mkdir(parents=True)
+            for name in ('__init__.py', 'test_alpha.py', 'pkg/__init__.py', 'pkg/test_beta.py'):
+                (root / name).write_text('raise RuntimeError("must not import")\n')
+            self.assertEqual(V.unittest_modules(directory), {
+                'test_alpha', 'tests.test_alpha', 'pkg', 'tests.pkg',
+                'pkg.test_beta', 'tests.pkg.test_beta'})
 
     def test_bound_keeps_fifty_largest_after_aggregation(self):
         for count in (50, 55):

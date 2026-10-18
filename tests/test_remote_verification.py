@@ -1007,6 +1007,9 @@ class TestRemoteVerification(unittest.TestCase):
 
     def test_durations_reach_remote_receipt_or_report_tail_loss(self):
         from tests.test_verify import TestUnittestDurations
+        self.shared.precondition.target_commit({
+            'tests/test_alpha.py': '# captured duration fixture module\n',
+            'tests/test_beta.py': '# captured duration fixture module\n'})
         for trailing in ('', 'x' * 3000):
             with self.subTest(tail_lost=bool(trailing)):
                 output = TestUnittestDurations.BLOCK + trailing
