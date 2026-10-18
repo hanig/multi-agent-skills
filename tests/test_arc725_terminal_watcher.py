@@ -226,6 +226,7 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
     def test_completion_bound_starts_when_wait_has_a_terminal_result(self):
         self.delay_after_publication("wait-pid", 0)
         proc = self.start(timed=True)
+        self.until(lambda: (self.root / "delayed-at").exists())
         time.sleep(COMPLETION_SECONDS + 1)
         publish(self.root / "release", "17\n")
         self.assert_nonzero_outcome(proc)
