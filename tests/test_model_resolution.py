@@ -27,6 +27,16 @@ import swarm_routing as SR  # noqa: E402
 
 SOL = {"listing": "openai", "vendor": "", "prefix": "gpt-", "separator": ".",
        "suffix": "-sol", "major": 6}
+DEEPSEEK = dict(SOL, listing="openrouter", vendor="deepseek",
+                prefix="deepseek-v", suffix="-pro", major=4)
+KIMI = dict(SOL, listing="openrouter", vendor="moonshotai",
+            prefix="kimi-k", suffix="-code", major=2)
+DEEPSEEK_IDS = ["deepseek/" + name for name in (
+    "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-pro-0813:batch",
+    "deepseek-v4-flash-0731", "deepseek-v4.1-flash-1017",
+    "deepseek-v4-flash-vision-exp")]
+KIMI_IDS = ["moonshotai/" + name for name in (
+    "kimi-k2.7-code", "kimi-k3", "kimi-k3:batch", "kimi-k2.6", "kimi-k2-thinking")]
 
 
 def fixture_roster():
@@ -186,6 +196,96 @@ class TestFamilyParser(unittest.TestCase):
                 self.assertIsNone(MF.version_of(model, family))
         self.assertEqual(MF.select(catalog + invalid, family, seat["model"]),
                          ("claude-sonnet-5-10", ["claude-sonnet-6-0"]))
+
+
+class TestCandidates(unittest.TestCase):
+    def test_catalog_candidates_never_join_the_family_or_selection(self):
+        for ids, family, pin, expected in (
+                (DEEPSEEK_IDS, DEEPSEEK, DEEPSEEK_IDS[0], ([DEEPSEEK_IDS[1]], [])),
+                (KIMI_IDS, KIMI, KIMI_IDS[0], ([], [KIMI_IDS[1]])),
+                (KIMI_IDS, dict(KIMI, suffix="", major=3), KIMI_IDS[1], ([], []))):
+            with self.subTest(pin=pin):
+                self.assertEqual(MF.candidates(ids * 2, family, pin), expected)
+                self.assertEqual(MF.select(ids, family, pin), (None, []))
+                for model in expected[0] + expected[1]:
+                    self.assertIsNone(MF.version_of(model, family))
+                self.assertEqual(MF.candidates([], family, pin), ([], []))
+
+    def test_candidates_are_exact_sorted_catalog_ids_not_dates(self):
+        pin = DEEPSEEK_IDS[0]
+        ids = [pin + tail for tail in (
+            "-1017", "-0813", "-0813", "-0813:batch", "-0813-vision-exp",
+            "-08130", "-813", "-20260813", "-ab12", "-0813\n", "-０８１３")]
+        self.assertEqual(MF.candidates(ids, DEEPSEEK, pin),
+                         ([pin + "-0813", pin + "-1017"], []))
+        ids = ["moonshotai/kimi-k4-thinking", "moonshotai/kimi-k3",
+               "moonshotai/kimi-k3", "moonshotai/kimi-k3.1", "moonshotai/kimi-k3-code",
+               "other/kimi-k9", "moonshotai/other-k9", "/moonshotai/kimi-k9",
+               "moonshotai/kimi-k" + "9" * 5000, None]
+        self.assertEqual(MF.candidates(ids, KIMI, KIMI_IDS[0]),
+                         ([], sorted(set(ids[:4]))))
+        hyphen = dict(KIMI, separator="-")
+        self.assertEqual(MF.candidates(["moonshotai/kimi-k3-1-code",
+                                        "moonshotai/kimi-k3-1-thinking"],
+                                       hyphen, "moonshotai/kimi-k2-7-code"),
+                         ([], ["moonshotai/kimi-k3-1-thinking"]))
+
+    def test_named_versions_have_no_candidates(self):
+        seat = next(r for r in shipped()[0] if r["name"] == "gemini-argon")
+        self.assertEqual(MF.candidates([seat["model"] + "-0813",
+                                        "google/gemini-4-5"],
+                                       seat["family"], seat["model"]), ([], []))
+
+
+class TestDatedPin(unittest.TestCase):
+    def test_only_the_explicit_dated_pin_is_accepted_and_undated_upgrades_win(self):
+        family = dict(DEEPSEEK, snapshot="0813")
+        pin = DEEPSEEK_IDS[1]
+        self.assertEqual(MF.check_family(family), family)
+        self.assertEqual(MF.version_of(pin, family, pinned=pin), (4, 0))
+        self.assertIsNone(MF.version_of(pin, DEEPSEEK, pinned=pin))
+        for other in (pin + ":batch", pin + "-exp", DEEPSEEK_IDS[0] + "-1017",
+                      "deepseek/deepseek-v4.1-pro-0813", "deepseek/deepseek-v5-pro-0813"):
+            with self.subTest(model=other):
+                self.assertIsNone(MF.version_of(other, family, pinned=pin))
+        newer = "deepseek/deepseek-v4.1-pro"
+        catalog = [pin, DEEPSEEK_IDS[0], newer, newer + "-0813", newer + "-1017"]
+        self.assertEqual(MF.select(catalog, family, pin), (newer, []))
+        self.assertEqual(MF.select(catalog[:2], family, pin), (None, []))
+        self.assertEqual(MF.candidates(catalog + [DEEPSEEK_IDS[0] + "-1017"], family, pin),
+                         ([DEEPSEEK_IDS[0] + "-1017"], []))
+
+    def test_snapshot_validation_and_both_readers(self):
+        pin = DEEPSEEK_IDS[1]
+        family = dict(DEEPSEEK, snapshot="0813")
+        seat = dict(next(r for r in shipped()[0] if r["name"] == "deepseek-v4-pro"),
+                    model=pin, family=family)
+        default = dict(provider="codex/" + pin, thinking="high",
+                       family=dict(family, listing="paseo:codex"))
+        agents = dict(default=default, thinking_by_model={default["provider"]: "high"})
+        RM.validate_config([seat], agents)
+        for bad in ("813", "08130", "ab12", "０８１３", "0813\n", 813, None, True):
+            with self.subTest(snapshot=bad), self.assertRaises(MF.FamilyError):
+                MF.check_family(dict(family, snapshot=bad))
+        for bad_pin in (DEEPSEEK_IDS[0], DEEPSEEK_IDS[0] + "-1017"):
+            with self.subTest(pin=bad_pin):
+                with self.assertRaises(MF.FamilyError):
+                    RM.validate_config([dict(seat, model=bad_pin)], None)
+                with self.assertRaises(MF.FamilyError):
+                    MF.select([], family, bad_pin)
+        newer = "deepseek/deepseek-v4.1-pro"
+        record = dict(seat["_max_output_tokens_accepted"], model=newer)
+        self.assertEqual(MF.reviewer_override(seat, dict(model=newer, record=record)),
+                         (newer, record))
+        probe = dict(Provider="codex", Model=newer, Thinking="high")
+        self.assertEqual(MF.agent_default_override(
+            default, agents["thinking_by_model"], dict(provider="codex/" + newer, probe=probe)),
+            "codex/" + newer)
+        for dated in (newer + "-0813", newer + "-1017"):
+            self.assertIsNone(MF.reviewer_override(
+                seat, dict(model=dated, record=dict(record, model=dated))))
+            self.assertIsNone(MF.agent_default_override(default, agents["thinking_by_model"],
+                dict(provider="codex/" + dated, probe=dict(probe, Model=dated))))
 
 
 class TestSelection(unittest.TestCase):
@@ -836,6 +936,97 @@ class TestReaders(StateHome):
         pinned = S.DEFAULT_AGENT_PROVIDER
         self.addCleanup(setattr, SR, "DEFAULT_AGENT_PROVIDER", pinned)
         self.assertEqual(S.apply_agent_resolution(self.project / "plan.json"), pinned)
+
+
+class TestCandidateReports(StateHome):
+    def run_cli(self, catalog, flags=(), roster=None, agents=None, fail_probe=False):
+        agents_path = Path(self.tmp.name) / "agents.json"
+        agents_path.write_text(json.dumps(agents if agents is not None else shipped()[1]))
+        argv = ["resolve_models.py", "--project", str(self.project)] + list(flags)
+        def listing(key, timeout):
+            if catalog is None:
+                raise OSError("fixture listing failure")
+            return catalog
+        def reviewer(seat, model, timeout):
+            return (None, "fixture probe failure") if fail_probe else (
+                dict(seat["_max_output_tokens_accepted"], model=model), None)
+        def agent(route, model, thinking, timeout):
+            return (None, "fixture probe failure") if fail_probe else (
+                dict(Provider=route, Model=model, Thinking=thinking), None)
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(R, "AGENTS_CONFIG", agents_path), \
+                mock.patch.object(R, "load_reviewers", return_value=roster or shipped()[0]), \
+                mock.patch.object(RM, "list_ids", side_effect=listing), \
+                mock.patch.object(RM, "utc_now", return_value="fixed"), \
+                mock.patch.object(RM, "probe_reviewer", side_effect=reviewer) as rp, \
+                mock.patch.object(RM, "probe_agent", side_effect=agent) as ap, \
+                redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as stopped:
+                RM.main()
+        self.assertEqual(stopped.exception.code, 0)
+        path = MF.snapshot_path(self.project)
+        return out.getvalue(), path.read_bytes() if path.exists() else None, rp, ap
+
+    def test_shipped_seats_print_candidates_in_text_and_json_without_adoption(self):
+        ids = DEEPSEEK_IDS + KIMI_IDS
+        baseline, old_snapshot, _, _ = self.run_cli([])
+        output, snapshot, reviewer, agent = self.run_cli(ids)
+        lines = output.splitlines(keepends=True)
+        candidate_lines = [line for line in lines if line.startswith("CANDIDATE")]
+        self.assertEqual(candidate_lines, [
+            "%-15s %-16s %s  %s\n" % ("CANDIDATE", name, pin, detail)
+            for name, pin, detail in (
+                ("deepseek-v4-pro", DEEPSEEK_IDS[0],
+                 "dated snapshot, not adopted: " + DEEPSEEK_IDS[1]),
+                ("kimi-k2.7-code", KIMI_IDS[0],
+                 "newer generation with a different variant, not adopted: " + KIMI_IDS[1]))])
+        self.assertEqual("".join(line for line in lines if not line.startswith("CANDIDATE")),
+                         baseline)
+        self.assertEqual(snapshot, old_snapshot)
+        reviewer.assert_not_called()
+        agent.assert_not_called()
+        output, _, _, _ = self.run_cli(ids, flags=("--json",))
+        rows = json.loads(output)["seats"]
+        self.assertEqual(["%-15s %-16s %s  %s\n" % (
+            row["status"], row["seat"], row["pinned"], row["detail"])
+            for row in rows if row["status"] == "CANDIDATE"], candidate_lines)
+
+    def test_candidates_follow_all_existing_reports_for_reviewers_and_agent(self):
+        seat = dict(next(r for r in shipped()[0] if r["name"] == "deepseek-v4-pro"))
+        pin = seat["model"]
+        default = dict(provider="codex/" + pin, thinking="high",
+                       family=dict(DEEPSEEK, listing="paseo:codex"))
+        agents = dict(default=default, thinking_by_model={default["provider"]: "high"})
+        point = "deepseek/deepseek-v4.1-pro"
+        for status, catalog, flags, fail in (
+                ("PINNED", [pin], (), False),
+                ("WOULD_PROBE", [point], ("--dry-run",), False),
+                ("RESOLVED", [point], (), False),
+                ("PROBE_FAILED", [point], (), True),
+                ("LISTING_FAILED", None, (), False)):
+            with self.subTest(status=status):
+                old_ids = None if catalog is None else catalog + ["deepseek/deepseek-v5-pro"]
+                ids = None if old_ids is None else old_ids + [
+                    pin + "-0813", "deepseek/deepseek-v5-flash"]
+                before, old_snapshot, rp_before, ap_before = self.run_cli(
+                    old_ids, flags, [seat], agents, fail)
+                output, snapshot, rp, ap = self.run_cli(ids, flags, [seat], agents, fail)
+                lines = output.splitlines(keepends=True)
+                self.assertEqual("".join(l for l in lines if not l.startswith("CANDIDATE")), before)
+                self.assertEqual(snapshot, old_snapshot)
+                self.assertEqual(rp.call_args_list, rp_before.call_args_list)
+                self.assertEqual(ap.call_args_list, ap_before.call_args_list)
+                self.assertEqual(sum(l.startswith(status) for l in lines), 2)
+                candidates = [l for l in lines if l.startswith("CANDIDATE")]
+                self.assertEqual(len(candidates), 0 if catalog is None else 4)
+                if catalog is not None:
+                    for name in (seat["name"], "agent-default"):
+                        own = [l for l in lines if l.split()[1:2] == [name]]
+                        self.assertEqual([l.split()[0] for l in own],
+                                         ["NEW_GENERATION", status, "CANDIDATE", "CANDIDATE"])
+                        self.assertIn("dated snapshot, not adopted: " + pin + "-0813", own[-2])
+                        self.assertIn("newer generation with a different variant, not adopted: "
+                                      "deepseek/deepseek-v5-flash", own[-1])
 
 
 class TestResolveEndToEnd(StateHome):

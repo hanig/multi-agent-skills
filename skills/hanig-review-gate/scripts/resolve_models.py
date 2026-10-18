@@ -301,7 +301,7 @@ def _archive_orphans(agent, title, cwd):
 
 
 def _pin_in_family(pin, family, what):
-    version = MF.version_of(pin, MF.check_family(family))
+    version = MF.version_of(pin, MF.check_family(family), pinned=pin)
     if version is None or version[0] != family["major"]:
         raise MF.FamilyError("%s: pinned %r is not in its family at major %d"
                              % (what, pin, family["major"]))
@@ -439,17 +439,26 @@ def _resolve_reviewer(seat, listed, report, snapshot, args):
                    family["major"], ", ".join(newer)))
     if chosen is None:
         report("PINNED", seat["name"], seat["model"], "no newer point release")
-        return
-    if args.dry_run:
+    elif args.dry_run:
         report("WOULD_PROBE", seat["name"], seat["model"], chosen)
-        return
-    record, why = probe_reviewer(seat, chosen, args.timeout)
-    if record is None:
-        report("PROBE_FAILED", seat["name"], seat["model"],
-               "%s: %s" % (chosen, why))
-        return
-    snapshot["reviewers"][seat["name"]] = {"model": chosen, "record": record}
-    report("RESOLVED", seat["name"], seat["model"], chosen)
+    else:
+        record, why = probe_reviewer(seat, chosen, args.timeout)
+        if record is None:
+            report("PROBE_FAILED", seat["name"], seat["model"],
+                   "%s: %s" % (chosen, why))
+        else:
+            snapshot["reviewers"][seat["name"]] = {"model": chosen, "record": record}
+            report("RESOLVED", seat["name"], seat["model"], chosen)
+    _report_candidates(ids, family, seat["model"], seat["name"], seat["model"], report)
+
+
+def _report_candidates(ids, family, pinned, name, display_pin, report):
+    snapshots, cross_variant = MF.candidates(ids, family, pinned)
+    for models, label in ((snapshots, "dated snapshot"),
+                          (cross_variant, "newer generation with a different variant")):
+        if models:
+            report("CANDIDATE", name, display_pin,
+                   "%s, not adopted: %s" % (label, ", ".join(models)))
 
 
 def _resolve_agent_default(default, agents, listed, report, snapshot, args):
@@ -482,6 +491,8 @@ def _resolve_agent_default(default, agents, listed, report, snapshot, args):
                                              "probe": probe}
                 report("RESOLVED", "agent-default", default["provider"],
                        route + "/" + chosen)
+        _report_candidates(ids, family, pin_model, "agent-default",
+                           default["provider"], report)
 
 
 def _finish(args, snapshot, lines):
