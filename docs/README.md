@@ -1,6 +1,6 @@
 <!-- docs-truth:status -->
 Status: live
-Date: 2026-10-17
+Date: 2026-10-18
 Title: Documentation index
 Purpose: Browse the maintained references, historical records, and superseded plans in this repository.
 
@@ -52,7 +52,7 @@ Link validity (ARC-1787) and factual currency of status or purpose are not check
 | [Plan: PR 2, drain the swarm outbox into Linear](<plan-linear-drain.md>) | historical | 2026-10-11 | This delivered plan specifies idempotent draining of coordinator intents through an authorized operator. |
 | [Plan: PR 4, file an approved ticket draft into Linear](<plan-linear-file.md>) | historical | 2026-10-11 | This delivered plan specifies filing an approved ticket draft and resuming partial creation through durable operation records. |
 | [Plan: PR 3, file and edit ad-hoc issues only as part of the DAG](<plan-linear-issue.md>) | historical | 2026-10-11 | This delivered plan specifies creating and editing ad-hoc issues with explicit dependency relationships and durable replay. |
-| [Plan: adopt point releases per family at project start](<plan-model-resolution.md>) | historical | 2026-10-11 | Owner request, 2026-09-30: stop hand-maintaining model names; when a project starts, use the newest model in each family. Owner decision: point releases are adopted automatically; a new generation waits for the owner. The immediate GPT-6.1 Sol swap ships separately and does not depend on this. |
+| [Plan: adopt point releases per family at project start](<plan-model-resolution.md>) | live | 2026-10-18 | Owner request, 2026-09-30: stop hand-maintaining model names; when a project starts, use the newest model in each family. Owner decision: point releases are adopted automatically; a new generation waits for the owner. The immediate GPT-6.1 Sol swap ships separately and does not depend on this. |
 | [Plan: what remains after the report/runtime/acknowledgment work](<plan-next.md>) | superseded by plan-field-reports.md | 2026-10-11 | This largely delivered committee roadmap is retained for design history; the field-report plan tracks its successor work. |
 | [Handoff contract for a mortal orchestrator](<plan-orchestrator-handoff.md>) | historical | 2026-10-11 | This dated design records what a successor orchestrator needs to recover pending judgments and authorization boundaries. |
 | [The orchestrator role: plan](<plan-orchestrator-role.md>) | superseded by orchestrator-mandate.md | 2026-10-11 | This early role proposal records the gap later addressed by the orchestrator mandate and operating skill. |

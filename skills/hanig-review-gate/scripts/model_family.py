@@ -27,7 +27,7 @@ STATE_DIR = ("hanig-review-gate", "routing")
 LISTINGS = ("openai", "openrouter", "anthropic")
 PASEO_PREFIX = "paseo:"
 FAMILY_FIELDS = ("listing", "vendor", "prefix", "separator", "suffix", "major",
-                 "named_version")
+                 "named_version", "snapshot")
 
 
 class FamilyError(ValueError):
@@ -66,10 +66,14 @@ def check_family(family):
                 or re.fullmatch(r"[a-z][a-z0-9-]*", named) is None or major != 0):
             raise FamilyError("family.named_version must be a lowercase name "
                               "with family.major 0 (exact pin only)")
+    if "snapshot" in family:
+        snapshot = family["snapshot"]
+        if not isinstance(snapshot, str) or re.fullmatch(r"[0-9]{4}", snapshot) is None:
+            raise FamilyError("family.snapshot must be exactly four digits")
     return family
 
 
-def version_of(model_id, family):
+def version_of(model_id, family, pinned=None):
     """(major, minor) when model_id is in the family, else None.
 
     In the family means: vendor path equals family.vendor exactly, and the
@@ -77,11 +81,18 @@ def version_of(model_id, family):
     else is accepted, so -pro, :batch, dated snapshots and previews are simply
     not in the family. An optional named_version admits only that exact core
     at the sentinel version (0, 0); it never selects numeric or named upgrades.
+    With family.snapshot, the caller must supply pinned to admit that exact
+    dated id. Catalog membership still uses the undated grammar. A supplied
+    pin must end in the declared snapshot; its base is parsed normally.
     """
     # A leading or trailing "/" would leave an empty vendor or name; any other
     # malformed path leaves a vendor that equals no family's.
     if not isinstance(model_id, str) or model_id != model_id.strip("/"):
         return None
+    if "snapshot" in family and model_id == pinned:
+        if not model_id.endswith("-" + family["snapshot"]):
+            return None
+        model_id = model_id[:-5]
     vendor, name = split_id(model_id)
     if vendor != family.get("vendor", ""):
         return None
@@ -109,7 +120,7 @@ def select(listed_ids, family, pinned):
     greater major is reported, never chosen: raising the ceiling is a reviewed
     config change.
     """
-    floor = version_of(pinned, family)
+    floor = version_of(pinned, family, pinned=pinned)
     if floor is None:
         raise FamilyError("pinned model %r is not in its own family" % pinned)
     major = family["major"]
@@ -124,6 +135,38 @@ def select(listed_ids, family, pinned):
             newer.append(model_id)
     same.sort()
     return (same[-1][1] if same else None), sorted(set(newer))
+
+
+def candidates(listed_ids, family, pinned):
+    """Return (snapshots, cross_variant) catalog ids for operator review only.
+
+    Four digits carry no year: sorting is lexical, never a recency ranking.
+    These lists do not participate in family membership or selection.
+    """
+    if "named_version" in family:
+        return [], []
+    base = pinned
+    if "snapshot" in family and pinned.endswith("-" + family["snapshot"]):
+        base = pinned[:-5]
+    dated = re.compile(re.escape(base) + r"-[0-9]{4}")
+    sep = re.escape(family.get("separator", "."))
+    numeric = re.compile(r"([0-9]{1,6})(?:%s([0-9]{1,6}))?([^0-9.].*|)" % sep)
+    snapshots, cross_variant = set(), set()
+    for model_id in listed_ids:
+        if not isinstance(model_id, str) or model_id == pinned or ":" in model_id:
+            continue
+        if dated.fullmatch(model_id):
+            snapshots.add(model_id)
+        vendor, name = split_id(model_id)
+        if (vendor != family.get("vendor", "")
+                or model_id != model_id.strip("/")
+                or not name.startswith(family["prefix"])):
+            continue
+        match = numeric.fullmatch(name[len(family["prefix"]):])
+        if (match and int(match.group(1)) > family["major"]
+                and match.group(3) != family.get("suffix", "")):
+            cross_variant.add(model_id)
+    return sorted(snapshots), sorted(cross_variant)
 
 
 def file_sha256(path):
@@ -297,7 +340,8 @@ def reviewer_override(seat, entry):
     except FamilyError:
         return None
     model, record = entry.get("model"), entry.get("record")
-    version, floor = version_of(model, family), version_of(seat.get("model"), family)
+    version = version_of(model, family)
+    floor = version_of(seat.get("model"), family, pinned=seat.get("model"))
     if version is None or floor is None:
         return None
     if version[0] != family["major"] or version <= floor:
@@ -372,7 +416,8 @@ def agent_default_override(default, thinking_table, entry):
     if not (isinstance(provider, str) and provider.startswith(route + "/")):
         return None
     model = provider[len(route) + 1:]
-    version, floor = version_of(model, family), version_of(pinned_model, family)
+    version = version_of(model, family)
+    floor = version_of(pinned_model, family, pinned=pinned_model)
     if version is None or floor is None:
         return None
     if version[0] != family["major"] or version <= floor:
