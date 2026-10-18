@@ -44,6 +44,9 @@ def check_family(family):
     """Validate a family declaration; return it, or raise FamilyError."""
     if not isinstance(family, dict):
         raise FamilyError("family must be an object")
+    for field in family:
+        if field not in FAMILY_FIELDS:
+            raise FamilyError("unknown family field %r" % (field,))
     listing = family.get("listing")
     if not (listing in LISTINGS or (isinstance(listing, str)
                                     and listing.startswith(PASEO_PREFIX)
@@ -74,9 +77,10 @@ def version_of(model_id, family):
 
     In the family means: vendor path equals family.vendor exactly, and the
     name is exactly prefix + digits [+ separator + digits] + suffix. Nothing
-    else is accepted, so -pro, :batch, dated snapshots and previews are simply
-    not in the family. An optional named_version admits only that exact core
-    at the sentinel version (0, 0); it never selects numeric or named upgrades.
+    else is accepted. A hyphen separator and empty suffix can read a four-digit
+    date after a major as a minor version; the grammar does not distinguish
+    dates. An optional named_version admits only that exact core at the
+    sentinel version (0, 0); it never selects numeric or named upgrades.
     """
     # A leading or trailing "/" would leave an empty vendor or name; any other
     # malformed path leaves a vendor that equals no family's.
@@ -124,6 +128,39 @@ def select(listed_ids, family, pinned):
             newer.append(model_id)
     same.sort()
     return (same[-1][1] if same else None), sorted(set(newer))
+
+
+def candidates(listed_ids, family, pinned):
+    """Return (snapshots, cross_variant) catalog ids for operator review only.
+
+    Four digits carry no year: sorting is lexical, never a recency ranking.
+    Only nonmembers of the family are reported, so selection cannot adopt them.
+    """
+    if "named_version" in family:
+        return [], []
+    dated = re.compile(re.escape(pinned) + r"-[0-9]{4}")
+    sep = re.escape(family.get("separator", "."))
+    # Keep the longest numeric parse; a separator-led variant is still valid.
+    numeric = re.compile(r"([0-9]{1,6})(?:%s([0-9]{1,6}))?"
+                         r"(?![0-9]|%s[0-9])(.*)" % (sep, sep))
+    snapshots, cross_variant = set(), set()
+    for model_id in listed_ids:
+        if not isinstance(model_id, str) or model_id == pinned or ":" in model_id:
+            continue
+        if version_of(model_id, family) is not None:
+            continue
+        if dated.fullmatch(model_id):
+            snapshots.add(model_id)
+        vendor, name = split_id(model_id)
+        if (vendor != family.get("vendor", "")
+                or model_id != model_id.strip("/")
+                or not name.startswith(family["prefix"])):
+            continue
+        match = numeric.fullmatch(name[len(family["prefix"]):])
+        if (match and int(match.group(1)) > family["major"]
+                and match.group(3) != family.get("suffix", "")):
+            cross_variant.add(model_id)
+    return sorted(snapshots), sorted(cross_variant)
 
 
 def file_sha256(path):
@@ -297,7 +334,8 @@ def reviewer_override(seat, entry):
     except FamilyError:
         return None
     model, record = entry.get("model"), entry.get("record")
-    version, floor = version_of(model, family), version_of(seat.get("model"), family)
+    version = version_of(model, family)
+    floor = version_of(seat.get("model"), family)
     if version is None or floor is None:
         return None
     if version[0] != family["major"] or version <= floor:
@@ -372,7 +410,8 @@ def agent_default_override(default, thinking_table, entry):
     if not (isinstance(provider, str) and provider.startswith(route + "/")):
         return None
     model = provider[len(route) + 1:]
-    version, floor = version_of(model, family), version_of(pinned_model, family)
+    version = version_of(model, family)
+    floor = version_of(pinned_model, family)
     if version is None or floor is None:
         return None
     if version[0] != family["major"] or version <= floor:
