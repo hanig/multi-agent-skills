@@ -57,15 +57,18 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
         (self.bin / "ps").symlink_to(ps)
         self.env = dict(os.environ, PATH=str(self.bin))
         self.paseo = self.bin / "paseo"
+        self.write_paseo("agent1")
+        self.proc = None
+        self.addCleanup(self.cleanup_processes)
+
+    def write_paseo(self, agent):
         self.paseo.write_text(
             "#!" + sys.executable + "\n"
             "import sys\nfrom pathlib import Path\n"
             "sys.path.insert(0, " + repr(str(ROOT / "tests")) + ")\n"
             "from terminal_watcher_fixture import wait\n"
-            "wait(Path(" + repr(str(self.root)) + "), 'agent1')\n")
+            "wait(Path(" + repr(str(self.root)) + "), " + repr(agent) + ")\n")
         self.paseo.chmod(0o755)
-        self.proc = None
-        self.addCleanup(self.cleanup_processes)
 
     def cleanup_processes(self):
         if self.proc is not None:
@@ -262,8 +265,23 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
             "attempt_dir": str(self.attempt), "attempts": [str(self.attempt)],
             "job_id": agent})
         S.save_state(self.state_dir, self.state)
-        self.paseo.write_text(self.paseo.read_text().replace(
-            "'agent1'", repr(agent)))
+        self.write_paseo(agent)
+
+    def test_agent_identity_preserves_quoted_fixture_import_path(self):
+        fixture_repo = self.root / "'agent1'" / "repo"
+        (fixture_repo / "tests").mkdir(parents=True)
+        shutil.copyfile(ROOT / "tests" / "terminal_watcher_fixture.py",
+                        fixture_repo / "tests" / "terminal_watcher_fixture.py")
+        with mock.patch(__name__ + ".ROOT", fixture_repo):
+            self.write_paseo("agent1")
+            self.set_watch_identity("attempt1", "agent 1")
+        publish(self.root / "release", "17\n")
+        result = subprocess.run(
+            [str(self.paseo), "wait", "agent 1", "--json"],
+            cwd=self.root, env=dict(self.env, PYTHONPATH=""),
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertEqual(result.stdout, "fixture wait failed\n")
 
     def test_live_watch_with_whitespace_attempt_is_unknown(self):
         self.set_watch_identity("attempt 1", "agent1")
