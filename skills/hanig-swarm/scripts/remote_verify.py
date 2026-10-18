@@ -810,7 +810,32 @@ def cleanup_slurm(stage, request, reconciled):
     The mutable cleanup journal is a lifecycle observation, never a replacement
     for the write-once claim or completion receipts. It also retains identities
     discovered on earlier calls, so accounting expiry cannot erase a known job.
+    Queue rows or accounting delays beyond the bounded re-poll retain the stage;
+    recover with merge_unit.py --verify-integration --retrieve-remote-evidence.
     """
+    repoll = []
+    evidence = cleanup_slurm_locked(stage, request, reconciled, repoll=repoll)
+    if not repoll or evidence.get("cleanup_error"):
+        return evidence
+    # The first observation was locked; wait and poll without either lock.
+    # The third observation belongs to a new locked decision, which reloads
+    # identities, supervision and cancellation history as well as accounting.
+    observed = {"job_ids": evidence["job_ids"]}
+    try:
+        time.sleep(2)
+        observed = discover_slurm_jobs(request, evidence["job_ids"])
+        if observed["scheduler_confirmed"]:
+            settled = all(scheduler_state(job) is not None
+                          for job in observed["job_ids"])
+            if not settled or observed["queued_job_ids"]:
+                time.sleep(2)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        observed = dict(observed, scheduler_confirmed=False, discovery_error=str(exc))
+    return cleanup_slurm_locked(stage, request, reconciled, observed=observed)
+
+
+def cleanup_slurm_locked(stage, request, reconciled, repoll=None, observed=None):
+    """Read fresh state and decide under both locks; never wait for a re-poll."""
     evidence = {"cleanup": "unconfirmed", "stage": str(stage),
                 "launch_id": request["launch_id"], "quiescent": False}
     history, lock = stage / "cleanup.json", None
@@ -824,7 +849,7 @@ def cleanup_slurm(stage, request, reconciled):
         removal_locked = True
         lock = (stage / "cleanup.lock").open("a")
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        known, job = set(), None
+        known, job = set(observed["job_ids"] if observed else ()), None
         try:
             raw_job = (stage / "job-id").read_text()
             if re.fullmatch(r"[0-9]+", raw_job):
@@ -864,6 +889,9 @@ def cleanup_slurm(stage, request, reconciled):
                 raise ValueError("invalid cancellation history; stage retained")
             known.update(previous_jobs)
         evidence["cancellation_attempts"] = attempts
+        if observed and not observed["scheduler_confirmed"]:
+            evidence.update(observed, job_ids=sorted(known))
+            raise ValueError(observed["discovery_error"])
         evidence.update(discover_slurm_jobs(request, known))
         jobs = evidence["job_ids"]
         evidence["job_id"] = job or (jobs[0] if jobs else None)
@@ -875,19 +903,12 @@ def cleanup_slurm(stage, request, reconciled):
             raise ValueError("Slurm job identity unresolved; stage retained")
         states = {}
         for job in jobs:
-            # Allow three observations, two seconds apart, for accounting and
-            # the queue to settle before considering cancellation. A lingering
-            # queue row must never cause cancellation of a terminal job.
-            for poll in range(3):
-                state = scheduler_state(job)
-                if state is not None and job not in evidence["queued_job_ids"]:
-                    break
-                if poll == 2:
-                    break
-                time.sleep(2)
-                evidence.update(discover_slurm_jobs(request, evidence["job_ids"]))
-                if not evidence["scheduler_confirmed"]:
-                    raise ValueError(evidence["discovery_error"])
+            state = scheduler_state(job)
+            # A still-live row overrides terminal accounting (e.g. requeue).
+            # Request the bounded unlocked wait before any cancellation.
+            if repoll is not None and (state is None or job in evidence["queued_job_ids"]):
+                repoll.append(job)
+                return evidence
             if state is None:
                 if len(attempts) >= 4:
                     raise ValueError("cancellation attempt limit reached; stage retained")
