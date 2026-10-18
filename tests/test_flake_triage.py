@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import signal
 import subprocess as SP
 import sys
@@ -27,6 +28,14 @@ class C(unittest.TestCase):
    p.write_text(str(n+1))
    self.assertEqual(n % 2, 1)
   if MODE == 'timeout': time.sleep(30)
+  if MODE == 'permissions':
+   d = Path('locked')
+   d.mkdir()
+   (d / 'artifact').write_text('fixture')
+   (d / 'outside').symlink_to(os.environ['OUTSIDE'])
+   d.chmod(0)
+   Path(os.environ['READY']).write_text(str(Path.cwd()))
+   Path.cwd().chmod(0)
   if MODE == 'detached':
    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
    Path(os.environ['CHILD_PID']).write_text(str(child.pid))
@@ -135,6 +144,26 @@ class TestFlakeTriage(unittest.TestCase):
         hook.write_text('#!/bin/sh\nexit 1\n')
         hook.chmod(0o755)
         self.check('SETUP_ERROR', [[], []], code=2)
+
+    def test_cleanup_restores_directory_access_without_following_symlinks(self):
+        self.head = self.save('permissions')
+        outside, ready = self.repo.parent / 'outside', self.repo.parent / 'ready'
+        outside.mkdir(mode=0o500)
+        self.env.update(OUTSIDE=str(outside), READY=str(ready))
+        try:
+            self.check('INCONCLUSIVE', [['pass'], ['pass']], '--runs', '1')
+            self.assertFalse(Path(ready.read_text()).parent.exists())
+            self.assertEqual(outside.stat().st_mode & 0o777, 0o500)
+        finally:
+            outside.chmod(0o700)
+            # Preserve fixture hygiene when mutation restores the broken cleanup.
+            if ready.exists():
+                tree = Path(ready.read_text())
+                if tree.exists():
+                    tree.chmod(0o700)
+                    (tree / 'locked').chmod(0o700)
+                    self.git('worktree', 'remove', '--force', '--force', str(tree))
+                    shutil.rmtree(str(tree.parent))
 
     def test_load_errors_on_both_sides(self):
         good = self.base
