@@ -148,6 +148,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
             "standard": {"luna", "kimi-k2.7-code", "sonnet-5.5"},
             "deep": {"luna", "kimi-k2.7-code", "sonnet-5.5", "sol"},
             "plan": {"astra", "kimi-k3"},
+            "planning": {"astra", "gemini-argon"},
             "committee": {"deepseek-v4-pro", "gemini-argon", "sonnet-5.5"},
             "tiebreak": {"sol-tiebreak"},
         }

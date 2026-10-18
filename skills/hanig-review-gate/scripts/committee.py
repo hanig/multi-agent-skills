@@ -143,7 +143,7 @@ def session_author_conflict(session):
     return member_author_conflict(members, session.get("author"))
 
 
-def pick_members(explicit, authors=()):
+def pick_members(explicit, authors=(), profile="committee"):
     """Two or three members from contrasting providers.
 
     Contrast is the point, so this refuses a panel that shares one provider
@@ -162,17 +162,17 @@ def pick_members(explicit, authors=()):
             die(f"no reviewer named {', '.join(missing)}. Available: "
                 f"{', '.join(sorted(r['name'] for r in revs))}.")
     else:
-        # The COMMITTEE profile, not "plan". They were the same list and
-        # should not be: a model can be wanted for planning and unwanted as a
-        # review-gate reviewer, which is exactly the split in force here.
-        chosen = [r for r in revs if "committee" in (r.get("profiles") or [])]
+        chosen = [r for r in revs if R.in_profile(r, profile)]
+        if not chosen:
+            die(f"no enabled members in profile {profile!r}; name members "
+                f"with --member, or fix the profile in reviewers.json.")
     conflict = member_author_conflict(chosen, authors)
     if conflict:
         die(conflict + ". Name independent members with --member.")
     if not MIN_MEMBERS <= len(chosen) <= MAX_MEMBERS:
         die(f"a committee is {MIN_MEMBERS} or {MAX_MEMBERS} members; got "
             f"{len(chosen)} ({', '.join(r['name'] for r in chosen) or 'none'})"
-            f". Name them with --member, or fix the 'committee' profile in "
+            f". Name them with --member, or fix the {profile!r} profile in "
             f"reviewers.json.")
     if len({r["provider"] for r in chosen}) < 2:
         die(f"every member uses provider {chosen[0]['provider']!r}, so they "
@@ -393,7 +393,7 @@ def show_results(results, quiet=False):
 
 
 def cmd_open(args):
-    members = pick_members(args.member, args.author)
+    members = pick_members(args.member, args.author, args.profile)
     problem = Path(args.problem_file).read_text() if args.problem_file \
         else args.problem
     if not problem or not problem.strip():
@@ -721,6 +721,9 @@ def main():
     o.add_argument("name")
     o.add_argument("--problem")
     o.add_argument("--problem-file")
+    o.add_argument("--profile", default="committee", metavar="NAME",
+                   help="membership profile when --member is absent "
+                        "(default: committee; planning for design sessions)")
     o.add_argument("--member", action="append", default=[],
                    help="override the plan panel; name two, repeatable or "
                         "comma-separated")

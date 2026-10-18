@@ -684,7 +684,7 @@ class TestCommitteeTiebreak(unittest.TestCase):
         entry = next(r for r in reviewers if r["name"] == "sol-tiebreak")
         self.assertEqual(entry["profiles"], ["tiebreak"])
         self.assertEqual(entry["effort"], "xhigh")
-        for profile in ("plan", "fast", "standard", "deep", "committee"):
+        for profile in ("plan", "fast", "standard", "deep", "committee", "planning"):
             self.assertNotIn("sol-tiebreak", [r["name"] for r in reviewers
                                             if profile in r.get("profiles", [])])
         self.assertNotIn("sol-tiebreak", [m["name"] for m in committee.pick_members([])])
@@ -718,6 +718,74 @@ class TestCommitteeAuthorMembers(unittest.TestCase):
             with self.assertRaises(SystemExit) as stopped:
                 guarded_main(committee.main)
         return stopped.exception.code, output.getvalue(), ask.call_count
+
+    def test_planning_profile_selects_shipped_pair_and_retains_members(self):
+        code, output, calls = self.invoke(
+            "open", "--profile", "planning", "--author", "codex/fixture-author",
+            "--problem", "Which design?")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, 2)
+        members = committee.load_session("authors")["members"]
+        self.assertEqual(set(members), {"astra", "gemini-argon"})
+        code, output, calls = self.invoke("ask", "--prompt", "Clarify the design")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, 2)
+        self.assertEqual(set(committee.load_session("authors")["members"]), set(members))
+
+    def test_default_open_still_selects_committee_profile(self):
+        code, output, calls = self.invoke(
+            "open", "--author", "codex/gpt-6-astra", "--problem", "Which design?")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, 3)
+        self.assertEqual(set(committee.load_session("authors")["members"]),
+                         {"deepseek-v4-pro", "gemini-argon", "sonnet-5.5"})
+
+    def test_explicit_members_override_planning_profile(self):
+        code, output, calls = self.invoke(
+            "open", "--profile", "planning", "--member", "luna,kimi-k3",
+            "--author", "codex/gpt-6-astra", "--problem", "Which design?")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, 2)
+        self.assertEqual(set(committee.load_session("authors")["members"]),
+                         {"luna", "kimi-k3"})
+
+    def test_unknown_and_empty_profiles_refuse_before_session_or_provider(self):
+        for profile, roster in (
+                ("unknown-profile", committee.R.load_reviewers()),
+                ("empty-profile", []),
+                ("disabled-profile", [{"name": "disabled", "provider": "openai",
+                    "model": "fixture", "profiles": ["disabled-profile"], "enabled": False}])):
+            with self.subTest(profile=profile), mock.patch.object(
+                    committee.R, "load_reviewers", return_value=roster):
+                code, _output, calls = self.invoke(
+                    "open", "--profile", profile, "--problem", "Which design?")
+                self.assertIn("no enabled members", str(code))
+                self.assertIn(profile, str(code))
+                self.assertEqual(calls, 0)
+                self.assertFalse(committee.session_path("authors").exists())
+
+    def test_planning_keeps_member_count_and_provider_rules(self):
+        pair = [dict(r) for r in committee.R.load_reviewers()
+                if committee.R.in_profile(r, "planning")]
+        for roster, message in (
+                (pair[:1], "2 or 3 members"),
+                (pair + [dict(r, name="extra-" + r["name"]) for r in pair], "2 or 3 members"),
+                ([dict(r, provider="openrouter") for r in pair], "at least two providers")):
+            with self.subTest(message=message), mock.patch.object(
+                    committee.R, "load_reviewers", return_value=roster):
+                code, _output, calls = self.invoke(
+                    "open", "--profile", "planning", "--problem", "Which design?")
+                self.assertIn(message, str(code))
+                self.assertEqual(calls, 0)
+                self.assertFalse(committee.session_path("authors").exists())
+
+    def test_planning_profile_cannot_seat_its_author(self):
+        code, _output, calls = self.invoke(
+            "open", "--profile", "planning", "--author", "codex/gpt-6-astra",
+            "--problem", "Which design?")
+        self.assertIn("astra refused: authored this change", str(code))
+        self.assertEqual(calls, 0)
+        self.assertFalse(committee.session_path("authors").exists())
 
     def test_explicit_sol_author_is_refused_before_session_or_provider(self):
         code, output, calls = self.invoke(
