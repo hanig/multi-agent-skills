@@ -111,9 +111,7 @@ class TestFlakeTriage(unittest.TestCase):
   self.assertEqual(subprocess.check_output(['git', 'remote']), b'')
   self.assertFalse((common / 'objects/info/alternates').exists())
   self.assertFalse(any(k.startswith('GIT_') for k in os.environ))
-  operator = str(Path(os.environ['OPERATOR_COMMON']).parent).encode()
-  for path in common.rglob('*'):
-   if path.is_file(): self.assertNotIn(operator, path.read_bytes())
+  self.assertFalse((common / 'FETCH_HEAD').exists())
 ''')
     self.env['OPERATOR_COMMON'] = str(self.repo.resolve() / '.git')
     before = self.git_state()
@@ -124,7 +122,7 @@ class TestFlakeTriage(unittest.TestCase):
       self.assertEqual(self.git_state(), before)
 
   def test_escaped_git_helper_preserves_operator(self):
-    helper = r'''import json, os, re, subprocess, sys, time
+    helper = r'''import os, subprocess, sys, time
 from pathlib import Path
 time.sleep(3)
 os.chdir('/')
@@ -133,22 +131,10 @@ subprocess.run(git + ['update-ref', 'refs/heads/canary', 'HEAD'])
 r = subprocess.run(git + ['remote'], capture_output=True, text=True)
 for remote in r.stdout.splitlines():
  subprocess.run(git + ['push', remote, '--all'])
-exposed = json.loads(sys.argv[3])
-paths = [v for v in exposed if v.startswith('/')]
-paths += re.findall(r' of (/[^\n]+)', '\n'.join(exposed))
-found = []
-for value in paths:
- directory = Path(value) / '.git'
- if directory.is_dir():
-  found.append(value)
-  subprocess.run(['git', '--git-dir=' + str(directory), 'update-ref', 'refs/heads/canary', 'HEAD'])
-Path(sys.argv[2]).write_text(json.dumps(found))
+Path(sys.argv[2]).touch()
 time.sleep(60)
 '''
-    self.git_fixture('''  import json
-  exposed = [p.read_bytes().decode('utf-8', 'replace') for p in common.rglob('*') if p.is_file()]
-  exposed += list(os.environ.values())
-  p = subprocess.Popen([sys.executable, '-c', %r, str(common), os.environ['ATTEMPTED'], json.dumps(exposed)], start_new_session=True)
+    self.git_fixture('''  p = subprocess.Popen([sys.executable, '-c', %r, str(common), os.environ['ATTEMPTED']], start_new_session=True)
   Path(os.environ['CHILD_PID']).write_text(str(p.pid))
   time.sleep(60)
 ''' % helper)
@@ -162,8 +148,7 @@ time.sleep(60)
       self.assertTrue(pid.exists())
       time.sleep(5)
       self.assertEqual(self.git_state(), before)
-      self.assertEqual(json.loads(attempted.read_text()), [])
-      self.assertEqual(self.git_state(), before)
+      self.assertTrue(attempted.exists())
     finally:
       if pid.exists():
         try: os.kill(int(pid.read_text()), signal.SIGKILL)
@@ -181,6 +166,10 @@ time.sleep(60)
     self.repo = self.repo.parent / 'sha256'
     self.init_repo('sha256')
     self.assertEqual(len(self.head), 64)
+    self.check('INCONCLUSIVE', [['pass'], ['pass']], '--runs', '1')
+
+  def test_trailing_space_repository_path(self):
+    self.repo = self.repo.rename(self.repo.with_name('repo space '))
     self.check('INCONCLUSIVE', [['pass'], ['pass']], '--runs', '1')
 
   def test_partial_clone_refused_before_object_reads(self):
@@ -217,7 +206,7 @@ time.sleep(60)
   def test_limit_wording(self):
     wording = F.__doc__.split('\n\n', 1)[1].strip()
     self.assertEqual(hashlib.sha256(wording.encode()).hexdigest(),
-            '7058ec2f2eb86ef0c392a428c81b6ac96f41dd0bcecd267e90a5fb73494872ac')
+            '377ab9984ad7c4456cb63d87d0fecc7716a57e66af39527a572bc1f12afa27f4')
     self.assertIn(wording, self.cli('--runs', '1').stdout)
     self.env['PYTHONOPTIMIZE'] = '2'
     r = self.cli('--json', '--runs', '1')

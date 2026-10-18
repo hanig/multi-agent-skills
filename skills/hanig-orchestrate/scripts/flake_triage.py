@@ -16,7 +16,7 @@ import tempfile
 NOTICE = ("The class is a hint, never exoneration: an untouched test file does not exclude "
      "a regression in production code the test exercises, and isolated reruns miss "
      "order-dependent flakes. Merge still requires a complete green run.")
-LIMITS = "Each run executes in a standalone scratch repository with no remote, alternates or shared Git directory linking it to the operator's repository, nothing in the scratch records the operator repository's path, and GIT_* environment variables are removed. Partial clones are refused. Tests still run with the operator's full privileges and can affect anything they can find by other means, such as absolute paths or process arguments. Processes that detach into a new session may outlive the tool; this is a declared limit, not closed."
+LIMITS = "Each run uses a standalone scratch repository with no remote, alternates or shared Git directory, so Git commands run inside the scratch act on the scratch, not on the operator's repository. This is not an isolation boundary: tests run with the operator's full privileges and environment and can reach the operator's repository, or anything else, through any path they can discover. Partial clones are refused. Processes that detach into a new session may outlive the tool."
 __doc__ = NOTICE + "\n\n" + LIMITS
 NOTICE += "\n" + LIMITS
 RERUNS = {
@@ -87,21 +87,6 @@ def object_format(repo):
       raise SetupError('Partial clones are refused; use a full local clone.')
   return git(repo, 'rev-parse', '--show-object-format')['stdout'].strip()
 
-def check_source_path(tree, repo):
-  needle = os.fsencode(repo)
-  for path in (tree / '.git').rglob('*'):
-    if path.is_file():
-      with path.open('rb') as handle:
-        tail = b''
-        while True:
-          chunk = handle.read(65536)
-          if not chunk:
-            break
-          data = tail + chunk
-          if needle in data:
-            raise SetupError('scratch Git metadata records the operator path')
-          tail = data[-len(needle):]
-
 def commit(repo, ref):
   if not ref or ref.startswith('-'):
     raise SetupError('commit must be a non-option revision')
@@ -131,7 +116,6 @@ def scratch_repository(repo, sha, fmt=None):
     git(tree, 'fetch', '--no-tags', str(repo), sha)
     git(tree, 'checkout', '--detach', 'FETCH_HEAD')
     (tree / '.git/FETCH_HEAD').unlink()
-    check_source_path(tree, repo)
     yield tree
   finally:
     with signals_ignored():
@@ -180,7 +164,8 @@ def test_id(value):
 def triage(a):
   repo = Path(a.repo).resolve()
   fmt = object_format(repo)
-  repo = Path(git(repo, 'rev-parse', '--show-toplevel')['stdout'].strip()).resolve()
+  toplevel = git(repo, 'rev-parse', '--show-toplevel')['stdout']
+  repo = Path(toplevel[:-1] if toplevel.endswith('\n') else toplevel).resolve()
   head, base = commit(repo, a.head), commit(repo, a.base)
   python = shutil.which(a.python)
   if not python:
