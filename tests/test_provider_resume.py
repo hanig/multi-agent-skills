@@ -372,10 +372,13 @@ class ProviderResumeTests(Checks):
       self.assertTrue(S.acquire_lease(h.sd)[0])
       h.addCleanup(S.release_lease, h.sd)
       result = S.CHECK_RESULT_PREFIX + ' {"produced_head":null,"receipt_sha256":"' + "f"*64 + '"}'
+      # strftime reads the wall clock independently of time.time. Freeze the
+      # shared time module for both the terminal watch and outbox timestamps.
       with mock.patch.object(P, "maybe_resume", side_effect=AssertionError("off")), \
           mock.patch.object(S.SE, "_check", return_value=(S.FAILED, "", "", result)), \
           mock.patch.object(S.SW, "_archive_code_worktree"), \
-          mock.patch.object(S.time, "time", return_value=1000):
+          mock.patch.object(S.time, "time", return_value=1000), \
+          mock.patch.object(S.time, "strftime", return_value="1970-01-01T00:16:40+0000"):
         for cfg in (None, {"max": 0}):
           state = copy.deepcopy(initial)
           h.unit.pop("provider_resume", None)
@@ -396,6 +399,22 @@ class ProviderResumeTests(Checks):
         h.expect("FAILED")
         self.absent("provider_resumes", h.us())
         h.sent(0)
+
+  def test_disabled_legacy_state_across_second_boundary(self):
+    advance = S.advance
+    clock = ["1970-01-01T00:16:40+0000"]
+
+    def cross_boundary(*args, **kwargs):
+      result = advance(*args, **kwargs)
+      clock[0] = "1970-01-01T00:16:41+0000"
+      return result
+
+    # The test's inner freeze must shield the entire comparison from this
+    # one-second jump between advances. Removing it fails the same assertion.
+    with mock.patch.object(S.time, "strftime", side_effect=lambda *a, **k: clock[0]), \
+        mock.patch.object(S, "advance", side_effect=cross_boundary) as advances:
+      self.test_disabled_legacy_state()
+    self.eq(advances.call_count, 2)
 
   def test_no_delivery_inference(self):
     tree = ast.parse(Path(P.__file__).read_text())
