@@ -6,7 +6,7 @@ You are an implementation agent working inside a coordinator-allocated attempt w
 
 Check every fix by mutation: revert the fix and the test must fail. Sweep mechanically for siblings of any defect you fix. Do not weaken a test, guard or assertion. Declaration blocks in `SKILL.md` are generated: edit `declarations.json`, run `scripts/declaration_registry.py write-body`, then `check-body` and `check-references` for the affected skill. <!-- declaration: delegation.preamble -->
 
-Use `{{FLOOR_PYTHON}}` for the release-validation floor and `{{CURRENT_PYTHON}}` for current-interpreter tests. Do not install interpreters. Run the loaded review gate's `review.py` through `zsh -ic` where provider keys come from `~/.zshrc`; otherwise use the host's authorized credential-loading mechanism without printing secrets. <!-- declaration: delegation.preamble -->
+Use `{{FLOOR_PYTHON}}` for the release-validation floor and `{{CURRENT_PYTHON}}` for current-interpreter tests. Do not install interpreters. Run the loaded review gate's `review.py` using `{{REVIEW_ENVIRONMENT}}`, the host's authorized credential-loading mechanism, without printing secrets. <!-- declaration: delegation.preamble -->
 
 ## Order of work
 
@@ -53,4 +53,4 @@ A finding whose trigger is outside the declared envelope, whose failure is bound
 
 ## Orchestrator use
 
-Fill the brace-delimited `{{REPO}}`, `{{AUTHOR}}` (provider/model), `{{BASE}}`, `{{FLOOR_PYTHON}}` and `{{CURRENT_PYTHON}}` placeholders from the anchored repository and discovered host; `{{stem}}` and `{{BASENAME}}` are per-changed-file substitutions during test discovery. Copy the Preamble through Standing rules sections into the delegated prompt, append the TASK with its "Supported envelope and accepted limits" section and a SCOPE line, then append the coordinator completion protocol. Declare `provider_resume: {"max": 2}` on new code units in the plan. These are conduct instructions; no code executes or enforces this template. <!-- declaration: delegation.preamble -->
+Fill the brace-delimited `{{REPO}}`, `{{AUTHOR}}` (provider/model), `{{BASE}}`, `{{FLOOR_PYTHON}}`, `{{CURRENT_PYTHON}}` and `{{REVIEW_ENVIRONMENT}}` placeholders from the anchored repository and discovered host; the review environment describes the credential-loading wrapper or already-exported environment, never secret values. `{{stem}}` and `{{BASENAME}}` are per-changed-file substitutions during test discovery. Copy the Preamble through Standing rules sections into the delegated prompt, append the TASK with its "Supported envelope and accepted limits" section and a SCOPE line, then append the coordinator completion protocol. Declare `provider_resume: {"max": 2}` on new code units in the plan. These are conduct instructions; no code executes or enforces this template. <!-- declaration: delegation.preamble -->
