@@ -230,6 +230,19 @@ class TestCandidates(unittest.TestCase):
                                        hyphen, "moonshotai/kimi-k2-7-code"),
                          ([], ["moonshotai/kimi-k3-1-thinking"]))
 
+    def test_hyphen_family_accepts_dot_prefixed_variant(self):
+        model = "moonshotai/kimi-k3.foo"
+        self.assertEqual(MF.candidates([model], dict(KIMI, separator="-"),
+                                       "moonshotai/kimi-k2-7-code"), ([], [model]))
+
+    def test_dot_separator_is_version_not_variant(self):
+        family = dict(KIMI, suffix="")
+        model = "moonshotai/kimi-k3.5"
+        self.assertEqual(MF.version_of(model, family), (3, 5))
+        # A second separator must not become a suffix through backtracking.
+        self.assertEqual(MF.candidates([model, model + ".1"], family,
+                                       "moonshotai/kimi-k2.7"), ([], []))
+
     def test_named_versions_have_no_candidates(self):
         seat = next(r for r in shipped()[0] if r["name"] == "gemini-argon")
         self.assertEqual(MF.candidates([seat["model"] + "-0813",

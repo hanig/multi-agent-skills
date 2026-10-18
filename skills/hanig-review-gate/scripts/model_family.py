@@ -150,7 +150,7 @@ def candidates(listed_ids, family, pinned):
         base = pinned[:-5]
     dated = re.compile(re.escape(base) + r"-[0-9]{4}")
     sep = re.escape(family.get("separator", "."))
-    numeric = re.compile(r"([0-9]{1,6})(?:%s([0-9]{1,6}))?([^0-9.].*|)" % sep)
+    numeric = re.compile(r"([0-9]{1,6})(?:%s([0-9]{1,6}))?([^0-9%s].*|)" % (sep, sep))
     snapshots, cross_variant = set(), set()
     for model_id in listed_ids:
         if not isinstance(model_id, str) or model_id == pinned or ":" in model_id:
