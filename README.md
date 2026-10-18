@@ -309,6 +309,25 @@ selective install names all five bundles:
 host scheduler repeats it; the orchestrating session performs connected review,
 merge, tracker, and reporting work around those passes.
 
+Before requesting a CI or merge-verifier rerun, triage the failed unittest id
+on the pinned head and chosen base (normally the current target tip):
+
+```sh
+python3 "$HANIG_ORCHESTRATE_DIR/scripts/flake_triage.py" --repo "$REPO" \
+  --head "$HEAD" --base "$BASE" --test tests.test_example.TestCase.test_method \
+  --runs 5 --timeout 60 --python python3 --pr 123 --json
+```
+
+Repeat `--test` for module, class or method ids. Defaults: five runs per side,
+60 seconds per run. Scratch worktrees are removed even on interrupt. Output
+includes all outcomes, the touched-file fact, class, suggested rerun and issue
+draft. Save the body and replace `BODY_FILE`, `BINDING` and `APPROVER` in the
+printed command; triage executes no tracker command or CI rerun, writes no
+coordinator state and records no pass. Exit 0 means triage completed; setup or
+usage errors exit 2. Base absence is unavailable evidence, classified by head.
+An untouched test file does not exclude production regressions; isolated
+reruns miss order-dependent flakes. Merge still requires a complete green run.
+
 The connected `merge_unit.py` operator requires passing `integration-tests`
 and, when declared by the target policy, `changed-tests-stable` evidence
 for the exact judged head and observed target commit, including the
