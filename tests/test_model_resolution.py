@@ -126,6 +126,22 @@ class TestFamilyParser(unittest.TestCase):
                 with self.assertRaises(MF.FamilyError):
                     MF.check_family(bad)
 
+    def test_snapshot_and_other_unknown_family_fields_are_refused(self):
+        seat = next(r for r in shipped()[0] if r["name"] == "deepseek-v4-pro")
+        agents = shipped()[1]
+        for key in ("snapshot", "unknown"):
+            for value in ("0813", "813", "08130", "ab12", None):
+                family = dict(DEEPSEEK, **{key: value})
+                with self.subTest(key=key, value=value):
+                    with self.assertRaisesRegex(MF.FamilyError, "unknown family field"):
+                        MF.check_family(family)
+                    with self.assertRaises(MF.FamilyError):
+                        RM.validate_config([dict(seat, family=family)], None)
+                    default = dict(agents["default"],
+                                   family=dict(family, listing="paseo:codex"))
+                    with self.assertRaises(MF.FamilyError):
+                        RM.validate_config([], dict(agents, default=default))
+
     def test_named_family_is_an_exact_pin_through_resolver_and_reader(self):
         seat = next(r for r in shipped()[0] if r["name"] == "gemini-argon")
         family = MF.check_family(seat["family"])
@@ -243,62 +259,19 @@ class TestCandidates(unittest.TestCase):
         self.assertEqual(MF.candidates([model, model + ".1"], family,
                                        "moonshotai/kimi-k2.7"), ([], []))
 
+    def test_hyphen_numeric_minor_is_never_a_candidate(self):
+        family = dict(KIMI, separator="-", suffix="", major=3)
+        pin = "moonshotai/kimi-k3"
+        listed = ["moonshotai/kimi-k3-1017"]
+        self.assertEqual(MF.version_of(listed[0], family), (3, 1017))
+        self.assertEqual(MF.select(listed, family, pin), (listed[0], []))
+        self.assertEqual(MF.candidates(listed, family, pin), ([], []))
+
     def test_named_versions_have_no_candidates(self):
         seat = next(r for r in shipped()[0] if r["name"] == "gemini-argon")
         self.assertEqual(MF.candidates([seat["model"] + "-0813",
                                         "google/gemini-4-5"],
                                        seat["family"], seat["model"]), ([], []))
-
-
-class TestDatedPin(unittest.TestCase):
-    def test_only_the_explicit_dated_pin_is_accepted_and_undated_upgrades_win(self):
-        family = dict(DEEPSEEK, snapshot="0813")
-        pin = DEEPSEEK_IDS[1]
-        self.assertEqual(MF.check_family(family), family)
-        self.assertEqual(MF.version_of(pin, family, pinned=pin), (4, 0))
-        self.assertIsNone(MF.version_of(pin, DEEPSEEK, pinned=pin))
-        for other in (pin + ":batch", pin + "-exp", DEEPSEEK_IDS[0] + "-1017",
-                      "deepseek/deepseek-v4.1-pro-0813", "deepseek/deepseek-v5-pro-0813"):
-            with self.subTest(model=other):
-                self.assertIsNone(MF.version_of(other, family, pinned=pin))
-        newer = "deepseek/deepseek-v4.1-pro"
-        catalog = [pin, DEEPSEEK_IDS[0], newer, newer + "-0813", newer + "-1017"]
-        self.assertEqual(MF.select(catalog, family, pin), (newer, []))
-        self.assertEqual(MF.select(catalog[:2], family, pin), (None, []))
-        self.assertEqual(MF.candidates(catalog + [DEEPSEEK_IDS[0] + "-1017"], family, pin),
-                         ([DEEPSEEK_IDS[0] + "-1017"], []))
-
-    def test_snapshot_validation_and_both_readers(self):
-        pin = DEEPSEEK_IDS[1]
-        family = dict(DEEPSEEK, snapshot="0813")
-        seat = dict(next(r for r in shipped()[0] if r["name"] == "deepseek-v4-pro"),
-                    model=pin, family=family)
-        default = dict(provider="codex/" + pin, thinking="high",
-                       family=dict(family, listing="paseo:codex"))
-        agents = dict(default=default, thinking_by_model={default["provider"]: "high"})
-        RM.validate_config([seat], agents)
-        for bad in ("813", "08130", "ab12", "０８１３", "0813\n", 813, None, True):
-            with self.subTest(snapshot=bad), self.assertRaises(MF.FamilyError):
-                MF.check_family(dict(family, snapshot=bad))
-        for bad_pin in (DEEPSEEK_IDS[0], DEEPSEEK_IDS[0] + "-1017"):
-            with self.subTest(pin=bad_pin):
-                with self.assertRaises(MF.FamilyError):
-                    RM.validate_config([dict(seat, model=bad_pin)], None)
-                with self.assertRaises(MF.FamilyError):
-                    MF.select([], family, bad_pin)
-        newer = "deepseek/deepseek-v4.1-pro"
-        record = dict(seat["_max_output_tokens_accepted"], model=newer)
-        self.assertEqual(MF.reviewer_override(seat, dict(model=newer, record=record)),
-                         (newer, record))
-        probe = dict(Provider="codex", Model=newer, Thinking="high")
-        self.assertEqual(MF.agent_default_override(
-            default, agents["thinking_by_model"], dict(provider="codex/" + newer, probe=probe)),
-            "codex/" + newer)
-        for dated in (newer + "-0813", newer + "-1017"):
-            self.assertIsNone(MF.reviewer_override(
-                seat, dict(model=dated, record=dict(record, model=dated))))
-            self.assertIsNone(MF.agent_default_override(default, agents["thinking_by_model"],
-                dict(provider="codex/" + dated, probe=dict(probe, Model=dated))))
 
 
 class TestSelection(unittest.TestCase):
@@ -1003,6 +976,38 @@ class TestCandidateReports(StateHome):
         self.assertEqual(["%-15s %-16s %s  %s\n" % (
             row["status"], row["seat"], row["pinned"], row["detail"])
             for row in rows if row["status"] == "CANDIDATE"], candidate_lines)
+
+    def test_hyphen_numeric_minor_resolves_without_a_candidate_report(self):
+        pin, point = "moonshotai/kimi-k3", "moonshotai/kimi-k3-1017"
+        family = dict(KIMI, separator="-", suffix="", major=3)
+        seat = dict(next(r for r in shipped()[0] if r["name"] == "kimi-k3"),
+                    family=family)
+        default = dict(provider="codex/" + pin, thinking="high",
+                       family=dict(family, listing="paseo:codex"))
+        agents = dict(default=default, thinking_by_model={default["provider"]: "high"})
+        for flags, fail in (((), False), (("--dry-run",), False), ((), True)):
+            with self.subTest(flags=flags, fail=fail):
+                output, snapshot, _, _ = self.run_cli([point], flags, [seat], agents, fail)
+                self.assertNotIn("CANDIDATE", output)
+                if not flags and not fail:
+                    data = json.loads(snapshot)
+                    self.assertEqual(data["reviewers"][seat["name"]]["model"], point)
+                    self.assertEqual(data["agent_default"]["provider"], "codex/" + point)
+
+    def test_omitting_family_keeps_an_adopted_dated_pin_exact(self):
+        pin = DEEPSEEK_IDS[1]
+        seat = dict(next(r for r in shipped()[0] if r["name"] == "deepseek-v4-pro"),
+                    model=pin)
+        del seat["family"]
+        agents = dict(default=dict(provider="codex/" + pin, thinking="high"),
+                      thinking_by_model={"codex/" + pin: "high"})
+        output, snapshot, reviewer, agent = self.run_cli(
+            [pin, "deepseek/deepseek-v4.1-pro"], ("--json",), [seat], agents)
+        self.assertEqual(json.loads(output)["seats"], [])
+        self.assertEqual(json.loads(snapshot)["reviewers"], {})
+        self.assertIsNone(json.loads(snapshot)["agent_default"])
+        reviewer.assert_not_called()
+        agent.assert_not_called()
 
     def test_candidates_follow_all_existing_reports_for_reviewers_and_agent(self):
         seat = dict(next(r for r in shipped()[0] if r["name"] == "deepseek-v4-pro"))

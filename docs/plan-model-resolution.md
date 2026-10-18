@@ -39,24 +39,23 @@ vendor path equals `vendor` exactly and its name is exactly `prefix`, then a
 version, then `suffix`. A version is one run of digits (`N`) or two runs
 joined by the family's `separator` (`N` + separator + `M`): `.` for
 `gpt-6.1-sol`, `-` for `claude-opus-5-5`. Versions compare as integer pairs,
-`M` defaulting to 0, so `6.10` is above `6.2`. Nothing else is parsed: `-pro`,
-`:batch`, dated snapshots and previews are simply not in the family unless the
-dated pin is explicitly declared as described below. The parser is shared by
-the resolver and the readers of the per-project resolution snapshot.
+`M` defaulting to 0, so `6.10` is above `6.2`. Each digit run is bounded to six
+digits. Other variants, `:batch` and previews do not match this grammar.
+A hyphen-separated family with an empty suffix reads
+`<prefix><major>-<NNNN>` as a point release, even if those four digits denote
+a date. This is pre-existing behavior. No configured seat is affected by
+today's listings: the hyphen-separated Anthropic seats receive eight-digit
+dates, beyond the six-digit version bound; Kimi K2.7 requires `-code` and
+uses a dot separator. The parser is shared by the resolver and the readers
+of the per-project resolution snapshot.
 
 `major` is the owner's ceiling, and it lives in merged `reviewers.json` or
 `agents.json`, so only a reviewed change raises it. The shipped `model` must be
 in its family and carry that major; a test checks both.
 
-An optional `"snapshot": "0813"` declares an adopted four-digit dated pin.
-The configured model must be an otherwise valid family id followed by exactly
-`-0813`, for example `deepseek/deepseek-v4-pro-0813`. Malformed snapshot values
-are refused. `version_of(model_id, family, pinned=...)` accepts that exact pin
-at its base version; callers must supply the pin because the family alone
-does not identify its point release. Other dated ids remain outside catalog
-membership. Selection and snapshot readers use the dated pin's base as their
-floor, so an undated `deepseek/deepseek-v4.1-pro` can still replace it after a
-successful probe. Families without `snapshot` retain their existing behavior.
+To pin an adopted dated model exactly, omit the seat's `family`. The
+resolver skips seats without a family. Unknown family fields, including
+`snapshot`, are refused.
 
 ### Selection
 
@@ -71,12 +70,13 @@ keeps its pin.
 After a seat's existing reports, the resolver emits one `CANDIDATE` line per
 non-empty class, for reviewers and the code-agent default alike. These reports
 also appear in the `seats` array in `--json` output. They are sorted,
-de-duplicated catalog ids, never inferred models or automatic adoptions:
+de-duplicated catalog ids. Both classes require `version_of(id, family)` to
+return `None`: a CANDIDATE can never name an id that `select()` could adopt.
+They are never inferred models or automatic adoptions:
 
-- **Dated snapshots:** the pinned id's base followed by `-` and exactly four
-  ASCII digits, with nothing after them. If the family declares `snapshot`,
-  that suffix is removed from the pin before matching; the pin itself is
-  excluded. For `deepseek/deepseek-v4-pro`, this reports
+- **Dated snapshots:** the pinned id followed by `-` and exactly four
+  ASCII digits, with nothing after them; the pin itself is excluded.
+  For `deepseek/deepseek-v4-pro`, this reports
   `deepseek/deepseek-v4-pro-0813` as `dated snapshot, not adopted`.
   `:batch`, `-vision-exp` and other tails are excluded.
 - **Cross-variant newer generations:** the same vendor and prefix, a numeric

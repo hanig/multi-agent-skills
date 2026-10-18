@@ -301,7 +301,7 @@ def _archive_orphans(agent, title, cwd):
 
 
 def _pin_in_family(pin, family, what):
-    version = MF.version_of(pin, MF.check_family(family), pinned=pin)
+    version = MF.version_of(pin, MF.check_family(family))
     if version is None or version[0] != family["major"]:
         raise MF.FamilyError("%s: pinned %r is not in its family at major %d"
                              % (what, pin, family["major"]))

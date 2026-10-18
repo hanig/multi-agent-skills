@@ -27,7 +27,7 @@ STATE_DIR = ("hanig-review-gate", "routing")
 LISTINGS = ("openai", "openrouter", "anthropic")
 PASEO_PREFIX = "paseo:"
 FAMILY_FIELDS = ("listing", "vendor", "prefix", "separator", "suffix", "major",
-                 "named_version", "snapshot")
+                 "named_version")
 
 
 class FamilyError(ValueError):
@@ -44,6 +44,9 @@ def check_family(family):
     """Validate a family declaration; return it, or raise FamilyError."""
     if not isinstance(family, dict):
         raise FamilyError("family must be an object")
+    for field in family:
+        if field not in FAMILY_FIELDS:
+            raise FamilyError("unknown family field %r" % (field,))
     listing = family.get("listing")
     if not (listing in LISTINGS or (isinstance(listing, str)
                                     and listing.startswith(PASEO_PREFIX)
@@ -66,33 +69,23 @@ def check_family(family):
                 or re.fullmatch(r"[a-z][a-z0-9-]*", named) is None or major != 0):
             raise FamilyError("family.named_version must be a lowercase name "
                               "with family.major 0 (exact pin only)")
-    if "snapshot" in family:
-        snapshot = family["snapshot"]
-        if not isinstance(snapshot, str) or re.fullmatch(r"[0-9]{4}", snapshot) is None:
-            raise FamilyError("family.snapshot must be exactly four digits")
     return family
 
 
-def version_of(model_id, family, pinned=None):
+def version_of(model_id, family):
     """(major, minor) when model_id is in the family, else None.
 
     In the family means: vendor path equals family.vendor exactly, and the
     name is exactly prefix + digits [+ separator + digits] + suffix. Nothing
-    else is accepted, so -pro, :batch, dated snapshots and previews are simply
-    not in the family. An optional named_version admits only that exact core
-    at the sentinel version (0, 0); it never selects numeric or named upgrades.
-    With family.snapshot, the caller must supply pinned to admit that exact
-    dated id. Catalog membership still uses the undated grammar. A supplied
-    pin must end in the declared snapshot; its base is parsed normally.
+    else is accepted. A hyphen separator and empty suffix can read a four-digit
+    date after a major as a minor version; the grammar does not distinguish
+    dates. An optional named_version admits only that exact core at the
+    sentinel version (0, 0); it never selects numeric or named upgrades.
     """
     # A leading or trailing "/" would leave an empty vendor or name; any other
     # malformed path leaves a vendor that equals no family's.
     if not isinstance(model_id, str) or model_id != model_id.strip("/"):
         return None
-    if "snapshot" in family and model_id == pinned:
-        if not model_id.endswith("-" + family["snapshot"]):
-            return None
-        model_id = model_id[:-5]
     vendor, name = split_id(model_id)
     if vendor != family.get("vendor", ""):
         return None
@@ -120,7 +113,7 @@ def select(listed_ids, family, pinned):
     greater major is reported, never chosen: raising the ceiling is a reviewed
     config change.
     """
-    floor = version_of(pinned, family, pinned=pinned)
+    floor = version_of(pinned, family)
     if floor is None:
         raise FamilyError("pinned model %r is not in its own family" % pinned)
     major = family["major"]
@@ -141,14 +134,11 @@ def candidates(listed_ids, family, pinned):
     """Return (snapshots, cross_variant) catalog ids for operator review only.
 
     Four digits carry no year: sorting is lexical, never a recency ranking.
-    These lists do not participate in family membership or selection.
+    Only nonmembers of the family are reported, so selection cannot adopt them.
     """
     if "named_version" in family:
         return [], []
-    base = pinned
-    if "snapshot" in family and pinned.endswith("-" + family["snapshot"]):
-        base = pinned[:-5]
-    dated = re.compile(re.escape(base) + r"-[0-9]{4}")
+    dated = re.compile(re.escape(pinned) + r"-[0-9]{4}")
     sep = re.escape(family.get("separator", "."))
     # Keep the longest numeric parse; a separator-led variant is still valid.
     numeric = re.compile(r"([0-9]{1,6})(?:%s([0-9]{1,6}))?"
@@ -156,6 +146,8 @@ def candidates(listed_ids, family, pinned):
     snapshots, cross_variant = set(), set()
     for model_id in listed_ids:
         if not isinstance(model_id, str) or model_id == pinned or ":" in model_id:
+            continue
+        if version_of(model_id, family) is not None:
             continue
         if dated.fullmatch(model_id):
             snapshots.add(model_id)
@@ -343,7 +335,7 @@ def reviewer_override(seat, entry):
         return None
     model, record = entry.get("model"), entry.get("record")
     version = version_of(model, family)
-    floor = version_of(seat.get("model"), family, pinned=seat.get("model"))
+    floor = version_of(seat.get("model"), family)
     if version is None or floor is None:
         return None
     if version[0] != family["major"] or version <= floor:
@@ -419,7 +411,7 @@ def agent_default_override(default, thinking_table, entry):
         return None
     model = provider[len(route) + 1:]
     version = version_of(model, family)
-    floor = version_of(pinned_model, family, pinned=pinned_model)
+    floor = version_of(pinned_model, family)
     if version is None or floor is None:
         return None
     if version[0] != family["major"] or version <= floor:
