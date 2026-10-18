@@ -132,6 +132,7 @@ ORCHESTRATE_DECLARATIONS = (
     "role.supervision",
     "delegation.whole-loop",
     "delegation.prompt",
+    "delegation.preamble",
     "delegation.configuration",
     "delegation.continuation",
     "retry.boundary",
@@ -351,6 +352,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/delegation-evidence.md", "review.effort", 1),
         ("references/delegation-evidence.md", "review.honesty", 1),
         ("references/delegation-evidence.md", "review.panel-source", 1),
+        ("references/dispatch-preamble.md", "delegation.preamble", 25),
         ("references/handoff-takeover.md", "handoff.contents", 2),
         ("references/handoff-takeover.md", "handoff.transfer", 1),
         ("references/handoff-takeover.md", "limit.session-liveness", 1),
@@ -905,6 +907,17 @@ class TestAuthoredSkillShape(unittest.TestCase):
         skill = SKILLS / "hanig-orchestrate"
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
         self.assertEqual(_reference_elaboration_problems(skill), [])
+
+    def test_dispatch_preamble_credential_loading_is_host_filled(self):
+        reference = (SKILLS / "hanig-orchestrate" / "references" /
+                     "dispatch-preamble.md").read_text(encoding="utf-8")
+        preamble, _ = reference.split("## Order of work", 1)
+        _, instructions = reference.split("## Orchestrator use", 1)
+        self.assertIn("{{REVIEW_ENVIRONMENT}}", preamble)
+        self.assertIn("{{REVIEW_ENVIRONMENT}}", instructions)
+        for host_detail in ("zsh -ic", "~/.zshrc"):
+            with self.subTest(host_detail=host_detail):
+                self.assertNotIn(host_detail, reference)
 
     def test_orchestrate_concurrence_guidance_keeps_the_mandate_exception(self):
         skill = SKILLS / "hanig-orchestrate"
