@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scheduler_fixture import isolated_module_state_home as setUpModule  # noqa: E402
 from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
+from terminal_watcher_fixture import publish  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
@@ -56,19 +57,18 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
         (self.bin / "ps").symlink_to(ps)
         self.env = dict(os.environ, PATH=str(self.bin))
         self.paseo = self.bin / "paseo"
-        self.paseo.write_text(
-            "#!" + sys.executable + "\n"
-            "import os, sys, time\nfrom pathlib import Path\n"
-            "root = Path(" + repr(str(self.root)) + ")\n"
-            "assert sys.argv[1:] == ['wait', 'agent1', '--json']\n"
-            "(root / 'wait-pid').write_text(str(os.getpid()))\n"
-            "while not (root / 'release').exists(): time.sleep(0.02)\n"
-            "rc = int((root / 'release').read_text())\n"
-            "print('idle' if rc == 0 else 'fixture wait failed', flush=True)\n"
-            "sys.exit(rc)\n")
-        self.paseo.chmod(0o755)
+        self.write_paseo("agent1")
         self.proc = None
         self.addCleanup(self.cleanup_processes)
+
+    def write_paseo(self, agent):
+        self.paseo.write_text(
+            "#!" + sys.executable + "\n"
+            "import sys\nfrom pathlib import Path\n"
+            "sys.path.insert(0, " + repr(str(ROOT / "tests")) + ")\n"
+            "from terminal_watcher_fixture import wait\n"
+            "wait(Path(" + repr(str(self.root)) + "), " + repr(agent) + ")\n")
+        self.paseo.chmod(0o755)
 
     def cleanup_processes(self):
         if self.proc is not None:
@@ -177,7 +177,8 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
 
     def test_nonzero_wait_records_exact_exit_and_tail_without_status_poll(self):
         proc = self.start()
-        (self.root / "release").write_text("17")
+        publish(self.root / "release", "17\n")
+        # The original ten-second wait bounds hangs; it is not a latency assertion.
         self.assertEqual(proc.wait(timeout=10), S.EXIT_HALTED)
         self.assertEqual(self.saved_watch()["status"], "waiting")
         watch = self.outcome()["outcome"]
@@ -185,6 +186,61 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
         self.assertEqual(watch["wait_exit_code"], 17)
         self.assertIn("fixture wait failed", watch["log_tail"])
         self.assertIn("exit 17", self.status(False))
+
+    def assert_nonzero_outcome(self, proc):
+        self.assertEqual(proc.wait(timeout=10), S.EXIT_HALTED)
+        self.assertEqual(self.saved_watch()["status"], "waiting")
+        watch = self.outcome()["outcome"]
+        self.assertEqual(watch["status"], "exited_without_idle")
+        self.assertEqual(watch["wait_exit_code"], 17)
+        self.assertIn("fixture wait failed", watch["log_tail"])
+        self.assertIn("exit 17", self.status(False))
+
+    def observe_release(self, raw):
+        observed = self.root / "read-observed"
+        self.until(lambda: (observed.exists() and observed.read_text() == repr(raw))
+                   or self.proc.poll() is not None)
+        self.assertIsNone(self.proc.poll(), "fake wait exited before complete release")
+        self.assertEqual(observed.read_text(), repr(raw))
+
+    def test_release_publication_hides_the_open_empty_file(self):
+        (self.root / "observe-release").touch()
+        proc = self.start()
+        real_open = Path.open
+        opened = []
+
+        def paused_open(path, *args, **kwargs):
+            stream = real_open(path, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if path.name in ("release", "release.tmp") and mode == "w":
+                try:
+                    opened.append(path)
+                    self.assertEqual(path.stat().st_size, 0)
+                    self.assertFalse((self.root / "release").exists(),
+                                     "writer exposed the open, empty release file")
+                    # Let the real child poll while the writer is paused
+                    # between open and write, the measured ARC-2435 race.
+                    (self.root / "read-observed").unlink(missing_ok=True)
+                    self.observe_release(None)
+                except BaseException:
+                    stream.close()
+                    raise
+            return stream
+
+        with mock.patch.object(Path, "open", paused_open):
+            publish(self.root / "release", "17\n")
+        self.assertEqual(len(opened), 1)
+        self.assert_nonzero_outcome(proc)
+
+    def test_fake_wait_ignores_empty_and_partial_release(self):
+        (self.root / "observe-release").touch()
+        proc = self.start()
+        for incomplete in ("", "1", "17", "\n"):
+            with self.subTest(incomplete=incomplete):
+                publish(self.root / "release", incomplete)
+                self.observe_release(incomplete)
+        publish(self.root / "release", "17\n")
+        self.assert_nonzero_outcome(proc)
 
     def test_killed_wait_child_records_signal_exit(self):
         proc = self.start()
@@ -209,8 +265,23 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
             "attempt_dir": str(self.attempt), "attempts": [str(self.attempt)],
             "job_id": agent})
         S.save_state(self.state_dir, self.state)
-        self.paseo.write_text(self.paseo.read_text().replace(
-            "['wait', 'agent1', '--json']", repr(["wait", agent, "--json"])))
+        self.write_paseo(agent)
+
+    def test_agent_identity_preserves_quoted_fixture_import_path(self):
+        fixture_repo = self.root / "'agent1'" / "repo"
+        (fixture_repo / "tests").mkdir(parents=True)
+        shutil.copyfile(ROOT / "tests" / "terminal_watcher_fixture.py",
+                        fixture_repo / "tests" / "terminal_watcher_fixture.py")
+        with mock.patch(__name__ + ".ROOT", fixture_repo):
+            self.write_paseo("agent1")
+            self.set_watch_identity("attempt1", "agent 1")
+        publish(self.root / "release", "17\n")
+        result = subprocess.run(
+            [str(self.paseo), "wait", "agent 1", "--json"],
+            cwd=self.root, env=dict(self.env, PYTHONPATH=""),
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertEqual(result.stdout, "fixture wait failed\n")
 
     def test_live_watch_with_whitespace_attempt_is_unknown(self):
         self.set_watch_identity("attempt 1", "agent1")
@@ -300,7 +371,7 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
         self.assertTrue(ok, why)
         try:
             before = self.state_snapshot()
-            (self.root / "release").write_text("0")
+            publish(self.root / "release", "0\n")
             self.assertEqual(proc.wait(timeout=10), S.EXIT_HALTED)
             row = self.status()["units"][0]
             self.assertEqual(row["terminal_watch"]["status"], "idle_observed")
