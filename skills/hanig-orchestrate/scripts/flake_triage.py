@@ -112,7 +112,7 @@ def outcome(r, module_file):
         return 'timeout'
     err = r['stderr']
     if re.search(r'^ERROR: .*\(unittest\.loader\._FailedTest[.)]', err, re.M):
-        frames = re.findall(r'File "([^"]+)", line \d+, in (\w+)', err)
+        frames = re.findall(r'File "([^"]+)", line \d+, in ([^\n]+)', err)
         loader_origin = not frames or (frames[-1][0].endswith('/unittest/loader.py')
                                        and frames[-1][1] == 'loadTestsFromName')
         missing_attribute = loader_origin and re.search(

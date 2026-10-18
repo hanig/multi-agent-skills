@@ -167,7 +167,9 @@ class TestFlakeTriage(unittest.TestCase):
 
     def test_load_errors_on_both_sides(self):
         good = self.base
-        for bad in ("raise ImportError('broken')", 'import missing_dependency', 'invalid syntax !'):
+        for bad in ("raise ImportError('broken')", 'import missing_dependency', 'invalid syntax !',
+                    'import os\nos.removed_helper',
+                    "try:\n import os\n os.removed_helper\nexcept AttributeError as exc:\n raise ImportError('broken API') from exc"):
             self.testfile.write_text(bad)
             self.head = self.save('pass')
             self.base = good
