@@ -2,12 +2,13 @@
  "_comment": "Routing config only \u2014 endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. All reviewers use DEFAULT_MAX_OUTPUT_TOKENS (64000) unless they set max_output_tokens: reasoning tokens come out of the answer's budget, and at 16000 a large review returned no content at all. Prices in _cost are per-million-token budgeting hints, not routing inputs; later owner decisions and unmeasured prices are noted on the seats.",
  "default_profile": "standard",
  "_profiles": {
-  "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. Owner decision 2026-10-12: astra and kimi-k3, OpenAI and Moonshot, because the orchestrator writing plans is a Claude model.",
+  "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. Owner decision 2026-10-12: astra and kimi-k3, OpenAI and Moonshot, because the orchestrator writing plans is a Claude model. Pair under review: a plan-review benchmark decides it (owner decision 2026-10-18).",
   "fast": "luna and haiku-5.5; cheapest implementation panel, the first tier of --escalate (owner decision 2026-10-12).",
   "standard": "luna, kimi-k2.7-code and sonnet-5.5; the usual fixed implementation panel. Escalating from fast retains its verdicts and adds kimi-k2.7-code and sonnet-5.5.",
   "deep": "standard + sol. Final --escalate tier, or a fixed --profile deep panel. astra is NOT here since 2026-09-24: it writes the code now, and an author does not review itself.",
   "committee": "committee.py members, separate from gate profiles. Owner decision 2026-10-13: deepseek-v4-pro, gemini-argon and sonnet-5.5, three model makers. DeepSeek sits in no gate profile.",
-  "tiebreak": "Committee divergence only: the ONE enabled reviewer whose only profile is tiebreak rules on existing positions. committee.py selects it by this profile, never by name or model. Not a gate tier or a committee membership profile. sol-tiebreak since 2026-09-28, replacing astra-xhigh because astra authors the code it would rule on (ARC-755)."
+  "tiebreak": "Committee divergence only: the ONE enabled reviewer whose only profile is tiebreak rules on existing positions. committee.py selects it by this profile, never by name or model. Not a gate tier or a committee membership profile. sol-tiebreak since 2026-09-28, replacing astra-xhigh because astra authors the code it would rule on (ARC-755).",
+  "planning": "committee.py open --profile planning, for the hanig-project design step. Owner decision 2026-10-18: astra and gemini-argon. Separate from the step-back committee because committee.py refuses a session whose member authored the work, and astra writes the code."
  },
  "reviewers": [
   {
@@ -212,7 +213,8 @@
    },
    "effort": "xhigh",
    "profiles": [
-    "plan"
+    "plan",
+    "planning"
    ],
    "_profiles_note": "Plan only since owner decision 2026-10-12; no implementation or tiebreak profile. Author exclusion applies, including explicit committee selection.",
    "enabled": true,
@@ -348,7 +350,8 @@
    "max_output_tokens": 128000,
    "enabled": true,
    "profiles": [
-    "committee"
+    "committee",
+    "planning"
    ],
    "family": {
     "listing": "openrouter",
