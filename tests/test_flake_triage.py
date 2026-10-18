@@ -1,4 +1,5 @@
 """Triage real Git/unittest fixtures."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'skills/hanig-orchestrate/scripts/flake_triage.py'
 sys.path.insert(0, str(SCRIPT.parent))
@@ -83,6 +85,94 @@ class TestFlakeTriage(unittest.TestCase):
     def trees(self):
         return self.git('worktree', 'list', '--porcelain')
 
+    def git_state(self):
+        return (self.git('for-each-ref'), self.trees(),
+                hashlib.sha256((self.repo / '.git/config').read_bytes()).hexdigest(),
+                self.git('count-objects', '-v'))
+
+    def git_fixture(self, body):
+        self.testfile.write_text('import os, time, subprocess, sys, unittest\n'
+                                 'from pathlib import Path\nclass C(unittest.TestCase):\n'
+                                 ' def test_x(self):\n' + body)
+        self.head = self.save('pass')
+        self.git('branch', 'disposable')
+        remote = self.repo.parent / 'remote.git'
+        SP.check_call(['git', 'init', '--bare', '-q', str(remote)], env=self.env)
+        self.git('remote', 'add', 'fixture', str(remote))
+
+    def test_scratch_git_identity_and_environment(self):
+        self.git_fixture('''  common = Path(subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], text=True).strip()).resolve()
+  self.assertEqual(common, Path.cwd() / '.git')
+  self.assertNotEqual(str(common), os.environ['OPERATOR_COMMON'])
+  self.assertEqual(subprocess.check_output(['git', 'remote']), b'')
+  self.assertFalse((common / 'objects/info/alternates').exists())
+  self.assertFalse(any(k.startswith('GIT_') for k in os.environ))
+''')
+        self.env['OPERATOR_COMMON'] = str(self.repo / '.git')
+        before = self.git_state()
+        for overrides in ({}, dict(GIT_DIR=str(self.repo / '.git'), GIT_WORK_TREE=str(self.repo),
+                                   GIT_INDEX_FILE=str(self.repo / '.git/index'), GIT_CANARY='set')):
+            self.env.update(overrides)
+            self.check('INCONCLUSIVE', [['pass'], ['pass']], '--runs', '1')
+            self.assertEqual(self.git_state(), before)
+
+    def test_escaped_git_helper_preserves_operator(self):
+        helper = '''import os, subprocess, sys, time
+from pathlib import Path
+time.sleep(3)
+os.chdir('/')
+git = ['git', '--git-dir=' + sys.argv[1]]
+subprocess.run(git + ['update-ref', 'refs/heads/canary', 'HEAD'])
+r = subprocess.run(git + ['remote'], capture_output=True, text=True)
+for remote in r.stdout.splitlines():
+ subprocess.run(git + ['push', remote, '--all'])
+Path(sys.argv[2]).write_text('attempted')
+time.sleep(60)
+'''
+        self.git_fixture('''  common = Path(subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], text=True).strip()).resolve()
+  p = subprocess.Popen([sys.executable, '-c', %r, str(common), os.environ['ATTEMPTED']], start_new_session=True)
+  Path(os.environ['CHILD_PID']).write_text(str(p.pid))
+  time.sleep(60)
+''' % helper)
+        pid, attempted = self.repo.parent / 'pid', self.repo.parent / 'attempted'
+        self.env.update(CHILD_PID=str(pid), ATTEMPTED=str(attempted))
+        before = self.git_state()
+        try:
+            self.check('CONSISTENT_FAILURE', [['timeout'], ['pass']], '--runs', '1', '--timeout', '1')
+            self.assertTrue(pid.exists())
+            time.sleep(5)
+            self.assertEqual(attempted.read_text(), 'attempted')
+            self.assertEqual(self.git_state(), before)
+        finally:
+            if pid.exists():
+                try: os.kill(int(pid.read_text()), signal.SIGKILL)
+                except ProcessLookupError: pass
+
+    def test_synchronous_git_mutator_preserves_operator(self):
+        self.git_fixture('''  for args in (['branch', '-D', 'disposable'], ['update-ref', 'refs/heads/canary', 'HEAD'], ['worktree', 'prune']):
+   subprocess.run(['git'] + args)
+''')
+        before = self.git_state()
+        self.check('INCONCLUSIVE', [['pass'], ['pass']], '--runs', '1')
+        self.assertEqual(self.git_state(), before)
+
+    def test_unreachable_sha(self):
+        before = self.git_state()
+        r = self.cli('--head', '0' * 40, '--json')
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(json.loads(r.stdout)['classification'], 'SETUP_ERROR')
+        with self.assertRaises(F.SetupError):
+            with F.scratch_repository(self.repo, '0' * 40):
+                self.fail('unreachable commit yielded a checkout')
+        self.assertEqual(self.git_state(), before)
+
+    def test_limit_wording(self):
+        wording = F.__doc__.split('\n\n', 1)[1].strip()
+        self.assertEqual(hashlib.sha256(wording.encode()).hexdigest(),
+                         'f350dc82db6fb149a924aa2002c87e7de4a79530d4644632cfc69676f73bc7a9')
+        self.assertIn(wording, self.cli('--runs', '1').stdout)
+        self.assertIn(wording, json.loads(self.cli('--json', '--runs', '1').stdout)['notice'])
+
     def check(self, label, outcomes, *extra, code=0, index=0):
         before = self.trees()
         r = self.cli('--json', *extra)
@@ -139,11 +229,25 @@ class TestFlakeTriage(unittest.TestCase):
             d = self.check('INCONCLUSIVE', [['pass']*2]*2, '--test', name, index=1)
             self.assertFalse(d['touched'])
 
-    def test_worktree_creation_failure_cleanup(self):
-        hook = self.repo / '.git/hooks/post-checkout'
-        hook.write_text('#!/bin/sh\nexit 1\n')
-        hook.chmod(0o755)
-        self.check('SETUP_ERROR', [[], []], code=2)
+    def test_scratch_creation_failure_cleanup(self):
+        git, roots = F.git, []
+        def failing_checkout(repo, *args, **kwargs):
+            if args[0] == 'checkout':
+                roots.append(repo.parent)
+                hook = repo / '.git/hooks/post-checkout'
+                hook.parent.mkdir(exist_ok=True)
+                hook.write_text('#!/bin/sh\nexit 1\n')
+                hook.chmod(0o755)
+            return git(repo, *args, **kwargs)
+        before = self.git_state()
+        with patch.object(F, 'git', failing_checkout), patch('sys.stdout') as output:
+            self.assertEqual(F.main(self.argv('--json')), 2)
+        report = json.loads(output.write.call_args_list[0].args[0])
+        self.assertEqual(report['tests'][0]['class'], 'SETUP_ERROR')
+        self.assertEqual([report['tests'][0][s] for s in ('head', 'base')], [[], []])
+        self.assertEqual(len(roots), 2)
+        self.assertTrue(all(not root.exists() for root in roots))
+        self.assertEqual(self.git_state(), before)
 
     def test_cleanup_restores_directory_access_without_following_symlinks(self):
         self.head = self.save('permissions')
@@ -156,13 +260,11 @@ class TestFlakeTriage(unittest.TestCase):
             self.assertEqual(outside.stat().st_mode & 0o777, 0o500)
         finally:
             outside.chmod(0o700)
-            # Preserve fixture hygiene when mutation restores the broken cleanup.
             if ready.exists():
                 tree = Path(ready.read_text())
                 if tree.exists():
                     tree.chmod(0o700)
                     (tree / 'locked').chmod(0o700)
-                    self.git('worktree', 'remove', '--force', '--force', str(tree))
                     shutil.rmtree(str(tree.parent))
 
     def test_load_errors_on_both_sides(self):
@@ -184,7 +286,6 @@ class TestFlakeTriage(unittest.TestCase):
             self.check('SETUP_ERROR', [['absent']*2, ['pass']*2], code=2)
         self.testfile.write_text(SOURCE + '\nclass Empty(unittest.TestCase): pass\n')
         self.head = self.save('pass')
-        # Python versions differ on whether an empty suite exits zero or five.
         result = SP.run([sys.executable, '-m', 'unittest', 'tests.test_x.Empty'],
                         cwd=str(self.repo), env=self.env, capture_output=True)
         label, outcome = ('CONSISTENT_FAILURE', 'error') if result.returncode else ('INCONCLUSIVE', 'pass')
@@ -217,7 +318,6 @@ class TestFlakeTriage(unittest.TestCase):
                 if pidfile.exists():
                     try: os.kill(int(pidfile.read_text()), signal.SIGKILL)
                     except ProcessLookupError: pass
-                # Releasing the inherited pipe also lets the unfixed mutant clean up.
                 try: p.communicate(timeout=10)
                 except SP.TimeoutExpired:
                     p.kill()

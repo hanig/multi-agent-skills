@@ -2,6 +2,8 @@
 """Local unittest triage. The class is a hint, never exoneration: an untouched
  test file does not exclude a regression in production code the test exercises,
  and isolated reruns miss order-dependent flakes. No CI, state or tracker writes.
+
+Each run executes in a standalone scratch repository with no remote, alternates or shared Git directory linking it to the operator's repository, and with GIT_* environment variables removed; the operator repository's Git state is not reachable through the scratch. Tests still run with the operator's full privileges and can affect anything reachable by absolute path. Processes that detach into a new session may outlive the tool; this is a declared limit, not closed.
 """
 import argparse
 from contextlib import contextmanager
@@ -19,6 +21,7 @@ import tempfile
 NOTICE = ("The class is a hint, never exoneration: an untouched test file does not exclude "
           "a regression in production code the test exercises, and isolated reruns miss "
           "order-dependent flakes. Merge still requires a complete green run.")
+NOTICE += '\n' + __doc__.split('\n\n', 1)[1].strip()
 RERUNS = {
     "SETUP_ERROR": "Repair setup or head test id and repeat triage.",
     "FAILS_ON_BASE": "Diagnose base failure before a full CI/verifier rerun.",
@@ -44,7 +47,7 @@ def signals_ignored():
             signal.signal(s, handler)
 
 def execute(argv, cwd, timeout):
-    # Regular files cannot be held open as pipes by a detached descendant.
+    # Detached descendants cannot hold these open as pipes.
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         p = SP.Popen(argv, cwd=str(cwd), env=child_env(), stdin=SP.DEVNULL,
                      stdout=out, stderr=err, start_new_session=True)
@@ -81,8 +84,7 @@ def commit(repo, ref):
     return sha
 
 def restore_directory_access(tree):
-    # Tests may remove directory permissions. Stay inside this disposable tree;
-    # never chmod a symlink target (which may belong to the operator).
+    # Restore disposable directories, never symlink targets.
     if tree.is_symlink() or not tree.is_dir():
         return
     tree.chmod(tree.stat().st_mode | 0o700)
@@ -93,18 +95,18 @@ def restore_directory_access(tree):
                 path.chmod(path.stat().st_mode | 0o700)
 
 @contextmanager
-def scratch_worktree(repo, sha):
+def scratch_repository(repo, sha):
     root = Path(tempfile.mkdtemp(prefix='flake-triage-')).resolve()
     tree = root / 'checkout'
     try:
-        git(repo, 'worktree', 'add', '--detach', str(tree), sha)
+        tree.mkdir()
+        git(tree, 'init', '--template=')
+        git(tree, 'fetch', '--no-tags', str(repo), sha)
+        git(tree, 'checkout', '--detach', 'FETCH_HEAD')
         yield tree
     finally:
         with signals_ignored():
             restore_directory_access(tree)
-            r = git(repo, 'worktree', 'remove', '--force', '--force', str(tree), check=False)
-            if r['returncode'] and ('worktree ' + str(tree)) in git(repo, 'worktree', 'list', '--porcelain')['stdout'].splitlines():
-                raise SetupError('Cleanup failed; retained {}: {}'.format(root, r['stderr']))
             shutil.rmtree(str(root))
 
 def outcome(r, module_file):
@@ -148,6 +150,7 @@ def test_id(value):
 
 def triage(a):
     repo = Path(a.repo).resolve()
+    repo = Path(git(repo, 'rev-parse', '--show-toplevel')['stdout'].strip()).resolve()
     head, base = commit(repo, a.head), commit(repo, a.base)
     python = shutil.which(a.python)
     if not python:
@@ -160,7 +163,7 @@ def triage(a):
         d = dict(test=name, file=file, touched=file in changed, head=[], base=[], setup_errors=[])
         for side, sha in (('head', head), ('base', base)):
             try:
-                with scratch_worktree(repo, sha) as tree:
+                with scratch_repository(repo, sha) as tree:
                     for _ in range(a.runs):
                         r = execute([python, '-m', 'unittest', name], tree, a.timeout)
                         r['outcome'] = outcome(r, tree / file)
