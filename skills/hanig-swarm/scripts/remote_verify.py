@@ -875,15 +875,20 @@ def cleanup_slurm(stage, request, reconciled):
             raise ValueError("Slurm job identity unresolved; stage retained")
         states = {}
         for job in jobs:
-            state = scheduler_state(job)
-            # Resolve a changing snapshot before cancelling a just-finished job.
-            # A still-live row overrides terminal accounting (e.g. requeue).
-            if state is not None and job in evidence["queued_job_ids"]:
+            # Allow three observations, two seconds apart, for accounting and
+            # the queue to settle before considering cancellation. A lingering
+            # queue row must never cause cancellation of a terminal job.
+            for poll in range(3):
+                state = scheduler_state(job)
+                if state is not None and job not in evidence["queued_job_ids"]:
+                    break
+                if poll == 2:
+                    break
+                time.sleep(2)
                 evidence.update(discover_slurm_jobs(request, evidence["job_ids"]))
                 if not evidence["scheduler_confirmed"]:
                     raise ValueError(evidence["discovery_error"])
-                state = scheduler_state(job)
-            if state is None or job in evidence["queued_job_ids"]:
+            if state is None:
                 if len(attempts) >= 4:
                     raise ValueError("cancellation attempt limit reached; stage retained")
                 attempt = {"job_id": job, "exit_code": None}
