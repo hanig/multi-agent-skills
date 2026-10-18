@@ -314,13 +314,13 @@ merge, tracker, and reporting work around those passes.
 ```sh
 python3 "$HANIG_ORCHESTRATE_DIR/scripts/flake_triage.py" --repo "$REPO" \
   --head "$HEAD" --base "$BASE" --test tests.test_example.TestCase.test_method \
-  --runs 5 --timeout 60 --python python3 --pr 123 --json
+  --python python3 --pr 123 --json
 ```
 
-Defaults: five runs per side, 60 seconds each; repeat `--test` for more ids.
-Output includes outcomes, touched files, class and an issue draft with a quoted
-command (never executed). Scratch repositories are removed on failure or interrupt.
-No CI rerun or recorded pass; merge still requires a complete green run.
+Defaults: five runs/side, 60 seconds/run; repeat `--test` for more ids.
+Prints outcomes, touched files, class, issue draft and quoted command.
+Scratch repositories are removed on failure/interrupt. No CI rerun or recorded
+pass; merge still requires a complete green run.
 
 The connected `merge_unit.py` operator requires passing `integration-tests`
 and, when declared by the target policy, `changed-tests-stable` evidence
