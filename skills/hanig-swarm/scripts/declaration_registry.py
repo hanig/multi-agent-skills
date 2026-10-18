@@ -91,6 +91,7 @@ CLOSED_DECLARATIONS = {
         capability.dependencies paths.skill-directory authority.source
         authority.confirmation authority.narrow-mode authority.revocation
         role.supervision delegation.whole-loop delegation.prompt
+        delegation.preamble
         delegation.configuration delegation.continuation retry.boundary
         evidence.checkable evidence.authority review.panel-source
         review.author-exclusion review.claims review.honesty review.cost
