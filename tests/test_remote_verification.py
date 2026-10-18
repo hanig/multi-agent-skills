@@ -2298,6 +2298,58 @@ else:
         self.assertEqual(read_json(self.stage.with_name('stage.cleanup.json')), result)
         self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(2)])
 
+    def test_overlapping_cleanup_during_repoll_reloads_cancellation_history(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=3)
+        overlapping = []
+
+        def during_wait(seconds):
+            # The outer cleanup is paused at its actual wait boundary. Run the
+            # real cleanup consumer, including flock and journal publication.
+            self.sleep.side_effect = None
+            self.configure({'321': 'RUNNING'})
+            overlapping.append(RV.cleanup(self.stage, self.ack()))
+            self.configure({'321': 'COMPLETED'})
+
+        self.sleep.side_effect = during_wait
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(len(overlapping), 1)
+        self.assertNotIn('Resource temporarily unavailable',
+                         overlapping[0].get('cleanup_error', ''))
+        self.assertEqual(len(overlapping[0]['cancellation_attempts']), 1)
+        self.assertEqual(result['cancellation_attempts'],
+                         overlapping[0]['cancellation_attempts'])
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertTrue(result['quiescent'])
+        self.assertEqual(sum(c[0] == 'scancel' for c in self.scheduler_calls()), 1)
+
+    def test_repoll_queries_are_unlocked_and_decision_rechecks_accounting(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=3)
+        scheduler_state = RV.scheduler_state
+        observed = []
+
+        def query(job):
+            state = scheduler_state(job)
+            if self.sleep.call_count and not observed:
+                # The middle scheduler query runs outside both locks. Exercise
+                # the actual OS locks, then change accounting before decision.
+                for path in (self.stage / 'cleanup.lock',
+                             self.stage.with_name('stage.cleanup.lock')):
+                    with path.open('a') as handle:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed.append(state)
+                self.configure({'321': 'RUNNING'})
+            return state
+
+        with mock.patch.object(RV, 'scheduler_state', side_effect=query):
+            result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(observed, [('COMPLETED', '0:0')])
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+        self.assertEqual(result['cleanup_sacct_states'], {})
+        self.assertEqual(len(result['cancellation_attempts']), 1)
+        self.assertEqual(read_json(self.stage / 'cleanup.json'), result)
+
     def test_unknown_accounting_retains_stage_after_repoll(self):
         self.configure({'321': 'UNKNOWN'})
         result = RV.cleanup(self.stage, self.ack())
