@@ -762,7 +762,7 @@ class TestRound13Regressions(unittest.TestCase):
         # deepseek plans well and over-claims as a refuter, and that split is
         # only expressible because these two lists are separate.
         # tiebreak rules on a split; it must never enter the gate ladder.
-        tiers -= {"plan", "committee", "tiebreak"}
+        tiers -= {"plan", "committee", "tiebreak", "planning"}
         self.assertTrue(tiers.issubset(set(review.LADDER)),
                         f"reviewers.json uses tiers outside LADDER: "
                         f"{tiers - set(review.LADDER)}")
@@ -2628,18 +2628,31 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
             self.assert_refused(self.run_cli("--kind", "plan", *flags),
                                 because="implementation exception used for a plan")
 
-    def test_the_two_plan_reviewers_cannot_share_a_provider(self):
-        by_prov = {}
-        for r in review.load_reviewers():
-            if r.get("enabled", True):
-                by_prov.setdefault(r["provider"], []).append(r["name"])
-        pair = next((v[:2] for v in by_prov.values() if len(v) >= 2), None)
-        if not pair:
-            self.skipTest("no two enabled reviewers share a provider")
-        self.assert_refused(
-            self.run_cli("--kind", "plan", "--only", ",".join(pair),
-                         "--quorum", "2"),
-            because="both plan reviewers use the same provider")
+    def test_the_two_plan_reviewers_cannot_share_a_maker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / "scripts" / "review.py"
+            script.parent.mkdir()
+            for name in ("review.py", "plan_review.py", "committee.py"):
+                shutil.copyfile(SCRIPT.parent / name, script.parent / name)
+            for first, second, refused in (
+                    (("openai", "fixture-a"), ("openai", "fixture-b"), True),
+                    (("openai", "fixture-a"), ("openrouter", "openai/fixture-b"), True),
+                    (("openrouter", "maker-a/a"), ("openrouter", "maker-b/b"), False)):
+                with self.subTest(first=first, second=second):
+                    seats = [dict(name=n, provider=p, model=m, profiles=["plan"])
+                             for n, (p, m) in zip(("alpha", "beta"), (first, second))]
+                    (root / "reviewers.json").write_text(json.dumps({"reviewers": seats}))
+                    with patch.dict(self.run_cli.__globals__, SCRIPT=script):
+                        r = self.run_cli("--kind", "plan")
+                    if refused:
+                        self.assert_refused(r, because="plan seats share a maker")
+                        self.assertIn("share a model maker", r.stderr)
+                    else:
+                        self.assertEqual(r.returncode, review.STATES["REVIEW_UNAVAILABLE"],
+                                         r.stdout + r.stderr)
+                        for name in ("alpha", "beta"):
+                            self.assertIn(name + ": OPENROUTER_API_KEY not set", r.stdout)
 
     def test_an_undeclared_reviewer_joins_no_profile(self):
         """A reviewer with no `profiles` key was in EVERY profile, so adding
