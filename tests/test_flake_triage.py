@@ -92,7 +92,9 @@ class TestFlakeTriage(unittest.TestCase):
 
     def git_fixture(self, body):
         self.testfile.write_text('import os, time, subprocess, sys, unittest\n'
-                                 'from pathlib import Path\nclass C(unittest.TestCase):\n'
+                                 'from pathlib import Path\n'
+                                 "common = Path(subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], text=True).strip()).resolve()\n"
+                                 'class C(unittest.TestCase):\n'
                                  ' def test_x(self):\n' + body)
         self.head = self.save('pass')
         self.git('branch', 'disposable')
@@ -101,8 +103,7 @@ class TestFlakeTriage(unittest.TestCase):
         self.git('remote', 'add', 'fixture', str(remote))
 
     def test_scratch_git_identity_and_environment(self):
-        self.git_fixture('''  common = Path(subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], text=True).strip()).resolve()
-  self.assertEqual(common, Path.cwd() / '.git')
+        self.git_fixture('''  self.assertEqual(common, Path.cwd() / '.git')
   self.assertNotEqual(str(common), os.environ['OPERATOR_COMMON'])
   self.assertEqual(subprocess.check_output(['git', 'remote']), b'')
   self.assertFalse((common / 'objects/info/alternates').exists())
@@ -129,8 +130,7 @@ for remote in r.stdout.splitlines():
 Path(sys.argv[2]).write_text('attempted')
 time.sleep(60)
 '''
-        self.git_fixture('''  common = Path(subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], text=True).strip()).resolve()
-  p = subprocess.Popen([sys.executable, '-c', %r, str(common), os.environ['ATTEMPTED']], start_new_session=True)
+        self.git_fixture('''  p = subprocess.Popen([sys.executable, '-c', %r, str(common), os.environ['ATTEMPTED']], start_new_session=True)
   Path(os.environ['CHILD_PID']).write_text(str(p.pid))
   time.sleep(60)
 ''' % helper)
@@ -171,7 +171,10 @@ time.sleep(60)
         self.assertEqual(hashlib.sha256(wording.encode()).hexdigest(),
                          'f350dc82db6fb149a924aa2002c87e7de4a79530d4644632cfc69676f73bc7a9')
         self.assertIn(wording, self.cli('--runs', '1').stdout)
-        self.assertIn(wording, json.loads(self.cli('--json', '--runs', '1').stdout)['notice'])
+        self.env['PYTHONOPTIMIZE'] = '2'
+        r = self.cli('--json', '--runs', '1')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(wording, json.loads(r.stdout)['notice'])
 
     def check(self, label, outcomes, *extra, code=0, index=0):
         before = self.trees()
