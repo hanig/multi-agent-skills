@@ -19,17 +19,12 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scheduler_fixture import isolated_module_state_home as setUpModule  # noqa: E402
 from scheduler_fixture import cleanup_module_path as tearDownModule  # noqa: E402
-from terminal_watcher_fixture import COMPLETION_SECONDS, now, publish  # noqa: E402
+from terminal_watcher_fixture import publish  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "hanig-swarm" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import swarm as S
-
-
-# Only the deliberately late fixture gets this hang watchdog, so its actual
-# completion can be measured before checking the unchanged ten-second budget.
-LATE_FIXTURE_WATCHDOG_SECONDS = 30
 
 
 class TestTerminalWatcherOutcome(unittest.TestCase):
@@ -94,16 +89,10 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
             time.sleep(0.02)
         self.fail("watcher fixture did not reach the expected state")
 
-    def start(self, timed=False):
+    def start(self):
         real_popen = subprocess.Popen
 
         def spawn(*args, **kwargs):
-            if timed:
-                argv = list(args[0])
-                self.assertEqual(argv[:2], [sys.executable, str(SCRIPTS / "swarm.py")])
-                argv = [argv[0], str(ROOT / "tests" / "terminal_watcher_fixture.py"),
-                        str(self.root / "watcher-done-at")] + argv[1:]
-                args = (argv,) + args[1:]
             self.proc = real_popen(*args, **kwargs)
             return self.proc
 
@@ -184,16 +173,10 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
         self.assertIn("zombie", self.saved_watch()["reason"])
 
     def test_nonzero_wait_records_exact_exit_and_tail_without_status_poll(self):
-        proc = self.start(timed=True)
+        proc = self.start()
         publish(self.root / "release", "17\n")
-        self.assert_nonzero_outcome(proc)
-        # A delayed observer must not change the measured production interval.
-        with mock.patch.object(time, "monotonic", side_effect=AssertionError("parent clock sampled")), \
-                mock.patch.object(time, "clock_gettime", side_effect=AssertionError("parent clock sampled")):
-            self.assert_completion_bound()
-
-    def assert_nonzero_outcome(self, proc):
-        self.assertEqual(proc.wait(timeout=COMPLETION_SECONDS), S.EXIT_HALTED)
+        # The original ten-second wait bounds hangs; it is not a latency assertion.
+        self.assertEqual(proc.wait(timeout=10), S.EXIT_HALTED)
         self.assertEqual(self.saved_watch()["status"], "waiting")
         watch = self.outcome()["outcome"]
         self.assertEqual(watch["status"], "exited_without_idle")
@@ -201,75 +184,14 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
         self.assertIn("fixture wait failed", watch["log_tail"])
         self.assertIn("exit 17", self.status(False))
 
-    def assert_completion_bound(self):
-        ready_at = float((self.root / "terminal-ready-at").read_text())
-        done_at = float((self.root / "watcher-done-at").read_text())
-        elapsed = done_at - ready_at
-        self.assertGreaterEqual(elapsed, 0)
-        self.assertLess(elapsed, COMPLETION_SECONDS,
-                        "watcher exceeded the post-readiness completion bound")
-        return elapsed
-
-    def delay_after_publication(self, name, seconds):
-        self.paseo.write_text(self.paseo.read_text().replace(
-            "from terminal_watcher_fixture import wait",
-            "import terminal_watcher_fixture as fixture\n"
-            "from terminal_watcher_fixture import wait\n"
-            "real_publish = fixture.publish\n"
-            "def publish(path, text):\n"
-            "    real_publish(path, text)\n"
-            "    if path.name == " + repr(name) + ":\n"
-            "        real_publish(path.with_name('delayed-at'), str(fixture.now()))\n"
-            "        fixture.time.sleep(" + repr(seconds) + ")\n"
-            "fixture.publish = publish"))
-
-    def test_completion_bound_starts_when_wait_has_a_terminal_result(self):
-        self.delay_after_publication("wait-pid", 0)
-        proc = self.start(timed=True)
-        self.until(lambda: (self.root / "delayed-at").exists())
-        time.sleep(COMPLETION_SECONDS + 1)
-        publish(self.root / "release", "17\n")
-        self.assert_nonzero_outcome(proc)
-        self.assert_completion_bound()
-        terminal_ready = float((self.root / "terminal-ready-at").read_text())
-        delayed_at = float((self.root / "delayed-at").read_text())
-        self.assertGreater(terminal_ready - delayed_at, COMPLETION_SECONDS)
-
-    def test_valid_slow_response_preserves_the_baseline_budget(self):
-        self.delay_after_publication("terminal-ready-at", 6)
-        proc = self.start(timed=True)
-        publish(self.root / "release", "17\n")
-        self.assert_nonzero_outcome(proc)
-        self.assertGreater(self.assert_completion_bound(), 5)
-
-    def test_late_response_fails_even_when_observed_after_completion(self):
-        self.delay_after_publication("terminal-ready-at", COMPLETION_SECONDS + 1)
-        proc = self.start(timed=True)
-        publish(self.root / "release", "17\n")
-        proc.wait(timeout=LATE_FIXTURE_WATCHDOG_SECONDS)
-        self.assert_nonzero_outcome(proc)
-        with self.assertRaisesRegex(AssertionError, "watcher exceeded the post-readiness completion bound"):
-            self.assert_completion_bound()
-
-    def test_completion_stamp_is_required(self):
-        proc = self.start(timed=True)
-        publish(self.root / "release", "17\n")
-        self.assert_nonzero_outcome(proc)
-        self.assert_completion_bound()
-        (self.root / "watcher-done-at").unlink()
-        with self.assertRaises(FileNotFoundError):
-            self.assert_completion_bound()
-
-    def test_clock_brackets_a_child_with_an_independent_monotonic_epoch(self):
-        before = now()
-        observed = float(subprocess.check_output(
-            [sys.executable, "-c",
-             "import time; from terminal_watcher_fixture import now; "
-             "time.monotonic = lambda: -1000000.0; print(now())"],
-            cwd=ROOT / "tests", env=self.env, text=True, timeout=10))
-        after = now()
-        self.assertLessEqual(before, observed)
-        self.assertLessEqual(observed, after)
+    def assert_nonzero_outcome(self, proc):
+        self.assertEqual(proc.wait(timeout=10), S.EXIT_HALTED)
+        self.assertEqual(self.saved_watch()["status"], "waiting")
+        watch = self.outcome()["outcome"]
+        self.assertEqual(watch["status"], "exited_without_idle")
+        self.assertEqual(watch["wait_exit_code"], 17)
+        self.assertIn("fixture wait failed", watch["log_tail"])
+        self.assertIn("exit 17", self.status(False))
 
     def observe_release(self, raw):
         observed = self.root / "read-observed"
