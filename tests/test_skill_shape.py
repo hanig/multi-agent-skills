@@ -160,7 +160,6 @@ ORCHESTRATE_DECLARATIONS = (
     "preservation.before-cleanup",
     "dispatch.mechanics",
     "merge.requirements",
-    "merge.flake-triage",
     "code.merge-command",
     "limit.merge-command",
     "tracker.authority",
