@@ -27,6 +27,9 @@ def wait(root, agent):
         # A digit prefix (e.g. '1' of '17') is not a complete release.
         if raw is not None and raw.endswith("\n") and raw[:-1].isdigit():
             rc = int(raw)
+            # PID readiness means the wait is listening, not that it has a
+            # terminal result. Time the watcher's response from this event.
+            publish(root / "terminal-ready-at", str(time.monotonic()))
             break
         time.sleep(0.02)
     print("idle" if rc == 0 else "fixture wait failed", flush=True)
