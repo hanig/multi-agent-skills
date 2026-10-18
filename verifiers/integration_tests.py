@@ -10,4 +10,7 @@ import sys
 
 
 if __name__ == "__main__":
-    os.execv(sys.executable, [sys.executable, "-m", "unittest", "discover", "-s", "tests"])
+    argv = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+    if sys.version_info >= (3, 12):
+        argv.extend(["--durations", "0"])
+    os.execv(sys.executable, argv)

@@ -92,6 +92,7 @@ MAX_CORPUS_PATHS = 10_000
 MAX_CORPUS_FILE_BYTES = 256_000_000
 MAX_CORPUS_TOTAL_BYTES = 1_000_000_000
 MAX_TEST_OUTPUT_LINES = 50
+MAX_DURATION_MODULES = 50
 
 
 def _git(runner, repo, *args, timeout=60):
@@ -949,6 +950,43 @@ def output_evidence(outcome, state_dir):
                     truncated = True
         evidence[field] = lines
         evidence[field + "_truncated"] = truncated
+    # Sum only unittest's reported durations, never worker summaries or
+    # arbitrary duration-shaped output. Normal verbosity hides < 0.001s;
+    # these totals inherit unittest's rounding and visibility limits.
+    totals = {}
+    found_block = False
+    for data in streams.values():
+        in_block = False
+        for line in data.decode("utf-8", "replace").splitlines():
+            if line == "Slowest test durations":
+                in_block = found_block = True
+                continue
+            if not in_block:
+                continue
+            if line and set(line) == {"-"}:
+                continue
+            match = re.fullmatch(r"([0-9]+\.[0-9]+)s\s+\S+ \(([\w.]+)\)", line)
+            if not match:
+                in_block = False
+                continue
+            seconds, test_id = match.groups()
+            module = test_id.rsplit(".", 2)[0]
+            if test_id == "tests.review_sandbox_worker.DelegatedReviewTests.runTest":
+                module = "test_review"
+            totals[module] = totals.get(module, 0.0) + float(seconds)
+    if found_block:
+        modules = sorted(totals, key=lambda name: (-totals[name], name))
+        evidence["unittest_module_durations"] = [
+            {"module": name, "seconds": round(totals[name], 3)}
+            for name in modules[:MAX_DURATION_MODULES]]
+        evidence["unittest_module_durations_truncated"] = len(modules) > MAX_DURATION_MODULES
+    else:
+        evidence["unittest_durations_unavailable"] = (
+            "Slowest test durations block absent from retained output tails; "
+            "it may not have been emitted or may have been truncated"
+            if raw is None else
+            "Slowest test durations block absent from full output; "
+            "the interpreter or invocation may not emit durations")
     if raw is None:
         evidence["output_capture_error"] = "full output unavailable from remote/legacy execution"
     elif state_dir is None:

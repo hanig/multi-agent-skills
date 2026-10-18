@@ -1005,6 +1005,25 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(list(self.remote_root.iterdir()), [])
         self.assertEqual(self.merges(), [])
 
+    def test_durations_reach_remote_receipt_or_report_tail_loss(self):
+        from tests.test_verify import TestUnittestDurations
+        for trailing in ('', 'x' * 3000):
+            with self.subTest(tail_lost=bool(trailing)):
+                output = TestUnittestDurations.BLOCK + trailing
+                self.program('import sys\nsys.stderr.write(%r)\n' % output)
+                self.assert_ok(self.verify())
+                row = self.rows()[-1]
+                self.assertEqual(row['result'], 'pass')
+                self.assertEqual(row['stderr_tail'], output[-2000:])
+                if trailing:
+                    self.assertIn('retained output tails', row['unittest_durations_unavailable'])
+                    self.assertNotIn('unittest_module_durations', row)
+                else:
+                    self.assertEqual(row['unittest_module_durations'][0],
+                                     {'module': 'test_review', 'seconds': 12.125})
+                    self.assertIs(row['unittest_module_durations_truncated'], False)
+        self.assertEqual(self.admitted().returncode, 0)
+
     def test_direct_bundle_runs_pinned_program_and_records_full_binding(self):
         legacy = self.legacy_prefix()
         target = self.program()

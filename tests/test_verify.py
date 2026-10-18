@@ -894,5 +894,91 @@ class TestOneWayToGetTheBase(unittest.TestCase):
         self.assertIn("may not reconstruct repository", src)
         self.assertNotIn("base = recorded or base", src)
 
+
+class TestUnittestDurations(unittest.TestCase):
+    BLOCK = ("Slowest test durations\n" + "-" * 70 + "\n"
+             "12.125s    runTest (tests.review_sandbox_worker.DelegatedReviewTests.runTest)\n"
+             "2.500s     test_one (test_alpha.Checks.test_one)\n"
+             "1.250s     test_two (test_alpha.Checks.test_two)\n"
+             "0.001s     test_small (test_beta.Checks.test_small)\n"
+             "0.000s     test_tiny (test_beta.Checks.test_tiny)\n\n")
+
+    def evidence(self, stderr, stdout='', full=True):
+        outcome = dict(stdout=stdout, stderr=stderr, exit_code=0)
+        if full:
+            outcome['_full_output'] = dict(stdout=stdout.encode(), stderr=stderr.encode())
+        return V.output_evidence(outcome, None)
+
+    def test_captured_block_aggregates_and_counts_delegate_once(self):
+        evidence = self.evidence(
+            self.BLOCK + '9.000s     test_noise (test_noise.C.test_noise)\n',
+            stdout='Delegated test_review: 400 tests, 12.100s, 0 skips\n')
+        self.assertEqual(evidence['unittest_module_durations'], [
+            {'module': 'test_review', 'seconds': 12.125},
+            {'module': 'test_alpha', 'seconds': 3.75},
+            {'module': 'test_beta', 'seconds': 0.001}])
+        self.assertIs(evidence['unittest_module_durations_truncated'], False)
+        self.assertNotIn('unittest_durations_unavailable', evidence)
+
+    @unittest.skipUnless(sys.version_info >= (3, 12), 'unittest durations require 3.12')
+    def test_running_interpreter_duration_format(self):
+        import io
+        stream = io.StringIO()
+        runner = unittest.TextTestRunner(stream=stream, verbosity=2, durations=0)
+        result = runner._makeResult()
+        from tests.review_sandbox_worker import DelegatedReviewTests
+        # Use the actual delegate identity and stdlib formatter without
+        # launching another supervised review worker.
+        result.addDuration(DelegatedReviewTests(), 2.125)
+        case = type('Checks', (unittest.TestCase,), {
+            '__module__': 'test_sample', 'test_tiny': lambda self: None})
+        result.addDuration(case('test_tiny'), 0.0001)
+        runner._printDurations(result)
+        evidence = self.evidence(stream.getvalue())
+        self.assertEqual(evidence['unittest_module_durations'], [
+            {'module': 'test_review', 'seconds': 2.125},
+            {'module': 'test_sample', 'seconds': 0.0}])
+
+    def test_bound_keeps_fifty_largest_after_aggregation(self):
+        for count in (50, 55):
+            with self.subTest(count=count):
+                lines = ['%.3fs test_x (test_m%02d.C.test_x)' % (i + 1, i)
+                         for i in range(count)]
+                # First module becomes largest only after summing both rows.
+                lines.append('100.000s test_y (test_m00.C.test_y)')
+                evidence = self.evidence('Slowest test durations\n' + '\n'.join(lines))
+                expected = [{'module': 'test_m00', 'seconds': 101.0}]
+                expected += [{'module': 'test_m%02d' % i, 'seconds': float(i + 1)}
+                             for i in range(count - 1, max(0, count - 50), -1)]
+                self.assertEqual(evidence['unittest_module_durations'], expected)
+                self.assertIs(evidence['unittest_module_durations_truncated'], count > 50)
+
+    def test_missing_block_has_explicit_unavailable_reason(self):
+        for full, reason in ((True, 'full output'), (False, 'retained output tails')):
+            with self.subTest(full=full):
+                evidence = self.evidence('Ran 1 test in 0.001s\nOK\n', full=full)
+                self.assertIn(reason, evidence['unittest_durations_unavailable'])
+                self.assertIn('absent', evidence['unittest_durations_unavailable'])
+                self.assertNotIn('unittest_module_durations', evidence)
+
+    def test_hidden_submillisecond_block_is_present_but_empty(self):
+        evidence = self.evidence('Slowest test durations\n' + '-' * 70 +
+                                 '\n\n(durations < 0.001s were hidden; '
+                                 'use -v to show these durations)\n')
+        self.assertEqual(evidence['unittest_module_durations'], [])
+        self.assertIs(evidence['unittest_module_durations_truncated'], False)
+        self.assertNotIn('unittest_durations_unavailable', evidence)
+
+    def test_receipt_result_bytes_ignore_duration_evidence(self):
+        for outcome in (dict(exit_code=0), dict(exit_code=1),
+                        dict(exit_code=None, incomplete_reason='timeout')):
+            for diagnostic in (self.evidence(self.BLOCK), self.evidence('')):
+                with self.subTest(outcome=outcome, diagnostic=diagnostic):
+                    before = json.dumps(V.outcome_result(outcome), sort_keys=True).encode()
+                    after = json.dumps(V.outcome_result(dict(outcome, **diagnostic)),
+                                       sort_keys=True).encode()
+                    self.assertEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main()

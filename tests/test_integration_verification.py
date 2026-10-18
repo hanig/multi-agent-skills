@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,26 @@ def setUpModule():
 def git(repo, *args):
     return subprocess.run(["git", "-C", str(repo)] + list(args), check=True,
                           env=ENV, capture_output=True, text=True)
+
+
+
+class TestIntegrationVerifierArgv(unittest.TestCase):
+    def test_only_new_interpreters_add_durations(self):
+        original = [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests']
+        for version in ((3, 9, 6), (3, 10, 12), (3, 11, 9), (3, 12, 0), (3, 13, 0), (4, 0, 0)):
+            with self.subTest(version=version), mock.patch.object(sys, 'version_info', version), \
+                    mock.patch('os.execv', side_effect=SystemExit(37)) as execute:
+                with self.assertRaises(SystemExit) as raised:
+                    runpy.run_path(str(ROOT / V.MERGE_VERIFIER_PATH), run_name='__main__')
+                self.assertEqual(raised.exception.code, 37)
+                expected = original + (['--durations', '0'] if version >= (3, 12) else [])
+                execute.assert_called_once_with(sys.executable, expected)
+
+    def test_policy_digest_matches_verifier_bytes(self):
+        policy = json.loads((ROOT / V.POLICY_FILE).read_text())
+        entry, = [entry for entry in policy['verifiers'] if entry['name'] == V.MERGE_VERIFIER]
+        self.assertEqual(entry['sha256'], hashlib.sha256(
+            (ROOT / V.MERGE_VERIFIER_PATH).read_bytes()).hexdigest())
 
 
 class IntegrationRepo(unittest.TestCase):
@@ -97,6 +118,16 @@ class TestVerifierOutputEvidence(IntegrationRepo):
         stored, problems = S.load_verifications(self.state)
         self.assertEqual(problems, [])
         return stored[0]
+
+    def test_durations_survive_local_capture_and_journal(self):
+        from tests.test_verify import TestUnittestDurations
+        receipt = self.receipt(b'', TestUnittestDurations.BLOCK.encode() + b'x' * 5000,
+                               exit_code=0)
+        self.assertEqual(receipt['result'], 'pass')
+        self.assertNotIn('Slowest test durations', receipt['stderr_tail'])
+        self.assertEqual(receipt['unittest_module_durations'][0],
+                         {'module': 'test_review', 'seconds': 12.125})
+        self.assertIs(receipt['unittest_module_durations_truncated'], False)
 
     def test_failure_names_survive_large_trailing_dump_with_full_byte_digests(self):
         failure = 'FAIL: test_first (suite.Checks)'
@@ -572,6 +603,30 @@ class TestIntegrationReceiptBinding(IntegrationRepo):
         admitted, refusal = self.admit()
         self.assertIsNone(refusal)
         self.assertEqual(admitted, expected)
+
+    def test_timing_audit_fields_leave_admission_and_failure_bytes_unchanged(self):
+        diagnostics = [
+            {'unittest_module_durations': [{'module': 'test_x', 'seconds': 999.0}],
+             'unittest_module_durations_truncated': True},
+            {'unittest_durations_unavailable': 'block absent'}]
+        for result in ('pass', 'fail', 'incomplete'):
+            for extra in diagnostics:
+                with self.subTest(result=result, extra=extra):
+                    status = dict(result=result)
+                    if result == 'incomplete':
+                        status['incomplete_reason'] = 'timeout'
+                    before = self.write_receipt(**status)
+                    admitted, refusal = self.admit()
+                    before_bytes = json.dumps((admitted, refusal), sort_keys=True).encode()
+                    before_failure = json.dumps(V.merge_failure_problem([before], before)).encode()
+                    after = self.write_receipt(**status, **extra)
+                    admitted, refusal = self.admit()
+                    if admitted is not None:
+                        admitted = {k: v for k, v in admitted.items() if k not in extra}
+                    self.assertEqual(before_bytes,
+                                     json.dumps((admitted, refusal), sort_keys=True).encode())
+                    self.assertEqual(before_failure,
+                                     json.dumps(V.merge_failure_problem([after], after)).encode())
 
     def test_target_movement_invalidates_the_old_receipt(self):
         self.write_receipt()
