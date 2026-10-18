@@ -21,7 +21,7 @@ import tempfile
 NOTICE = ("The class is a hint, never exoneration: an untouched test file does not exclude "
           "a regression in production code the test exercises, and isolated reruns miss "
           "order-dependent flakes. Merge still requires a complete green run.")
-NOTICE += '\n' + __doc__.split('\n\n', 1)[1].strip()
+NOTICE += "\nEach run executes in a standalone scratch repository with no remote, alternates or shared Git directory linking it to the operator's repository, and with GIT_* environment variables removed; the operator repository's Git state is not reachable through the scratch. Tests still run with the operator's full privileges and can affect anything reachable by absolute path. Processes that detach into a new session may outlive the tool; this is a declared limit, not closed."
 RERUNS = {
     "SETUP_ERROR": "Repair setup or head test id and repeat triage.",
     "FAILS_ON_BASE": "Diagnose base failure before a full CI/verifier rerun.",
