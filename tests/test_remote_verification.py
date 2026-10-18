@@ -1612,6 +1612,34 @@ class TestRemoteVerification(unittest.TestCase):
         self.assert_clean()
         self.assertEqual(self.admitted().returncode, 0)
 
+    def test_slurm_queue_lag_does_not_block_later_merge(self):
+        self.slurm_policy()
+        self.authorize_both(PYTHON + 'pass\n')
+        queue_count = self.f.directory / 'queue-count'
+        (self.f.bin / 'squeue').write_text(PYTHON +
+            'import pathlib, sys\n'
+            'p = pathlib.Path(%r)\n'
+            'count = int(p.read_text()) + 1 if p.exists() else 1\n'
+            'p.write_text(str(count))\n'
+            'if count <= 3: print("321|" + sys.argv[sys.argv.index("--name") + 1])\n'
+            % str(queue_count))
+        cancelled = self.f.directory / 'cancelled'
+        (self.f.bin / 'scancel').write_text(PYTHON +
+            'from pathlib import Path\nPath(%r).write_text("cancelled")\n' % str(cancelled))
+        self.assert_ok(self.verify())
+        self.assertFalse(cancelled.exists(), 'terminal job was cancelled')
+        rows = self.rows()
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row['result'], 'pass')
+            self.assertTrue(row['execution']['quiescent'])
+            self.assertEqual(row['execution']['cleanup'], 'removed')
+            self.assertFalse(Path(row['execution']['stage']).exists())
+        merged = self.admitted()
+        self.assertNotIn('unresolved remote evidence', merged.stderr)
+        self.assert_ok(merged)
+        self.assertEqual(len(self.merges()), 1)
+
     def test_tampered_bundle_refuses_before_any_verifier_runs(self):
         self.program()
         self.f.git('checkout', '-q', '--detach', self.f.head)
@@ -2132,7 +2160,8 @@ elif command == 'squeue':
     if state['queue_reads'] == 2 and state.get('final_queue_ambiguous'):
         print('ambiguous'); raise SystemExit(0)
     for job, status in state['jobs'].items():
-        if status in ('PENDING', 'RUNNING', 'COMPLETING') and not state.get('empty_queue'):
+        if ((status in ('PENDING', 'RUNNING', 'COMPLETING') and not state.get('empty_queue'))
+                or state['queue_reads'] <= state.get('stale_queue_reads', 0)):
             print(job + '|' + NAME)
     if state.get('requeue_after_empty') and state['queue_reads'] == 1:
         state['jobs']['321'] = 'RUNNING'
@@ -2159,12 +2188,24 @@ else:
         env.start()
         self.addCleanup(env.stop)
         self.configure({'321': 'PENDING'})
+        # Patch this module's clock, not the time module shared by subprocess.
+        clock = mock.Mock(wraps=RV.time)
+        self.sleep = clock.sleep = mock.Mock()
+        patched_clock = mock.patch.object(RV, 'time', clock)
+        patched_clock.start()
+        self.addCleanup(patched_clock.stop)
 
     def configure(self, jobs, **options):
         self.state.write_text(json.dumps(dict(jobs=jobs, cancel_exit=1, **options)))
 
     def ack(self):
         return RV.evidence_digest(RV.collect(self.stage))
+
+    def test_subprocess_wait_does_not_count_as_repoll_sleep(self):
+        # Exercise subprocess's real timeout/poll loop, which uses time.sleep.
+        subprocess.run([sys.executable, '-c', 'import time; time.sleep(0.05)'],
+                       check=True, timeout=5)
+        self.sleep.assert_not_called()
 
     def test_missing_job_id_discovers_pending_job_and_retains_stage(self):
         result = RV.cleanup(self.stage, self.ack())
@@ -2254,6 +2295,132 @@ else:
         calls = [json.loads(line)[0] for line in self.log.read_text().splitlines()]
         self.assertNotIn('scancel', calls)
         self.assertFalse(self.stage.exists())
+
+    def test_terminal_accounting_queue_lag_removes_without_cancellation(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=3)
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertNotIn('scancel', [c[0] for c in self.scheduler_calls()])
+        self.assertEqual(result['cancellation_attempts'], [])
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertTrue(result['quiescent'])
+        self.assertFalse(self.stage.exists())
+        self.assertEqual(read_json(self.stage.with_name('stage.cleanup.json')), result)
+        self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(2)])
+
+    def test_overlapping_cleanup_during_repoll_reloads_cancellation_history(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=3)
+        overlapping = []
+
+        def during_wait(seconds):
+            # The outer cleanup is paused at its actual wait boundary. Run the
+            # real cleanup consumer, including flock and journal publication.
+            self.sleep.side_effect = None
+            self.configure({'321': 'RUNNING'})
+            overlapping.append(RV.cleanup(self.stage, self.ack()))
+            self.configure({'321': 'COMPLETED'})
+
+        self.sleep.side_effect = during_wait
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(len(overlapping), 1)
+        self.assertNotIn('Resource temporarily unavailable',
+                         overlapping[0].get('cleanup_error', ''))
+        self.assertEqual(len(overlapping[0]['cancellation_attempts']), 1)
+        self.assertEqual(result['cancellation_attempts'],
+                         overlapping[0]['cancellation_attempts'])
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertTrue(result['quiescent'])
+        self.assertEqual(sum(c[0] == 'scancel' for c in self.scheduler_calls()), 1)
+
+    def test_overlapping_cleanup_removal_is_observed_after_wait(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=3)
+        ack = self.ack()
+        overlapping, snapshots = [], []
+        outside = self.stage.with_name('stage.cleanup.json')
+
+        def during_wait(seconds):
+            self.sleep.side_effect = None
+            self.configure({'321': 'COMPLETED'})
+            overlapping.append(RV.cleanup(self.stage, ack))
+            snapshots.append(outside.read_bytes())
+
+        self.sleep.side_effect = during_wait
+        result = RV.cleanup(self.stage, ack)
+        self.assertEqual(len(overlapping), 1)
+        self.assertEqual(overlapping[0]['cleanup'], 'removed')
+        self.assertEqual(result, {'stage': str(self.stage), 'cleanup': 'removed'})
+        self.assertEqual(outside.read_bytes(), snapshots[0])
+        self.assertTrue(self.stage.with_name('stage.cleanup.lock').exists())
+        self.assertFalse(self.stage.exists())
+        self.assertNotIn('scancel', [c[0] for c in self.scheduler_calls()])
+
+    def test_repoll_queries_are_unlocked_and_decision_rechecks_accounting(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=3)
+        scheduler_state = RV.scheduler_state
+        observed = []
+
+        def query(job):
+            state = scheduler_state(job)
+            if self.sleep.call_count and not observed:
+                # The middle scheduler query runs outside both locks. Exercise
+                # the actual OS locks, then change accounting before decision.
+                for path in (self.stage / 'cleanup.lock',
+                             self.stage.with_name('stage.cleanup.lock')):
+                    with path.open('a') as handle:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed.append(state)
+                self.configure({'321': 'RUNNING'})
+            return state
+
+        with mock.patch.object(RV, 'scheduler_state', side_effect=query):
+            result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(observed, [('COMPLETED', '0:0')])
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+        self.assertEqual(result['cleanup_sacct_states'], {})
+        self.assertEqual(len(result['cancellation_attempts']), 1)
+        self.assertEqual(read_json(self.stage / 'cleanup.json'), result)
+
+    def test_unknown_accounting_retains_stage_after_repoll(self):
+        self.configure({'321': 'UNKNOWN'})
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+        self.assertEqual(read_json(self.stage / 'cleanup.json'), result)
+
+    def test_all_terminal_states_clear_queue_lag_without_cancellation(self):
+        statuses = ('COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'OUT_OF_MEMORY',
+                    'NODE_FAIL', 'PREEMPTED', 'BOOT_FAIL', 'DEADLINE')
+        jobs = {str(321 + i): state for i, state in enumerate(statuses)}
+        self.configure(jobs, stale_queue_reads=3)
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertTrue(result['quiescent'])
+        self.assertEqual(result['cleanup_sacct_states'],
+                         {j: [state, '0:0'] for j, state in jobs.items()})
+        self.assertNotIn('scancel', [c[0] for c in self.scheduler_calls()])
+        self.assertFalse(self.stage.exists())
+
+    def test_missing_known_job_accounting_retains_stage(self):
+        (self.stage / 'job-id').write_text('322')
+        self.configure({'321': 'COMPLETED'})
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['job_ids'], ['321', '322'])
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+
+    def test_running_after_repoll_window_still_cancels(self):
+        self.configure({'321': 'RUNNING'})
+        result = RV.cleanup(self.stage, self.ack())
+        calls = self.scheduler_calls()
+        cancel = next(i for i, c in enumerate(calls) if c[0] == 'scancel')
+        self.assertEqual(sum(c[0] == 'squeue' for c in calls[:cancel]), 3)
+        self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(2)])
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
 
     def test_failed_scancel_racing_with_completion_uses_terminal_evidence(self):
         (self.bin / 'scancel').write_text(PYTHON + 'import json\nfrom pathlib import Path\n'
