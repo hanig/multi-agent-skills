@@ -847,6 +847,13 @@ def cleanup_slurm_locked(stage, request, reconciled, repoll=None, observed=None)
         removal_lock = stage.with_name(stage.name + ".cleanup.lock").open("a")
         fcntl.flock(removal_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         removal_locked = True
+        if not (stage.exists() or stage.is_symlink()):
+            # Another cleanup may have removed the stage during our wait.
+            # Match cleanup's absent-stage result without overwriting its
+            # surviving removal snapshot or retiring the external lock.
+            history = removal_history
+            return {"stage": str(stage),
+                    "cleanup": "removed" if reconciled else "unconfirmed"}
         lock = (stage / "cleanup.lock").open("a")
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         known, job = set(observed["job_ids"] if observed else ()), None

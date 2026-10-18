@@ -2322,6 +2322,28 @@ else:
         self.assertTrue(result['quiescent'])
         self.assertEqual(sum(c[0] == 'scancel' for c in self.scheduler_calls()), 1)
 
+    def test_overlapping_cleanup_removal_is_observed_after_wait(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=3)
+        ack = self.ack()
+        overlapping, snapshots = [], []
+        outside = self.stage.with_name('stage.cleanup.json')
+
+        def during_wait(seconds):
+            self.sleep.side_effect = None
+            self.configure({'321': 'COMPLETED'})
+            overlapping.append(RV.cleanup(self.stage, ack))
+            snapshots.append(outside.read_bytes())
+
+        self.sleep.side_effect = during_wait
+        result = RV.cleanup(self.stage, ack)
+        self.assertEqual(len(overlapping), 1)
+        self.assertEqual(overlapping[0]['cleanup'], 'removed')
+        self.assertEqual(result, {'stage': str(self.stage), 'cleanup': 'removed'})
+        self.assertEqual(outside.read_bytes(), snapshots[0])
+        self.assertTrue(self.stage.with_name('stage.cleanup.lock').exists())
+        self.assertFalse(self.stage.exists())
+        self.assertNotIn('scancel', [c[0] for c in self.scheduler_calls()])
+
     def test_repoll_queries_are_unlocked_and_decision_rechecks_accounting(self):
         self.configure({'321': 'COMPLETED'}, stale_queue_reads=3)
         scheduler_state = RV.scheduler_state
