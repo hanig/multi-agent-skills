@@ -319,14 +319,13 @@ python3 "$HANIG_ORCHESTRATE_DIR/scripts/flake_triage.py" --repo "$REPO" \
 ```
 
 Repeat `--test` for module, class or method ids. Defaults: five runs per side,
-60 seconds per run. Scratch worktrees are removed even on interrupt. Output
-includes all outcomes, the touched-file fact, class, suggested rerun and issue
-draft. Save the body and replace `BODY_FILE`, `BINDING` and `APPROVER` in the
-printed command; triage executes no tracker command or CI rerun, writes no
-coordinator state and records no pass. Exit 0 means triage completed; setup or
-usage errors exit 2. Base absence is unavailable evidence, classified by head.
-An untouched test file does not exclude production regressions; isolated
-reruns miss order-dependent flakes. Merge still requires a complete green run.
+60 seconds each. Standalone scratch repositories are removed on failure or interrupt.
+Output includes outcomes, touched files, class, rerun advice and an issue draft.
+Save its body and substitute the filing command's placeholders; it is never run.
+No CI reruns, coordinator writes or recorded pass. Exit 0 means completed triage;
+setup/usage errors exit 2. Base absence classifies by head. Untouched test files
+do not exclude production regressions; isolated reruns miss order-dependent flakes.
+Merge still requires a complete green run.
 
 The connected `merge_unit.py` operator requires passing `integration-tests`
 and, when declared by the target policy, `changed-tests-stable` evidence
