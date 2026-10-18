@@ -80,6 +80,18 @@ def commit(repo, ref):
         raise SetupError('not a full commit id')
     return sha
 
+def restore_directory_access(tree):
+    # Tests may remove directory permissions. Stay inside this disposable tree;
+    # never chmod a symlink target (which may belong to the operator).
+    if tree.is_symlink() or not tree.is_dir():
+        return
+    tree.chmod(tree.stat().st_mode | 0o700)
+    for parent, directories, _ in os.walk(str(tree), followlinks=False):
+        for name in directories:
+            path = Path(parent) / name
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode | 0o700)
+
 @contextmanager
 def scratch_worktree(repo, sha):
     root = Path(tempfile.mkdtemp(prefix='flake-triage-')).resolve()
@@ -89,6 +101,7 @@ def scratch_worktree(repo, sha):
         yield tree
     finally:
         with signals_ignored():
+            restore_directory_access(tree)
             r = git(repo, 'worktree', 'remove', '--force', '--force', str(tree), check=False)
             if r['returncode'] and ('worktree ' + str(tree)) in git(repo, 'worktree', 'list', '--porcelain')['stdout'].splitlines():
                 raise SetupError('Cleanup failed; retained {}: {}'.format(root, r['stderr']))
