@@ -2188,15 +2188,24 @@ else:
         env.start()
         self.addCleanup(env.stop)
         self.configure({'321': 'PENDING'})
-        sleep = mock.patch.object(RV.time, 'sleep')
-        self.sleep = sleep.start()
-        self.addCleanup(sleep.stop)
+        # Patch this module's clock, not the time module shared by subprocess.
+        clock = mock.Mock(wraps=RV.time)
+        self.sleep = clock.sleep = mock.Mock()
+        patched_clock = mock.patch.object(RV, 'time', clock)
+        patched_clock.start()
+        self.addCleanup(patched_clock.stop)
 
     def configure(self, jobs, **options):
         self.state.write_text(json.dumps(dict(jobs=jobs, cancel_exit=1, **options)))
 
     def ack(self):
         return RV.evidence_digest(RV.collect(self.stage))
+
+    def test_subprocess_wait_does_not_count_as_repoll_sleep(self):
+        # Exercise subprocess's real timeout/poll loop, which uses time.sleep.
+        subprocess.run([sys.executable, '-c', 'import time; time.sleep(0.05)'],
+                       check=True, timeout=5)
+        self.sleep.assert_not_called()
 
     def test_missing_job_id_discovers_pending_job_and_retains_stage(self):
         result = RV.cleanup(self.stage, self.ack())
