@@ -174,20 +174,39 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
 
     def test_nonzero_wait_records_exact_exit_and_tail_without_status_poll(self):
         proc = self.start()
-        ready_at = time.monotonic()
         publish(self.root / "release", "17\n")
-        self.assert_nonzero_outcome(proc, ready_at)
+        self.assert_nonzero_outcome(proc)
 
-    def assert_nonzero_outcome(self, proc, ready_at):
+    def assert_nonzero_outcome(self, proc):
         self.assertEqual(proc.wait(timeout=10), S.EXIT_HALTED)
-        self.assertLess(time.monotonic() - ready_at, 5.0,
-                        "watcher exceeded the post-readiness completion bound")
         self.assertEqual(self.saved_watch()["status"], "waiting")
         watch = self.outcome()["outcome"]
         self.assertEqual(watch["status"], "exited_without_idle")
         self.assertEqual(watch["wait_exit_code"], 17)
+        ready_at = float((self.root / "terminal-ready-at").read_text())
+        self.assertLess(time.monotonic() - ready_at, 5.0,
+                        "watcher exceeded the post-readiness completion bound")
         self.assertIn("fixture wait failed", watch["log_tail"])
         self.assertIn("exit 17", self.status(False))
+
+    def test_completion_bound_starts_when_wait_has_a_terminal_result(self):
+        self.paseo.write_text(self.paseo.read_text().replace(
+            "from terminal_watcher_fixture import wait",
+            "import terminal_watcher_fixture as fixture\n"
+            "from terminal_watcher_fixture import wait\n"
+            "real_publish = fixture.publish\n"
+            "def publish(path, text):\n"
+            "    real_publish(path, text)\n"
+            "    if path.name == 'wait-pid':\n"
+            "        real_publish(path.with_name('delayed-at'), str(fixture.time.monotonic()))\n"
+            "        fixture.time.sleep(6)\n"
+            "fixture.publish = publish"))
+        proc = self.start()
+        publish(self.root / "release", "17\n")
+        self.assert_nonzero_outcome(proc)
+        terminal_ready = float((self.root / "terminal-ready-at").read_text())
+        delayed_at = float((self.root / "delayed-at").read_text())
+        self.assertGreater(terminal_ready - delayed_at, 5.0)
 
     def observe_release(self, raw):
         observed = self.root / "read-observed"
@@ -199,7 +218,6 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
     def test_release_publication_hides_the_open_empty_file(self):
         (self.root / "observe-release").touch()
         proc = self.start()
-        ready_at = time.monotonic()
         real_open = Path.open
         opened = []
 
@@ -224,7 +242,7 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
         with mock.patch.object(Path, "open", paused_open):
             publish(self.root / "release", "17\n")
         self.assertEqual(len(opened), 1)
-        self.assert_nonzero_outcome(proc, ready_at)
+        self.assert_nonzero_outcome(proc)
 
     def test_fake_wait_ignores_empty_and_partial_release(self):
         (self.root / "observe-release").touch()
@@ -233,9 +251,8 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
             with self.subTest(incomplete=incomplete):
                 publish(self.root / "release", incomplete)
                 self.observe_release(incomplete)
-        ready_at = time.monotonic()
         publish(self.root / "release", "17\n")
-        self.assert_nonzero_outcome(proc, ready_at)
+        self.assert_nonzero_outcome(proc)
 
     def test_killed_wait_child_records_signal_exit(self):
         proc = self.start()
