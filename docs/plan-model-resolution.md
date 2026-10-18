@@ -1,6 +1,6 @@
 <!-- docs-truth:status -->
-Status: historical
-Date: 2026-10-11
+Status: live
+Date: 2026-10-18
 Title: Plan: adopt point releases per family at project start
 Purpose: Owner request, 2026-09-30: stop hand-maintaining model names; when a project starts, use the newest model in each family. Owner decision: point releases are adopted automatically; a new generation waits for the owner. The immediate GPT-6.1 Sol swap ships separately and does not depend on this.
 
@@ -40,12 +40,23 @@ version, then `suffix`. A version is one run of digits (`N`) or two runs
 joined by the family's `separator` (`N` + separator + `M`): `.` for
 `gpt-6.1-sol`, `-` for `claude-opus-5-5`. Versions compare as integer pairs,
 `M` defaulting to 0, so `6.10` is above `6.2`. Nothing else is parsed: `-pro`,
-`:batch`, dated snapshots and previews are simply not in the family. This parser
-is used for catalog listings only.
+`:batch`, dated snapshots and previews are simply not in the family unless the
+dated pin is explicitly declared as described below. The parser is shared by
+the resolver and the readers of the per-project resolution snapshot.
 
 `major` is the owner's ceiling, and it lives in merged `reviewers.json` or
 `agents.json`, so only a reviewed change raises it. The shipped `model` must be
 in its family and carry that major; a test checks both.
+
+An optional `"snapshot": "0813"` declares an adopted four-digit dated pin.
+The configured model must be an otherwise valid family id followed by exactly
+`-0813`, for example `deepseek/deepseek-v4-pro-0813`. Malformed snapshot values
+are refused. `version_of(model_id, family, pinned=...)` accepts that exact pin
+at its base version; callers must supply the pin because the family alone
+does not identify its point release. Other dated ids remain outside catalog
+membership. Selection and snapshot readers use the dated pin's base as their
+floor, so an undated `deepseek/deepseek-v4.1-pro` can still replace it after a
+successful probe. Families without `snapshot` retain their existing behavior.
 
 ### Selection
 
@@ -54,6 +65,34 @@ From the listing, keep ids in the family whose version has major equal to
 listed id with a greater major is reported `NEW_GENERATION` and never chosen;
 adopting it means raising `major` in a pull request. A seat with no candidate
 keeps its pin.
+
+### Candidates reported for a reviewed adoption
+
+After a seat's existing reports, the resolver emits one `CANDIDATE` line per
+non-empty class, for reviewers and the code-agent default alike. These reports
+also appear in the `seats` array in `--json` output. They are sorted,
+de-duplicated catalog ids, never inferred models or automatic adoptions:
+
+- **Dated snapshots:** the pinned id's base followed by `-` and exactly four
+  ASCII digits, with nothing after them. If the family declares `snapshot`,
+  that suffix is removed from the pin before matching; the pin itself is
+  excluded. For `deepseek/deepseek-v4-pro`, this reports
+  `deepseek/deepseek-v4-pro-0813` as `dated snapshot, not adopted`.
+  `:batch`, `-vision-exp` and other tails are excluded.
+- **Cross-variant newer generations:** the same vendor and prefix, a numeric
+  version using the family's separator, a different suffix, and a major
+  greater than the family's ceiling. Ids containing `:` are excluded. For
+  `moonshotai/kimi-k2.7-code`, this reports `moonshotai/kimi-k3` as
+  `newer generation with a different variant, not adopted`. A same-major
+  different variant is not a candidate.
+
+Named-version families such as `gemini-argon` report neither class. Catalog
+ids contain no release dates, and four digits carry no year: the resolver
+does not rank snapshots beyond sorting their ids. Other date formats,
+including eight-digit dates and `-preview` or `-exp` tails, are not snapshot
+candidates. Adoption stays a reviewed `reviewers.json` change. Candidate
+reporting leaves selection, existing status lines, the per-project snapshot
+file and exit codes unchanged.
 
 `listing` is `openai` (`GET /v1/models`), `openrouter` (`GET /api/v1/models`),
 or `paseo:<provider>` (`paseo provider models <provider>`).
@@ -117,8 +156,8 @@ does not authenticate who wrote it.
 
 `hanig-project` step 1 adds one command after the survey:
 `python3 "$HANIG_REVIEW_GATE_DIR/scripts/resolve_models.py" --project .`. It
-prints one line per seat that declares a family (`RESOLVED`, `PINNED`, `NEW_GENERATION`,
-`PROBE_FAILED`) and exits 0 whenever every seat has a usable model, which
+prints status lines per seat that declares a family (`RESOLVED`, `PINNED`,
+`NEW_GENERATION`, `PROBE_FAILED`, plus any `CANDIDATE` reports) and exits 0 whenever every seat has a usable model, which
 includes keeping a pin. It can also be run alone.
 
 ### Author exclusion is unchanged, and applied to the model in effect
