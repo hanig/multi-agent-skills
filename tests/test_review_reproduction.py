@@ -23,6 +23,66 @@ from tests.review_round_fixture import isolated_reservation
 original_reservation = review.reserve_review_round
 FIELDS = ("setup", "command", "expected", "observed", "revision")
 STATUSES = ("reproduced", "not-reproduced")
+COUNTEREXAMPLE = {"setup": " fixture state\nsecond line ", "input": "run probe",
+                  "expected": "all records retained", "observed": "one record lost"}
+REASON = "The failure needs a manual observation."
+OPTIONAL_FIELDS = ({}, {"counterexample": COUNTEREXAMPLE},
+                   {"non_executable_reason": REASON},
+                   {"counterexample": COUNTEREXAMPLE, "non_executable_reason": REASON})
+
+
+class TestCounterexampleSchema(unittest.TestCase):
+    def verdict(self, fields):
+        return {"verdict": "refuted", "claims": [], "findings": [dict(
+            severity="major", confidence="high", failure_scenario="input loses a record",
+            **fields)]}
+
+    def test_either_both_or_neither_is_valid_without_mutating_fields(self):
+        for fields in OPTIONAL_FIELDS:
+            with self.subTest(fields=fields):
+                verdict = self.verdict(copy.deepcopy(fields))
+                before = copy.deepcopy(verdict)
+                self.assertIsNone(review.verdict_schema_error(verdict))
+                self.assertEqual(verdict, before)
+
+    def test_neither_is_valid_and_still_confirmed(self):
+        verdict = self.verdict({})
+        self.assertIsNone(review.verdict_schema_error(verdict))
+        self.assertTrue(review.is_confirmed(verdict["findings"][0]))
+
+    def test_malformed_counterexample_is_refused(self):
+        malformed = [None, [], "text", 7, False, {}]
+        for field in COUNTEREXAMPLE:
+            missing = dict(COUNTEREXAMPLE)
+            del missing[field]
+            malformed.append(missing)
+            for value in ("", " \t\n", None, [], {}, 7, False):
+                malformed.append(dict(COUNTEREXAMPLE, **{field: value}))
+        for example in malformed:
+            for severity in ("critical", "major", "minor"):
+                with self.subTest(example=example, severity=severity):
+                    verdict = self.verdict({"counterexample": example,
+                                            "non_executable_reason": REASON})
+                    verdict["findings"][0]["severity"] = severity
+                    self.assertIn("counterexample", review.verdict_schema_error(verdict))
+
+    def test_malformed_non_executable_reason_is_refused(self):
+        for reason in ("", " \t\n", None, [], {}, 7, False):
+            with self.subTest(reason=reason):
+                self.assertIn("non_executable_reason", review.verdict_schema_error(
+                    self.verdict({"non_executable_reason": reason,
+                                  "counterexample": COUNTEREXAMPLE})))
+
+    def test_confirmation_filter_ignores_optional_fields(self):
+        for fields in OPTIONAL_FIELDS:
+            for severity in ("critical", "major", "minor"):
+                for confidence in ("high", "medium", "low"):
+                    for in_scope in (True, False):
+                        finding = dict(self.verdict({})["findings"][0],
+                                       severity=severity, confidence=confidence,
+                                       in_scope=in_scope)
+                        self.assertEqual(review.is_confirmed(dict(finding, **fields)),
+                                         review.is_confirmed(finding))
 
 
 class TestReproductionEvidence(unittest.TestCase):
@@ -48,12 +108,14 @@ class TestReproductionEvidence(unittest.TestCase):
         }
         self.digest = review.finding_digest(self.entry["location"], self.entry["summary"])
 
-    def invoke(self, entry, findings=(), extra=()):
+    def invoke(self, entry, findings=(), extra=(), json_output=True):
         path = self.root / "dispositions.json"
         path.write_text(json.dumps({self.digest: entry}))
         argv = [str(SCRIPT), "--kind", "implementation", "--round", "2",
                 "--author", "codex/gpt-6-astra", "--claim", review.HONEST_RUN_CLAIM,
-                "--dispositions", str(path), "--file", str(self.code), "--json"]
+                "--dispositions", str(path), "--file", str(self.code)]
+        if json_output:
+            argv.append("--json")
         argv.extend(extra)
         # Exercise both real provider adapters, parser and verdict aggregation.
         roster = [{"name": provider, "provider": provider, "model": "fixture",
@@ -201,6 +263,38 @@ class TestReproductionEvidence(unittest.TestCase):
         for result in report["results"]:
             self.assertEqual(result["findings"], [finding])
         self.assertFalse(self.marker.exists())
+
+    def test_counterexamples_render_and_do_not_change_verdict_or_execute(self):
+        for severity in ("critical", "major"):
+            for fields in OPTIONAL_FIELDS:
+                with self.subTest(severity=severity, fields=fields):
+                    fields = copy.deepcopy(fields)
+                    if "counterexample" in fields:
+                        fields["counterexample"]["input"] = (
+                            "touch " + shlex.quote(str(self.marker)))
+                    finding = dict(severity=severity, confidence="high", file="candidate.py",
+                                   line=1, summary="record lost",
+                                   failure_scenario="an ordinary input loses a record", **fields)
+                    for json_output in (True, False):
+                        code, error, prompts, output = self.invoke(
+                            self.entry, findings=[finding], json_output=json_output)
+                        self.assertEqual(code, 1, error)
+                        self.assertEqual(len(prompts), 2)
+                        self.assertFalse(self.marker.exists(), "counterexample executed")
+                        if json_output:
+                            report = json.loads(output)
+                            self.assertEqual(report["state"], "REVIEW_FAIL")
+                            for result in report["results"]:
+                                self.assertEqual(result["findings"], [finding])
+                            for confirmed in report["confirmed_findings"]:
+                                self.assertEqual({k: v for k, v in confirmed.items()
+                                                  if k != "reviewer"}, finding)
+                        else:
+                            self.assertEqual("no counterexample" in output, not fields)
+                            for field, value in fields.get("counterexample", {}).items():
+                                self.assertIn(field + ": " + value, output)
+                            if "non_executable_reason" in fields:
+                                self.assertIn("non_executable_reason: " + REASON, output)
 
     def test_new_evidence_fields_keep_existing_contamination_removal(self):
         offender = ("(re-run to capture full finding text; the prior round returned "

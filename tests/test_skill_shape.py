@@ -360,7 +360,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/delegation-evidence.md", "review.honesty", 1),
         ("references/delegation-evidence.md", "review.panel-source", 1),
         ("references/dispatch-preamble.md", "delegation.contract", 2),
-        ("references/dispatch-preamble.md", "delegation.preamble", 25),
+        ("references/dispatch-preamble.md", "delegation.preamble", 26),
         ("references/handoff-takeover.md", "handoff.contents", 2),
         ("references/handoff-takeover.md", "handoff.transfer", 1),
         ("references/handoff-takeover.md", "limit.session-liveness", 1),

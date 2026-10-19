@@ -178,11 +178,18 @@ turn invalidates it while retaining the earlier decision's audit record.
 
 ## Argue with findings; do not silently filter them
 
+Reviewers are asked for a `counterexample` with non-empty `setup`, `input`,
+`expected` and `observed` strings on every critical or major finding, or a
+non-empty `non_executable_reason` explaining why no check can be written.
+Either, both or neither is valid; absence never changes a finding's status.
+The gate validates their shape and displays the evidence, but never executes
+counterexamples. Confirmed findings without either field show "no counterexample".
+
 Reviewers produce findings that do not reproduce — one model here retracted its own conclusion inside the finding text more than a dozen times. The instinct is to add a severity filter and move on. **Reproduce the finding first.** If it does not reproduce, say so explicitly in the next round's context rather than quietly dropping it, and if a reviewer keeps asserting it, that disagreement is itself information.
 
 For `--dispositions FILE`, keep the digest-keyed prior finding's `location`, `summary`, `disposition` and one-line `reason`. Both `reproduced` and `not-reproduced` require a `reproduction` object containing non-empty strings for `setup`, `command`, `expected`, `observed` and `revision`. Use the full lowercase 40- or 64-hex commit id for `revision`; it records the tested revision, not necessarily the current review head. `deferred` needs no reproduction. Missing or malformed evidence returns configuration error 4 naming the digest and field before any network call. This validates the record's shape, not whether the reported experiment occurred or the commit exists locally.
 
-Reviewers receive both statuses' reproduction text with the prior finding so they can refute the evidence. The existing removal of recognized prior-review decision text also applies to these fields. Do not execute reviewer-supplied commands or automatically downgrade severity: inability to reproduce is evidence for the adjudicator, not proof of harmlessness. The gate forwards the record as text and never executes its `command`.
+Reviewers receive both statuses' reproduction text with the prior finding so they can refute the evidence. The existing removal of recognized prior-review decision text also applies to these fields. The gate must not execute reviewer-supplied commands or automatically downgrade severity: inability to reproduce is evidence for the adjudicator, not proof of harmlessness. The gate forwards the record as text and never executes its `command`.
 
 ## Record external adjudication
 

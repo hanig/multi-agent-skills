@@ -445,6 +445,13 @@ redefine "honest" or "defect-free" to mean whatever the changed rule accepts;
 that would make the claim circular. A false finding that blocks otherwise
 admissible, defect-free work does refute the claim.
 
+For every critical or major finding, provide a "counterexample" describing a
+check the worker can run: "setup", "input", "expected", and "observed", each a
+non-empty string. If none can be written, give a non-empty
+"non_executable_reason" instead. Both fields may be supplied. These fields are
+optional in the schema; do not drop or soften a finding that lacks them.
+The gate never executes counterexamples; the worker reproduces them.
+
 Reply with ONLY a JSON object, no prose or code fences:
 
 {
@@ -456,7 +463,11 @@ Reply with ONLY a JSON object, no prose or code fences:
      "summary": "one sentence: the defect",
      "failure_scenario": "concrete inputs/state -> wrong result",
      "preconditions": "what someone must be able to do for this to happen",
-     "in_scope": true|false}
+     "in_scope": true|false,
+     "counterexample": {"setup": "required environment/state",
+                        "input": "command or input the worker can run",
+                        "expected": "correct result", "observed": "failure result"},
+     "non_executable_reason": "why no executable check can be written"}
   ],
   "claims": [
     {"claim_index": 0, "claim": "verbatim claim",
@@ -1559,6 +1570,18 @@ def verdict_schema_error(v, require_claims=0, asserted=None):
                 (not isinstance(scen, str) or not scen.strip()):
             return (f"{sev} finding has no failure_scenario: "
                     f"{str(f.get('summary'))[:60]!r}")
+        if "counterexample" in f:
+            example = f["counterexample"]
+            if not isinstance(example, dict):
+                return "finding counterexample must be an object"
+            for field in ("setup", "input", "expected", "observed"):
+                value = example.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    return f"finding counterexample.{field} must be a non-empty string"
+        if "non_executable_reason" in f:
+            reason = f["non_executable_reason"]
+            if not isinstance(reason, str) or not reason.strip():
+                return "finding non_executable_reason must be a non-empty string"
     for c in v.get("claims") or []:
         if not isinstance(c, dict):
             return "claims must contain objects"
@@ -3543,6 +3566,14 @@ def _main():
                 print(f"  [{f['reviewer']}] {f.get('severity','?').upper()} {loc}")
                 print(redact(f"      {f.get('summary','')}"))
                 print(redact(f"      -> {f.get('failure_scenario','')}"))
+                if "counterexample" in f:
+                    print("      counterexample:")
+                    for field in ("setup", "input", "expected", "observed"):
+                        print(redact(f"        {field}: {f['counterexample'][field]}"))
+                if "non_executable_reason" in f:
+                    print(redact(f"      non_executable_reason: {f['non_executable_reason']}"))
+                elif "counterexample" not in f:
+                    print("      no counterexample")
 
         if out_of_scope:
             print("\nOUT OF SCOPE (reported, not counted against the verdict "
