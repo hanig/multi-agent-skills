@@ -75,13 +75,13 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     limit = (u.get("provider_resume") or {}).get("max", 0)
     if not limit or u.get("kind") != "code" or not us.get("job_id"):
         return False
-    if SS._deadline_exceeded(u, us, state, uid):
-        return False
     matched = _eligible(us["job_id"])
     if not matched:
         return False
     if matched == SPS.CONTENT_FILTER:
         SPS.record_stop(state_dir, state, uid, us, "content_filter", matched, report)
+        return False
+    if SS._deadline_exceeded(u, us, state, uid):
         return False
     now = time.time()
     attempt = Path(us["attempt_dir"]).name
@@ -123,10 +123,12 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     finally:
         os.close(descriptor)
     matched = _eligible(us["job_id"])
-    if not matched or SS._deadline_exceeded(u, us, state, uid):
+    if not matched:
         return False
     if matched == SPS.CONTENT_FILTER:
         SPS.record_stop(state_dir, state, uid, us, "content_filter", matched, report)
+        return False
+    if SS._deadline_exceeded(u, us, state, uid):
         return False
     entry["fingerprint"] = {"message_class": matched, "observed_at": _utc(time.time())}
     rc, out, err = U.run(["paseo", "send", str(us["job_id"]), "--no-wait", RESUME_PROMPT], timeout=120)
