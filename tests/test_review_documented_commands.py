@@ -72,7 +72,7 @@ class TestDocumentedReviewCommands(unittest.TestCase):
         Path('PLAN.md').write_text('# Plan\n\nProduce summary.txt with one summary line.\n')
         Path('plan.json').write_text(json.dumps({'name': 'documentation', 'units': [
             {'id': 'summary', 'kind': 'pipeline', 'inputs': [], 'outputs': ['summary.txt'],
-             'command': "printf 'summary\\n' > summary.txt"}]}))
+             'runtime': 'none', 'command': "printf 'summary\\n' > summary.txt"}]}))
         Path('code.py').write_text('value = 1\n')
         self.git('add', '.')
         self.git('commit', '-qm', 'base')
