@@ -318,12 +318,13 @@ class TestReproductionEvidence(unittest.TestCase):
                     for json_output in (True, False):
                         code, error, prompts, output = self.invoke(
                             self.entry, findings=[finding], json_output=json_output)
-                        self.assertEqual(code, 1, error)
+                        self.assertEqual(code, 1 if confirmed else 3, error)
                         self.assertEqual(len(prompts), 2)
                         self.assertFalse(self.marker.exists(), "counterexample executed")
                         if json_output:
                             report = json.loads(output)
-                            self.assertEqual(report["state"], "REVIEW_FAIL")
+                            self.assertEqual(report["state"],
+                                             "REVIEW_FAIL" if confirmed else "REVIEW_PARTIAL")
                             for result in report["results"]:
                                 self.assertEqual(result["findings"], [finding])
                                 self.assertFalse(result["retried"])
