@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "skills/hanig-swarm/scripts"))
 import swarm as S
 import swarm_authors as SA
 from tests.test_attempt_worktrees import paseo_resolvable
+from tests.watchdog_guard import guarded_main
 
 
 def record(unit="ancestor", attempt="a0", identity="provider/model"):
@@ -218,7 +219,7 @@ class AuthorInstructionTests(unittest.TestCase):
             with mock.patch.object(sys, "argv", ["committee.py", command, "fixture"] + flags), \
                     mock.patch.object(committee, handler, return_value=0) as run:
                 with self.assertRaises(SystemExit) as stopped:
-                    committee.main()
+                    guarded_main(committee.main)
             self.assertEqual(stopped.exception.code, 0)
             parsed = run.call_args.args[0].author
             self.assertEqual(parsed, authors)
