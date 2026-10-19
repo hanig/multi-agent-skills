@@ -147,7 +147,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
             "fast": {"luna", "haiku-5.5"},
             "standard": {"luna", "kimi-k2.7-code", "sonnet-5.5"},
             "deep": {"luna", "kimi-k2.7-code", "sonnet-5.5", "sol"},
-            "plan": {"astra", "kimi-k3"},
+            "plan": {"luna", "kimi-k3"},
             "planning": {"astra", "gemini-argon"},
             "committee": {"deepseek-v4-pro", "gemini-argon", "sonnet-5.5"},
             "tiebreak": {"sol-tiebreak"},
@@ -594,11 +594,15 @@ class TestAuthorExclusion(unittest.TestCase):
         self.assertEqual(called, [])
 
     def test_plan_cannot_drop_its_author_and_pass_with_one(self):
-        code, output, _err, called = self.invoke(
-            "--author", "codex/gpt-6-astra", kind="plan")
+        with patch.object(R, "cmd_plan_review", return_value=0) as plan_review:
+            code, output, _err, called = self.invoke(
+                "--author", "codex/gpt-6-luna", kind="plan")
         self.assertEqual(code, R.STATES["REVIEW_UNAVAILABLE"], output)
+        self.assertIn("luna excluded: authored this change", output)
+        self.assertIn("author exclusion leaves 1 eligible reviewers", output)
         self.assertIn("required quorum is 2", output)
         self.assertEqual(called, [])
+        plan_review.assert_not_called()
 
     def test_no_author_keeps_the_deep_panel(self):
         code, output, _err, called = self.invoke("--profile", "deep")
