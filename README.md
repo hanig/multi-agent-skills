@@ -775,7 +775,7 @@ Panels, from `reviewers.json`:
 
 | profile | membership | use |
 |---|---|---|
-| `plan` | astra, kimi-k3 | acceptance criteria and designs, before code exists |
+| `plan` | luna, kimi-k3 | acceptance criteria and designs, before code exists (owner decision 2026-10-19) |
 | `fast` | luna, haiku-5.5 | cheapest implementation panel, first tier of `--escalate` |
 | `standard` | luna, kimi-k2.7-code, sonnet-5.5 | the usual implementation panel |
 | `deep` | standard + sol at `xhigh` | final escalation tier or explicit `--profile deep` |

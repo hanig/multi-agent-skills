@@ -2,7 +2,7 @@
  "_comment": "Routing config only \u2014 endpoint, model id, reasoning effort, profile membership. Carries NO quality scores: a stale ranking is worse than none. Availability is MEASURED by `review.py --list`, which probes each provider live; a key being set is not availability. All reviewers use DEFAULT_MAX_OUTPUT_TOKENS (64000) unless they set max_output_tokens: reasoning tokens come out of the answer's budget, and at 16000 a large review returned no content at all. Prices in _cost are per-million-token budgeting hints, not routing inputs; later owner decisions and unmeasured prices are noted on the seats.",
  "default_profile": "standard",
  "_profiles": {
-  "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. Owner decision 2026-10-12: astra and kimi-k3, OpenAI and Moonshot, because the orchestrator writing plans is a Claude model. Pair under review: a plan-review benchmark decides it (owner decision 2026-10-18).",
+  "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. Owner decision 2026-10-19: luna and kimi-k3, OpenAI and Moonshot, chosen by the spec-case benchmark tie rule because the candidate pairs were not separated and Luna had 33% measured code-review recall.",
   "fast": "luna and haiku-5.5; cheapest implementation panel, the first tier of --escalate (owner decision 2026-10-12).",
   "standard": "luna, kimi-k2.7-code and sonnet-5.5; the usual fixed implementation panel. Escalating from fast retains its verdicts and adds kimi-k2.7-code and sonnet-5.5.",
   "deep": "standard + sol. Final --escalate tier, or a fixed --profile deep panel. astra is NOT here since 2026-09-24: it writes the code now, and an author does not review itself.",
@@ -60,6 +60,7 @@
    "profiles": [
     "deep",
     "fast",
+    "plan",
     "standard"
    ],
    "enabled": true,
@@ -213,10 +214,9 @@
    },
    "effort": "xhigh",
    "profiles": [
-    "plan",
     "planning"
    ],
-   "_profiles_note": "Plan only since owner decision 2026-10-12; no implementation or tiebreak profile. Author exclusion applies, including explicit committee selection.",
+   "_profiles_note": "Left the plan profile by owner decision 2026-10-19 because astra authors plans; retains planning, with no implementation or tiebreak profile. Author exclusion applies, including explicit committee selection.",
    "enabled": true,
    "max_output_tokens": 128000,
    "_max_output_tokens": "MEASURED through review.PROVIDERS with review.SYSTEM and input ping at the configured effort and 128000 cap. Establishes budget acceptance and usable output, not capacity for every review.",

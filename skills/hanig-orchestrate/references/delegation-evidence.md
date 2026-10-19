@@ -19,9 +19,9 @@ A continuation names its recovery ref and completed evidence, while a retry rece
 
 ## Checked review configuration
 
-These observations track `skills/hanig-review-gate/reviewers.json` after the 2026-10-13 owner decision. <!-- declaration: evidence.checkable -->
+These observations track `skills/hanig-review-gate/reviewers.json` after the 2026-10-19 owner decision. <!-- declaration: evidence.checkable -->
 
-`plan`: astra, kimi-k3.
+`plan`: luna, kimi-k3.
 
 `fast`: luna, haiku-5.5.
 
@@ -29,7 +29,7 @@ These observations track `skills/hanig-review-gate/reviewers.json` after the 202
 
 `deep`: luna, sonnet-5.5, kimi-k2.7-code, sol.
 
-Astra left the `deep` tier on 2026-09-24 when it became the code driver. Owner decision 2026-10-12 puts Astra and Kimi K3 in `plan`, both at `xhigh`, while Sol retains only `deep`. Plans are written by the orchestrator, a Claude model, so the plan pair is OpenAI and Moonshot. Luna and native Anthropic Haiku 5.5 run at `max`. Escalation from fast retains Haiku's verdict and adds Kimi K2.7 Code and Sonnet at standard, then Sol at deep. Both tools now accept repeatable `--author PROVIDER/MODEL` and exclude declared authors (ARC-755); omission remains caller responsibility. Use the next `--round N` for implementation reviews, with stable checkout or declared plan/unit identity and `--dispositions FILE` after round 1. <!-- declaration: review.panel-source -->
+Astra left the `deep` tier on 2026-09-24 when it became the code driver. Owner decision 2026-10-19 puts Luna at `max` and Kimi K3 at `xhigh` in `plan`, while Sol retains only `deep`. The spec-case benchmark did not separate the candidate pairs, so the agreed tie rule chose Luna and Kimi K3 on measured code-review recall; the plan pair is OpenAI and Moonshot. Luna and native Anthropic Haiku 5.5 run at `max`. Escalation from fast retains Haiku's verdict and adds Kimi K2.7 Code and Sonnet at standard, then Sol at deep. Both tools now accept repeatable `--author PROVIDER/MODEL` and exclude declared authors (ARC-755); omission remains caller responsibility. Use the next `--round N` for implementation reviews, with stable checkout or declared plan/unit identity and `--dispositions FILE` after round 1. <!-- declaration: review.panel-source -->
 
 `committee`: deepseek-v4-pro, gemini-argon, sonnet-5.5.
 
