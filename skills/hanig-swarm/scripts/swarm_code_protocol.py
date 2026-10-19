@@ -6,6 +6,7 @@ import shlex
 import sys
 
 from swarm_types import PlanError
+import swarm_authors as SA
 
 # This marker is deliberately stable: validation checks the exact prompt the
 # coordinator would dispatch, not prose copied into a plan. Plans cannot omit
@@ -83,22 +84,7 @@ def _code_completion_protocol(intent):
     target = str(intent["target_branch"])
     remote = intent.get("repository_remote")
     judgment_ref = intent.get("judgment_ref")
-    # Use only coordinator-supplied routing facts. Older intents contain
-    # neither field; the current default is not evidence of their author.
-    provider_spec = intent.get("provider")
-    provider, embedded_model = "", ""
-    if isinstance(provider_spec, str):
-        provider, _, embedded_model = provider_spec.partition("/")
-    model = intent.get("model") or embedded_model
-    if provider and isinstance(model, str) and model:
-        author_instruction = (
-            f"Pass --author {shlex.quote(provider + '/' + model)} on every "
-            "review.py or committee.py run so the gate excludes this unit's own model.")
-    else:
-        author_instruction = (
-            "The coordinator-recorded provider/model for this unit is "
-            "UNKNOWN. Report the missing identity to the coordinator before "
-            "review; do not invent an author or omit --author.")
+    author_instruction = SA.author_instruction(intent)
     if remote:
         remote_instruction = (
             f"Use Git remote 'origin', recorded by the coordinator as "
