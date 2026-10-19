@@ -681,8 +681,14 @@ history into the new unit. Identical records keep their first position.
 Missing legacy identities remain null; current routing never fills them in.
 Every recorded attempt is included even if it produced nothing. This metadata
 is excluded from the plan digest, launch facts and agent-readable launch
-record; redispatch preserves stored intents. It changes no prompt rendering,
-admission, seed checks, judgment, scope checks or closure.
+record; redispatch preserves stored intents. The completion protocol renders
+each distinct known identity as its own shell-quoted `--author` flag: current
+attempt first, then history order. Unknown identities are named by unit and
+attempt and must be reported to the coordinator before review, without
+guessing; known inherited identities still render when the current one is
+unknown. This changes no admission, seed checks, judgment, scope checks or
+closure. Conservative attribution can exhaust the reviewer pool; exclusions
+are never relaxed to avoid `REVIEW_UNAVAILABLE`.
 
 `run` and `advance` take `--max-new-dispatches` to throttle a fan-out, and
 `--accept-plan-change` to proceed when the plan digest no longer matches the
