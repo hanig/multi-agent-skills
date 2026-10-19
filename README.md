@@ -329,13 +329,11 @@ python3 "$HANIG_ORCHESTRATE_DIR/scripts/preserve_seed.py" prepare plan.json \
   --state-dir "$STATE" --unit impl [--attempt ATTEMPT] [--root "$RUNS"]
 ```
 
-Add `--write` to prepare a detached `RECOVERY, NOT READY:` commit and a fsynced
-`recovery-seeds/UNIT/ATTEMPT/prepared.json` receipt. Preview changes nothing and
-lists ignored omissions retained for the snapshot. Nested repositories,
-gitlinks and special commit paths refuse. Clean matching retries reuse the
-receipt. Configure Git identity; filters may normalize content. No push or cleanup occurs.
-`publication_digest` hashes the other receipt fields as sorted compact JSON;
-it certifies neither inspection nor secret-freedom. Publication is separate.
+Add `--write` for a detached `RECOVERY, NOT READY:` commit and fsynced
+`recovery-seeds/UNIT/ATTEMPT/prepared.json` receipt. Preview lists ignored
+omissions without changes; clean retries reuse the receipt. Configure Git
+identity; filters may normalize content. No push or cleanup. `publication_digest`
+hashes the other fields as sorted compact JSON; it proves no inspection.
 
 The connected `merge_unit.py` operator requires passing `integration-tests`
 and, when declared by the target policy, `changed-tests-stable` evidence
