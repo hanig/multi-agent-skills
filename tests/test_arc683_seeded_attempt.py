@@ -452,8 +452,8 @@ class SeedDispatchTests(unittest.TestCase):
 
 class UnseededCompatibilityTests(unittest.TestCase):
     def test_base_intent_prompt_and_plan_golden_digests(self):
-        # Intent and plan captured at base e5a7e018 before implementation, with only
-        # nondeterministic observations fixed. These are not source-text checks.
+        # Nondeterministic observations fixed; schema-6 intent recaptured for
+        # author_history. Prompt and plan retain their prior exact goldens.
         unit = {"id": "code", "kind": "code", "repo": "/seed-compat/repo",
                 "target_branch": "main", "prompt": "Repair the implementation.",
                 "outputs": ["evidence.md"], "mode": "full-access"}
@@ -478,9 +478,14 @@ class UnseededCompatibilityTests(unittest.TestCase):
         self.assertNotIn("seed", intent)
         encoded = json.dumps(intent, sort_keys=True, separators=(",", ":")).encode()
         self.assertEqual(hashlib.sha256(encoded).hexdigest(),
+                         "dea077f54d8b1139f018c68dc39ffc813fc1e5a5d858af5865fa3717d40eb741")
+        legacy = dict(intent, schema_version=5)
+        self.assertEqual(legacy.pop("author_history"), [])
+        self.assertEqual(hashlib.sha256(json.dumps(
+            legacy, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                          "6d17a37532381f9046afbe0656c139340bbc79b6fb28a8ae736b96eb4af7fbf3")
         # Prompt golden re-captured for the scope-check instruction of ARC-2208,
-        # at 1bd0004; intent and plan goldens remain unchanged.
+        # at 1bd0004; it and the plan golden remain unchanged here.
         self.assertEqual(hashlib.sha256(S._dispatch_prompt(unit, intent).encode()).hexdigest(),
                          "783a78ec9fc762067863951a30a13c2c63016da4b7487b95abcc5a05a3d9cd1b")
         self.assertEqual(S.plan_digest({"name": "seed-compat", "units": [unit]}),
