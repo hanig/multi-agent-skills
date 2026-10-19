@@ -1,5 +1,7 @@
 """Coordinator-recorded potential contributors; metadata, never authority."""
 
+import shlex
+
 from swarm_types import PlanError
 
 
@@ -39,6 +41,42 @@ def intent_identity(intent):
     if provider and isinstance(model, str) and model:
         return provider + "/" + model
     return None
+
+
+def author_instruction(intent):
+    """Render frozen contributors without borrowing an unknown current identity."""
+    current = intent_identity(intent)
+    known = [current] if current is not None else []
+    unknown = []
+    instructions = []
+    if current is None:
+        unknown.append((intent.get("unit_id", "UNKNOWN"),
+                        intent.get("attempt_id", "UNKNOWN")))
+        instructions.append(
+            "The coordinator-recorded provider/model for this unit is "
+            "UNKNOWN. Report the missing identity to the coordinator before "
+            "review; do not invent an author or omit --author.")
+    for record in intent.get("author_history", []):
+        identity = record["identity"]
+        if identity is None:
+            unknown.append((record["unit"], record["attempt"]))
+        elif identity not in known:
+            known.append(identity)
+    if known:
+        flags = " ".join("--author " + shlex.quote(identity) for identity in known)
+        subject = ("this unit's own model" if current is not None and len(known) == 1
+                   else "all known contributing models")
+        instructions.append(
+            f"Pass {flags} on every review.py or committee.py run so the gate "
+            f"excludes {subject}.")
+    if unknown:
+        records = "; ".join(f"unit {unit!r}, attempt {attempt!r}"
+                            for unit, attempt in unknown)
+        instructions.append(
+            f"The recorded lineage is incomplete: {records}. "
+            "Report these unknown identities to the coordinator before review; "
+            "do not guess.")
+    return " ".join(instructions)
 
 
 def collect_author_history(unit, unit_state=None, exclude_attempt=None):
