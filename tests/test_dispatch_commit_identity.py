@@ -130,6 +130,45 @@ class CommitIdentityTests(unittest.TestCase):
         for audit_or_authority in (facts, record):
             self.assertNotIn("provider", audit_or_authority)
             self.assertNotIn("model", audit_or_authority)
+            self.assertNotIn("author_history", audit_or_authority)
+
+    def test_capture_collects_prior_attempts_and_redispatch_freezes_history(self):
+        ancestor = {"unit": "prior", "attempt": "z0", "identity": None}
+        nested = {"unit": "prior", "attempt": "z1", "identity": "p/ancestor"}
+        unit = dict(self.plan["units"][0], provider="p/current", author_history=[ancestor])
+        state = {"units": {"code": {"attempt_launch_intents": {
+            "a2": {"schema_version": 6, "provider": "p/two", "author_history": [nested]},
+            "a1": {"provider": "p/embedded", "model": "override"}}}}}
+        attempt = self.tmp / "fresh"
+        attempt.mkdir()
+        state_dir = str(self.tmp / "history-state")
+        # Dry capture persists through _submit but creates no workspace.
+        job, error = S._submit(unit, str(attempt), True, state, state_dir)
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        intent = state["units"]["code"]["attempt_launch_intents"]["fresh"]
+        self.assertEqual(intent["schema_version"], 6)
+        self.assertEqual(intent["author_history"], [ancestor,
+            {"unit": "code", "attempt": "a1", "identity": "p/override"},
+            nested, {"unit": "code", "attempt": "a2", "identity": "p/two"}])
+        original = json.dumps(intent, sort_keys=True).encode()
+        prompt = S._dispatch_prompt(unit, intent)
+        self.assertEqual(prompt, S._dispatch_prompt(
+            dict(unit, author_history=[]), dict(intent, author_history=[])))
+        unit["author_history"] = []
+        unit.update(provider="p/changed", model="changed")
+        S.save_state(state_dir, state)
+        job, error = S._submit(unit, str(attempt), False, S.load_state(state_dir), state_dir)
+        self.assertIsNone(error)
+        self.assertTrue(job)
+        durable = S.load_state(state_dir)["units"]["code"]
+        self.assertEqual(json.dumps(durable["attempt_launch_intents"]["fresh"],
+                                    sort_keys=True).encode(), original)
+        self.assertFalse([key for key in durable if "author" in key])
+        facts = durable["attempt_launch_facts"]["fresh"]
+        record = json.loads(S.W.launch_record_path(attempt).read_text())
+        self.assertNotIn("author_history", facts)
+        self.assertNotIn("author_history", record)
 
     def test_legacy_intent_remains_unknown_on_redispatch(self):
         unit = dict(self.plan["units"][0], provider="codex", model="gpt-6-astra")

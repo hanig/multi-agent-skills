@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import recovery as R
+import swarm_authors as SA
 import swarm_plan_rules as SPR
 import swarm_preflight as SP
 import swarm_routing as SR
@@ -22,7 +23,7 @@ from swarm_types import PlanError
 LAUNCH_RECORD = "launch.json"
 
 
-def _capture_code_launch(unit_dir, u, dispatch_source=None):
+def _capture_code_launch(unit_dir, u, dispatch_source=None, unit_state=None):
     """Record immutable input to coordinator worktree creation.
 
     The shared checkout is a SOURCE, not the execution tree. Its dirty index
@@ -109,7 +110,7 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
                 f"{branch!r} already exists. Allocate a new attempt rather "
                 f"than asking Paseo to reuse its history"), None
     intent = {
-        "schema_version": 5,
+        "schema_version": 6,
         "unit_id": u.get("id"),
         "attempt_id": Path(unit_dir).name,
         "launch_host": os.uname().nodename,
@@ -139,6 +140,7 @@ def _capture_code_launch(unit_dir, u, dispatch_source=None):
         # fields in legacy intents remain unknown; never backfill them.
         "provider": u.get("provider") or SR.DEFAULT_AGENT_PROVIDER,
         "model": u.get("model"),
+        "author_history": SA.collect_author_history(u, unit_state, Path(unit_dir).name),
     }
     if seed is not None:
         intent["seed"] = dict(seed)

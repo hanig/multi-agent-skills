@@ -440,7 +440,10 @@ class TestTrustedSnapshotMakesTheRecordAuditOnly(unittest.TestCase):
         expected = self.W.judge_detail(
             self.U.run, str(self.att), self.spec, anchor["facts"])
         self.assertTrue(expected[0], expected[2])
-        for routing in ({}, {"provider": "unknown", "model": "not-an-author"}):
+        for routing in ({}, {"provider": "unknown", "model": "not-an-author"},
+                        {"author_history": []}, {"author_history": "bogus"},
+                        {"author_history": [{"unit": "prior", "attempt": "a0",
+                                             "identity": None}]}):
             with self.subTest(routing=routing):
                 path.write_text(json.dumps(dict(record, **routing)))
                 self.assertEqual(self.W.judge_detail(
@@ -448,8 +451,8 @@ class TestTrustedSnapshotMakesTheRecordAuditOnly(unittest.TestCase):
                     expected)
 
         # Admission reads coordinator intents, not audit records. Routing is
-        # still optional prompt metadata in those intents, even at schema 5.
-        intent = {"schema_version": 5, "unit_id": "u1", "attempt_id": "att1",
+        # still optional prompt metadata in those intents, even at schema 6.
+        intent = {"schema_version": 6, "unit_id": "u1", "attempt_id": "att1",
                   "repo": str(self.repo), "branch": "swarm-att1",
                   "worktree_slug": "att1", "target_branch": "main",
                   "captured_at": "2026-09-24", "launch_host": "test-host",
@@ -458,7 +461,10 @@ class TestTrustedSnapshotMakesTheRecordAuditOnly(unittest.TestCase):
                   "repository_remote_raw": "https://example.invalid/repo",
                   "judgment_ref": "refs/heads/swarm-att1"}
         unit = dict(self.spec, target_branch="main")
-        for routing in ({}, {"provider": "unknown", "model": "not-an-author"}):
+        for routing in ({}, {"provider": "unknown", "model": "not-an-author"},
+                        {"author_history": []}, {"author_history": "bogus"},
+                        {"author_history": [{"unit": "prior", "attempt": "a0",
+                                             "identity": None}]}):
             self.assertIsNone(self.S._code_launch_intent_problem(
                 dict(intent, **routing), unit, "att1"))
 
