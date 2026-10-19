@@ -119,6 +119,7 @@ SWARM_DECLARATIONS = (
 )
 
 ORCHESTRATE_DECLARATIONS = (
+    "code.recovery-seed",
     "placement.behavior-deciding",
     "placement.reference-elaboration",
     "placement.reference-dialect",
