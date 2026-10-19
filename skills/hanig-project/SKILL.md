@@ -189,13 +189,13 @@ placeholder. Details and measured examples are in
 ### Design with the planning committee
 
 Put the survey output and interview answers, including owner decisions, in
-`design-input.md`. Use the loaded review skill; `AUTHOR` is the input proposal's
+`design-input.md`. Use the loaded review skill; `PROVIDER/MODEL` is the input proposal's
 provider/model author (repeat `--author` for coauthors), and `NAME` is the session:
 
 ```sh
-python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" open NAME --profile planning --problem-file design-input.md --author AUTHOR
-python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" ask NAME --prompt "Cross-critique the other member's design against the survey and owner decisions; identify disagreements and untestable requirements." --author AUTHOR
-python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" synthesize NAME --author AUTHOR
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" open NAME --profile planning --problem-file design-input.md --author PROVIDER/MODEL
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" ask NAME --prompt "Cross-critique the other member's design against the survey and owner decisions; identify disagreements and untestable requirements." --author PROVIDER/MODEL
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/committee.py" synthesize NAME --author PROVIDER/MODEL
 ```
 
 Send divergence to `committee.py tiebreak NAME` or the owner; owner decisions
@@ -205,12 +205,12 @@ design decision and its maker (owner, committee or tiebreak), plus open
 disagreements, in the PLAN.md written in step 3. Put each code unit's five-heading
 contract in its prompt; see [examples](references/unit-contract.md).
 
-After writing PLAN.md and plan.json, run the plan review once. Replace MEMBER_1
-and MEMBER_2 with the session's actual provider/model identities; repeat
+After writing PLAN.md and plan.json, run the plan review once. Replace PROVIDER/MEMBER_1
+and PROVIDER/MEMBER_2 with the session's actual provider/model identities; repeat
 `--author` for any other authors and the tiebreak seat when it decided:
 
 ```sh
-python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --kind plan --file PLAN.md --file plan.json --author MEMBER_1 --author MEMBER_2
+python3 "$HANIG_REVIEW_GATE_DIR/scripts/review.py" --kind plan --file PLAN.md --file plan.json --author PROVIDER/MEMBER_1 --author PROVIDER/MEMBER_2
 ```
 
 Use `.swarm/PLAN.md` instead when protected documents caused that redirect.
