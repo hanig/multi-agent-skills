@@ -2030,7 +2030,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                           and SS._occupies_live_resources(
                               units[uid], SS._unit_state(state, uid))))
         if real:
-            return ([f"REFUSING to dry-run against a state directory that "
+            return (report + [f"REFUSING to dry-run against a state directory that "
                      f"holds REAL attempts ({', '.join(real)}).",
                      f"A dry run records placeholder job ids, and a unit that "
                      f"has one can never be judged or re-dispatched, so this "
@@ -2131,7 +2131,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # re-dispatches DONE units and duplicates live jobs: a refusal whose
         # named action is worse than the fault. Raising a budget ceiling is a
         # DESIGNED human intervention, so there must be a way to say yes.
-        return ([f"REFUSING to advance: the plan file changed while units are "
+        return (report + [f"REFUSING to advance: the plan file changed while units are "
                  f"live (digest {state['plan_digest'][:12]} -> {digest[:12]}). "
                  f"A mid-flight edit redefines what the recorded attempts were "
                  f"for.",
