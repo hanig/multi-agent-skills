@@ -91,7 +91,7 @@ CLOSED_DECLARATIONS = {
         capability.dependencies paths.skill-directory authority.source
         authority.confirmation authority.narrow-mode authority.revocation
         role.supervision delegation.whole-loop delegation.prompt
-        delegation.preamble
+        delegation.preamble delegation.contract
         delegation.configuration delegation.continuation retry.boundary
         evidence.checkable evidence.authority review.panel-source
         review.author-exclusion review.claims review.honesty review.cost
@@ -110,6 +110,7 @@ CLOSED_DECLARATIONS = {
         placement.behavior-deciding placement.reference-elaboration
         placement.reference-dialect capability.host-policy capability.tracker
         capability.install-boundary paths.skill-directory workflow.order
+        plan.design-step plan.decision-ledger plan.unit-contract plan.gate-advisory
         survey.read-before-ask survey.incomplete-walk survey.partition-state
         adoption.context repository.destination repository.source-data
         repository.creation-approval interview.judgment-only

@@ -3,6 +3,17 @@
 The generated declarations in `../SKILL.md` are authoritative. This file keeps
 the longer failure explanations and examples. <!-- declaration: placement.reference-elaboration -->
 
+## Code unit contract
+
+Each code unit's prompt carries these five headings. <!-- declaration: plan.unit-contract -->
+Every requirement names an owner decision, an observed failure with evidence, or the committee as its provenance; remove requirements without provenance. <!-- declaration: plan.unit-contract -->
+
+- Claims: "The summary prints the number of processed records." <!-- declaration: plan.unit-contract -->
+- Supported envelope and accepted limits: "UTF-8 JSON input; malformed input reports an error." <!-- declaration: plan.unit-contract -->
+- Non-goals: "No new input formats." <!-- declaration: plan.unit-contract -->
+- Acceptance tests: "Run the summary test on a two-record fixture and assert a count of 2." <!-- declaration: plan.unit-contract -->
+- Requirement provenance: "Count and input scope: owner decision in PLAN.md; malformed-input error: committee decision in the ledger." <!-- declaration: plan.unit-contract -->
+
 ## Kind boundaries
 
 For `slurm`, the command is the work. Nesting `sbatch --wrap` submits an inner

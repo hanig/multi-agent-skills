@@ -9,6 +9,10 @@
     "capability.install-boundary",
     "paths.skill-directory",
     "workflow.order",
+    "plan.design-step",
+    "plan.decision-ledger",
+    "plan.unit-contract",
+    "plan.gate-advisory",
     "survey.read-before-ask",
     "survey.incomplete-walk",
     "survey.partition-state",
@@ -111,7 +115,26 @@
     },
     {
       "id": "workflow.order",
-      "normative_text": "Run survey, interview, plan, ticket drafting and approval, dispatch, tracker drain, and evidence report in that order; each step's output is the next step's input."
+      "normative_text": "Run survey, interview, design, plan, ticket drafting and approval, dispatch, tracker drain, and evidence report in that order; each step's output is the next step's input."
+    },
+    {
+      "id": "plan.design-step",
+      "normative_text": "Between interview and plan, convene the planning committee with `committee.py open --profile planning` on the survey output and interview answers, put one cross-critique to it with `ask`, then `synthesize`; send divergence to the tiebreak seat or the owner, and never let the committee change an owner decision."
+    },
+    {
+      "id": "plan.decision-ledger",
+      "normative_text": "PLAN.md records each design decision with who made it (owner, committee or tiebreak) and lists the disagreements still open."
+    },
+    {
+      "id": "plan.unit-contract",
+      "normative_text": "Each code unit's prompt carries a contract under the headings Claims, Supported envelope and accepted limits, Non-goals, Acceptance tests, and Requirement provenance; each requirement's provenance is an owner decision, an observed failure with its evidence, or the committee, and a requirement without provenance is removed.",
+      "references": [
+        "references/unit-contract.md"
+      ]
+    },
+    {
+      "id": "plan.gate-advisory",
+      "normative_text": "Run `review.py --kind plan` once on PLAN.md and plan.json with `--author` for every planning member and for the tiebreak seat when it decided; give its findings to the committee as advisory input and record how each was handled in the ledger, because measured plan reviews also fail plans that later passed review."
     },
     {
       "id": "survey.read-before-ask",
