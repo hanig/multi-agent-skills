@@ -145,6 +145,7 @@ class ContinueCommandTests(unittest.TestCase):
             self.tmp / "b1", middle, dispatch_source=source)
         self.assertIsNone(error)
         self.assertEqual(anchor["intent"]["author_history"], expected)
+        self.git("push", "-q", "origin", self.head + ":refs/heads/swarm-b1")
         self.state["units"]["middle"] = {
             "attempt_dir": str(self.tmp / "b1"),
             "attempt_launch_intents": {"b1": anchor["intent"]},

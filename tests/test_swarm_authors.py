@@ -90,7 +90,10 @@ class AuthorHistoryTests(unittest.TestCase):
         del plain["author_history"]
         self.assertEqual(S.plan_digest({"units": [unit]}),
                          S.plan_digest({"units": [plain]}))
-        self.assertEqual(S._dispatch_prompt(unit), S._dispatch_prompt(plain))
+        intent = {"repo": "/unused", "branch": "swarm-a1", "base_commit": "a" * 40,
+                  "target_branch": "main"}
+        self.assertEqual(S._dispatch_prompt(unit, dict(intent, author_history=unit["author_history"])),
+                         S._dispatch_prompt(plain, intent))
         self.assertEqual(S.declared_seed(unit), S.declared_seed(plain))
         self.assertEqual(S.declared_scope(unit), S.declared_scope(plain))
 
