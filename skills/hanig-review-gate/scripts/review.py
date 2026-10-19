@@ -3085,9 +3085,9 @@ def cmd_plan_review(args, members, prompt, label, truncated, profile_reason, exc
             for answer in member["answers"]:
                 print(redact(f"\n{name} TURN {answer['turn']} usage={answer['usage']}"))
                 raw = answer["raw"] or answer["error"] or "[no reply]"
-                if not answer["error"]:
-                    verdict = answer["verdict"]
-                    displayed = dict(verdict, findings=[finding_for_text(f)
+                verdict = answer["verdict"]
+                if isinstance(verdict, dict) and isinstance(verdict.get("findings"), list):
+                    displayed = dict(verdict, findings=[finding_for_text(f) if isinstance(f, dict) else f
                                                        for f in verdict["findings"]])
                     if displayed != verdict:
                         raw = json.dumps(displayed, indent=2)

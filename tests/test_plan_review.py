@@ -205,6 +205,23 @@ class TestPlanExchange(unittest.TestCase):
                                      self.first['alpha'])
                     self.assertEqual(exchange['joint_table'][0]['finding'], finding)
 
+    def test_plan_schema_error_text_still_omits_placeholders(self):
+        for malformed_finding in (False, True):
+            with self.subTest(malformed_finding=malformed_finding):
+                finding = dict(FINDING, counterexample=None, non_executable_reason='')
+                self.first['alpha'] = answer([finding], status='invalid')
+                if malformed_finding:
+                    self.first['alpha']['findings'].append('not an object')
+                code, text, _ = self.run_cli(json_output=False)
+                self.assertEqual(code, 2)
+                self.assertIn('ERROR:', text)
+                self.assertNotIn('"counterexample":', text)
+                self.assertNotIn('"non_executable_reason":', text)
+                report = self.run_checked('REVIEW_UNAVAILABLE')
+                for container in (report, self.journal(report)):
+                    stored = container['plan_exchange']['members']['alpha']['answers'][0]
+                    self.assertEqual(stored['verdict'], self.first['alpha'])
+
     def assert_direct_panel_refused(self, members):
         args = SimpleNamespace(claim=[CLAIM], timeout=1, json=True,
                                panel_policy={}, input_redactions=[])
