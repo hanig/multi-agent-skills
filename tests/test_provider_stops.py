@@ -24,8 +24,9 @@ def stop(h, command):
     successor = {"id": "successor", "kind": "slurm", "command": "true",
                  "runtime": "none", "outputs": ["result"]}
     h.plan["units"].append(successor)
-    h.change_plan()
+    h.planfile.write_text(json.dumps(h.plan))
     state = S.load_state(h.sd)
+    state["plan_digest"] = S.plan_digest(h.plan)
     receipt = {"unit": "successor", "repo": "owner/repo", "pr": "https://github.com/owner/repo/pull/42",
                "target": "main", "head": "a" * 40, "merged_as": "b" * 40,
                "method": "merge", "merged": True, "attested": True}
@@ -33,7 +34,7 @@ def stop(h, command):
         "attempts": [], "gpu_hours": 0, "job_id": "finished",
         "attempt_produced_heads": {"finished": receipt["head"]},
         "merge_receipt": receipt, "merge_pr": receipt["pr"], "merged_as": receipt["merged_as"]}
-    S.save_state(h.sd, state)
+    S.U.write_json(h.sd / S.STATE_FILE, state)
     argv = [sys.executable, str(h.driver), command, str(h.planfile),
             "--state-dir", str(h.sd), "--unit", "code", "--approver", "owner", "--reason", "stopped"]
     if command == "supersede":
@@ -89,7 +90,7 @@ class ProviderStopTests(unittest.TestCase):
                 if failure == "unknown_backoff":
                     state = S.load_state(h.sd)
                     state["units"]["code"]["provider_resumes"][h.attempt.name]["next_not_before"] = None
-                    S.save_state(h.sd, state)
+                    S.U.write_json(h.sd / S.STATE_FILE, state)
                     cfg = {}
                 if failure == "unmatched":
                     cfg = {"message": "invalid model (429, 500, 501, 505)"}
@@ -129,7 +130,7 @@ class ProviderStopTests(unittest.TestCase):
                 S.SW._archive_code_worktree(state, h.unit, h.attempt, [], h.sd)
                 self.assertEqual(stop_record(h), before)
                 self.assertTrue(h.work.exists())
-                self.assertNotIn("archived", h.us()["attempt_workspaces"][h.attempt.name])
+                self.assertFalse(h.us()["attempt_workspaces"][h.attempt.name]["archived"])
 
     def test_plan_removal_and_cleanup_pending(self):
         for historical in (False, True):
@@ -137,13 +138,13 @@ class ProviderStopTests(unittest.TestCase):
                 h.cli()
                 record = stop_record(h)
                 h.unit.pop("provider_resume")
-                h.change_plan()
                 state = S.load_state(h.sd)
+                state["plan_digest"] = S.plan_digest(h.plan)
                 us = state["units"]["code"]
                 us["attempt_workspaces"][h.attempt.name]["cleanup_pending"] = True
                 if historical:
                     us["attempt_dir"] = None
-                S.save_state(h.sd, state)
+                S.U.write_json(h.sd / S.STATE_FILE, state)
                 meta = copy.deepcopy(us["attempt_workspaces"])
                 self.assert_report(h.cli(), h)
                 self.assertTrue(h.work.exists())
@@ -186,7 +187,7 @@ class ProviderStopTests(unittest.TestCase):
                 self.assertIn("reconciliation needed", "\n".join(report))
                 self.assert_report(h.cli(), h)
                 self.assert_report(h.cli("status", expected=2), h)
-                self.assertNotIn("archived", h.us()["attempt_workspaces"][h.attempt.name])
+                self.assertFalse(h.us()["attempt_workspaces"][h.attempt.name]["archived"])
 
     def test_retention_git_uses_stripped_environment(self):
         with H.scenario() as h:

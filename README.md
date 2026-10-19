@@ -1027,6 +1027,7 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `requires_verification` | claims an authorized verifier must establish before this closes |
 | `continuation` | `{"max": N}`: bounded nudges to a code agent that settled without producing |
 | `provider_resume` | `{"max": N}`: code, int 0..3, default off; same attempt; 5 minute initial / 15 minute later backoff |
+| `pool`, `gpu_hours`, `env` | declared resource facts |
 
 For code units with provider resumes enabled, an eligible content-filter stop
 or exhausted resume budget leaves the outcome FAILED and retains the worktree.
@@ -1037,10 +1038,9 @@ inconsistent checkout has a null head and a `retention_problem` diagnostic.
 This record is separate from `provider_resumes`: content filters create no
 resume ledger, and any earlier resume charges stay intact. Advance, status and
 operator dispositions name retained paths and refs, including historical
-attempts. Retention does not occupy execution slots or output claims and a
+attempts. Retention alone does not occupy execution slots or output claims and a
 plan edit cannot cancel it. Publication and release are not implemented here;
 these worktrees consume disk indefinitely until that operator workflow exists.
-| `pool`, `gpu_hours`, `env` | declared resource facts |
 
 Provider resumes send at most `max` per attempt without delivery confirmation; crashes may lose resumes, and persistent eligible errors spend budget.
 
