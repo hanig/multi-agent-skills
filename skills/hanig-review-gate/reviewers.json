@@ -216,7 +216,7 @@
    "profiles": [
     "planning"
    ],
-   "_profiles_note": "Plan only since owner decision 2026-10-12; no implementation or tiebreak profile. Author exclusion applies, including explicit committee selection.",
+   "_profiles_note": "Left the plan profile by owner decision 2026-10-19 because astra authors plans; retains planning, with no implementation or tiebreak profile. Author exclusion applies, including explicit committee selection.",
    "enabled": true,
    "max_output_tokens": 128000,
    "_max_output_tokens": "MEASURED through review.PROVIDERS with review.SYSTEM and input ping at the configured effort and 128000 cap. Establishes budget acceptance and usable output, not capacity for every review.",
