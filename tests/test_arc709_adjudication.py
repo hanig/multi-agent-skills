@@ -93,8 +93,9 @@ class TestAdjudication(unittest.TestCase):
         example = {"setup": " fixture\nsecond line ", "input": "probe missing input",
                    "expected": "explicit error", "observed": "empty result"}
         reason = " Requires manual observation. "
+        from tests.test_review_reproduction import PLACEHOLDER_FIELDS
         for fields in ({}, {"counterexample": example}, {"non_executable_reason": reason},
-                       {"counterexample": example, "non_executable_reason": reason}):
+                       {"counterexample": example, "non_executable_reason": reason}) + PLACEHOLDER_FIELDS:
             with self.subTest(fields=fields):
                 finding = dict(self.finding, **fields)
                 path = self.seed(finding=finding)

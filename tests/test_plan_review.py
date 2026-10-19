@@ -130,8 +130,9 @@ class TestPlanExchange(unittest.TestCase):
         example = {"setup": "records B,A", "input": "read records",
                    "expected": "B,A", "observed": "A,B"}
         reason = "Design has no executable implementation yet."
+        from tests.test_review_reproduction import PLACEHOLDER_FIELDS
         for fields in ({}, {"counterexample": example}, {"non_executable_reason": reason},
-                       {"counterexample": example, "non_executable_reason": reason}):
+                       {"counterexample": example, "non_executable_reason": reason}) + PLACEHOLDER_FIELDS:
             with self.subTest(fields=fields):
                 self.first, self.second = answers()
                 self.finding(response='concur', kept=True)
@@ -139,12 +140,70 @@ class TestPlanExchange(unittest.TestCase):
                 self.first['alpha']['findings'] = [finding]
                 self.second['beta']['findings'] = [finding]
                 report = self.run_checked('PLAN_FAIL')
+                for result in report['results']:
+                    self.assertEqual(result['findings'], [finding])
                 record = self.journal(report)
                 self.assertIsNone(record['round'])
                 for result in record['results']:
                     for stored in result['findings']:
                         for field, value in finding.items():
                             self.assertEqual(stored[field], value)
+
+    def test_valid_counterexample_with_empty_reason_survives_second_seat(self):
+        # Shape of the observed Kimi turn-1 failure: complete evidence + unused reason.
+        finding = dict(FINDING, confidence='medium', line=0, in_scope=True,
+                       preconditions='An implementer satisfies an incomplete test list.',
+                       counterexample={'setup': 'A plan with per-unit acceptance tables.',
+                                       'input': 'Compare each requirement to its named tests.',
+                                       'expected': 'Every requirement maps to a detecting test.',
+                                       'observed': 'Reporting requirements have no detecting test.'},
+                       non_executable_reason='')
+        self.first['beta'] = answer([finding])
+        self.assertIsNone(review.verdict_schema_error(self.first['beta']))
+        self.second['beta']['own_findings'] = [
+            {'finding_id': 'beta:1', 'kept': True, 'defense': ''}]
+        self.second['alpha']['peer_responses'] = [
+            {'finding_id': 'beta:1', 'response': 'concur', 'text': 'The tests omit reporting.'}]
+        report = self.run_checked('PLAN_FAIL')
+        self.assertEqual(set(self.requests), {(n, t) for n in ('alpha', 'beta') for t in (1, 2)})
+        self.assertEqual(report['plan_exchange']['members']['beta']['answers'][0]['verdict'],
+                         self.first['beta'])
+        self.assertEqual(report['results'][1]['findings'], [finding])
+
+    def test_delivered_plan_prompt_asks_to_omit_unused_field(self):
+        self.run_checked()
+        for messages in self.requests.values():
+            prompt = next(m['content'] for m in messages if m['role'] == 'system')
+            self.assertIn('omit the field you do\nnot use rather than send an empty value', prompt)
+            self.assertIn('optional in the schema; do not drop or soften a finding that lacks them', prompt)
+
+    def test_plan_text_omits_placeholders_but_json_and_journal_retain_them(self):
+        from tests.test_review_reproduction import (
+            COUNTEREXAMPLE, REASON, OPTIONAL_FIELDS, PLACEHOLDER_FIELDS)
+        for fields in OPTIONAL_FIELDS + PLACEHOLDER_FIELDS:
+            with self.subTest(fields=fields):
+                self.first, self.second = answers()
+                self.finding(response='concur', kept=True)
+                finding = dict(FINDING, **fields)
+                self.first['alpha']['findings'] = [finding]
+                before = copy.deepcopy(self.first)
+                code, text, error = self.run_cli(json_output=False)
+                self.assertEqual(code, 1, error)
+                has_example = fields.get('counterexample') == COUNTEREXAMPLE
+                has_reason = fields.get('non_executable_reason') == REASON
+                self.assertEqual('"counterexample":' in text, has_example)
+                self.assertEqual('"non_executable_reason":' in text, has_reason)
+                self.assertEqual(text.count('no counterexample'),
+                                 0 if has_example or has_reason else 1)
+                self.assertEqual(self.first, before)
+                report = self.run_checked('PLAN_FAIL')
+                for container in (report, self.journal(report)):
+                    for key, value in finding.items():
+                        self.assertEqual(container['results'][0]['findings'][0][key], value)
+                    exchange = container['plan_exchange']
+                    self.assertEqual(exchange['members']['alpha']['answers'][0]['verdict'],
+                                     self.first['alpha'])
+                    self.assertEqual(exchange['joint_table'][0]['finding'], finding)
 
     def assert_direct_panel_refused(self, members):
         args = SimpleNamespace(claim=[CLAIM], timeout=1, json=True,

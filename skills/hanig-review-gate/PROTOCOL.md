@@ -154,9 +154,14 @@ reviewers are finding things about my last fix."
 Reviewers are asked for a `counterexample` with non-empty `setup`, `input`,
 `expected` and `observed` strings on every critical or major finding, or a
 non-empty `non_executable_reason` explaining why no check can be written.
-Either, both or neither is valid; absence never changes a finding's status.
-The gate validates their shape and displays the evidence, but never executes
-counterexamples. Confirmed findings without either field show "no counterexample".
+They should omit the unused alternative. Either, both or neither is valid;
+absence never changes a finding's status. Null, blank reasons, and empty
+counterexample objects (including objects whose values are all null or blank
+strings) are placeholders. Other malformed values, including partially filled
+counterexamples, are refused. Placeholders render as absent; confirmed findings
+without supplied evidence show "no counterexample". JSON output and the journal
+retain the values verbatim. The gate validates and displays evidence but never
+executes counterexamples.
 
 Never tell the panel what a previous round decided. A round's context
 describes what changed, not how the last round went. The same rule covers

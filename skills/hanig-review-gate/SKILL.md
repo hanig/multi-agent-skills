@@ -178,7 +178,17 @@ turn invalidates it while retaining the earlier decision's audit record.
 
 ## Argue with findings; do not silently filter them
 
-Reviewers are asked for a `counterexample` with non-empty `setup`, `input`, `expected` and `observed` strings on every critical or major finding, or a non-empty `non_executable_reason` explaining why no check can be written. Either, both or neither is valid; absence never changes a finding's status. The gate validates their shape and displays the evidence, but never executes counterexamples. Confirmed findings without either field show "no counterexample".
+Reviewers are asked for a `counterexample` with non-empty `setup`, `input`,
+`expected` and `observed` strings on every critical or major finding, or a
+non-empty `non_executable_reason` explaining why no check can be written.
+They should omit the unused alternative. Either, both or neither is valid;
+absence never changes a finding's status. Null, blank reasons, and empty
+counterexample objects (including objects whose values are all null or blank
+strings) are placeholders. Other malformed values, including partially filled
+counterexamples, are refused. Placeholders render as absent; confirmed findings
+without supplied evidence show "no counterexample". JSON output and the journal
+retain the values verbatim. The gate validates and displays evidence but never
+executes counterexamples.
 
 Reviewers produce findings that do not reproduce — one model here retracted its own conclusion inside the finding text more than a dozen times. The instinct is to add a severity filter and move on. **Reproduce the finding first.** If it does not reproduce, say so explicitly in the next round's context rather than quietly dropping it, and if a reviewer keeps asserting it, that disagreement is itself information.
 
