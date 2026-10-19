@@ -1,6 +1,6 @@
 <!-- docs-truth:status -->
 Status: live
-Date: 2026-10-18
+Date: 2026-10-19
 Title: Deferred edge cases
 Purpose: This is the canonical ledger of reproduced findings deferred outside a task's declared supported envelope.
 
@@ -108,3 +108,20 @@ This is the canonical ledger of reproduced findings deferred outside a task's de
   5. The same refusal on a supported full checkout's working-tree root, changed operator state, or failure of the written checkout recovery would falsify the bound.
 - Maintainer: The orchestrator.
 - Reassessment triggers: The orchestrator needs to triage a repository it holds only as a bare clone.
+
+### Plan gate: the verdict rejects clean task texts
+
+- Issue and unit: ARC-2578, `w2` and `w2b`, [PR #251](https://github.com/hanig/multi-agent-skills/pull/251); also cited by ARC-2483 ([PR #252](https://github.com/hanig/multi-agent-skills/pull/252)).
+- Original verdict and round: Luna in w2 round 1 and Kimi K2.7 in w2b round 1, both `REVIEW_FAIL`. PR #251 records the orchestrator's adjudication and deferral; neither verdict becomes a pass.
+- Tested revision: w2 `59c70c271b14614c90dc206e3ebbfb68532516e7`, recorded in `$HOME/.local/state/hanig-swarm/projects/multi-agent-skills-82e3a975eef5/runs/w2-plan-pair/df4a8b6a95700597/finding-reproduction.txt`. That replay also confirms that `review.py` and `plan_review.py` were unchanged from base `bf6a859486b6d13852e41f8ccb5a774a4f39c5f9`.
+- Reproduction: Replaying the archived benchmark responses, every measured pair returned `PLAN_FAIL` on every completed clean control: astra and kimi-k3 (the pair on main at the time), 8 of 8; luna and kimi-k3, 8 of 8; kimi-k3 and deepseek-v4-pro, 7 of 7. There were three clean task texts and three trials per pair; the remaining four trials were `REVIEW_UNAVAILABLE`. The bad specs drew roughly two to five times as many major findings per completed review, even though the verdict did not distinguish them from the clean controls. Sources: the w2 reproduction above and `$HOME/.local/state/hanig-swarm/orchestrator/bench/` files `spec-adjudication.json`, `runs-spec/`, `runs-spec-controls/`, and `spec-controls/SHA256SUMS`. This is an offline replay of archived responses, not a new live model sample.
+- Consequence bound: In these task-text measurements the verdict carries no signal. Since PR #252, the planning phase uses plan-gate findings as advisory input recorded in the decision ledger, so no plan is blocked by the verdict; no work is lost. This limit does not waive implementation review or candidate-merge checks.
+- Operator recovery (and demonstration, if required): Read the findings, not the verdict. In the planning workflow introduced by PR #252, give the findings to the committee and record each disposition in the decision ledger; retain an unavailable review as unavailable. The successful result is a recorded disposition of the findings without requiring a passing plan verdict. The archived replay demonstrates the refusal; PR #252 supplies the advisory workflow, not a new recovery trial.
+- The five nonblocking answers:
+  1. The affected consumer is project planning's use of the plan gate on task texts; findings can inform decisions even when the verdict cannot distinguish clean controls from bad specs.
+  2. The archived clean-control replay and bad-spec comparison above bound the observation; PR #252 removes verdict-based obstruction in the planning phase and preserves the findings in its decision ledger.
+  3. Recording this limit changes no test, prompt, roster, verifier, shared guard or candidate-merge requirement; implementation review remains required.
+  4. The owner's 2026-10-19 decision and the orchestrator adjudication recorded in PR #251 defer this pre-existing limit under the mandate's *Findings outside the supported envelope* rule; the pair-selection task excluded rule changes.
+  5. A pair or prompt change that passes clean controls would invalidate the measured verdict limit; any use of the verdict as a pass/fail gate would invalidate the no-obstruction bound.
+- Maintainer: The orchestrator.
+- Reassessment triggers: A pair or prompt change that passes clean controls, or any use of the plan gate's verdict as a pass/fail gate.

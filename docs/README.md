@@ -1,6 +1,6 @@
 <!-- docs-truth:status -->
 Status: live
-Date: 2026-10-18
+Date: 2026-10-19
 Title: Documentation index
 Purpose: Browse the maintained references, historical records, and superseded plans in this repository.
 
@@ -38,7 +38,7 @@ Link validity (ARC-1787) and factual currency of status or purpose are not check
 | [Step-back audit of both repositories](<audit-stepback-both-repos.md>) | historical | 2026-10-11 | This historical review compares the rejected fusion designs and the code that motivated the replacement swarm plan. |
 | [The three clusters: rules, partitions, and what breaks](<clusters.md>) | live | 2026-10-11 | Arc runs three Slurm clusters that this tooling targets: &#42;&#42;chimera&#42;&#42;, &#42;&#42;lambda&#42;&#42; and &#42;&#42;andromeda&#42;&#42;. A project is bound to exactly one of them, and plans are NOT portable between them: most partition names exist on only one cluster, and the two that do repeat mean different things (see §5). |
 | [Cross-agent release acceptance](<cross-agent-acceptance.md>) | live | 2026-10-11 | This is the release record for the portable skill installer. It separates repeatable, hermetic coverage from the small amount of native-agent evidence that must be collected on real supported CLI versions. A skipped native check is a release gap, not a passing check. |
-| [Deferred edge cases](<deferred-edge-cases.md>) | live | 2026-10-18 | This is the canonical ledger of reproduced findings deferred outside a task's declared supported envelope. |
+| [Deferred edge cases](<deferred-edge-cases.md>) | live | 2026-10-19 | This is the canonical ledger of reproduced findings deferred outside a task's declared supported envelope. |
 | [Three candidate first workloads, one per machine](<first-real-workloads.md>) | historical | 2026-10-11 | Drawn from the live Linear workspace &#96;Arc - projects&#96; rather than invented, so the first real run produces something you actually wanted. Each is scoped to be finishable and to exercise a different part of the coordinator. |
 | [Orchestrator handoff, 2026-09-20](<handoff-2026-09-20.md>) | historical | 2026-10-11 | This dated handoff preserves the orchestrator state and outstanding decisions recorded on 2026-09-20, with later corrections retained below. |
 | [Skill installation lifecycle API](<install-lifecycle.md>) | live | 2026-10-11 | &#96;lib.skill&#95;lifecycle&#96; is the mutation layer for the multi-store installer. It does not discover &#96;$HOME&#96;, infer loader precedence, or select skills. The CLI must resolve every destination, selected name, and consumer before calling it. |
