@@ -18,6 +18,12 @@ def record(unit="ancestor", attempt="a0", identity="provider/model"):
     return dict(unit=unit, attempt=attempt, identity=identity)
 
 
+INVALID_IDENTITIES = ["", "p", "/m", "p/", "--definitely-unknown/legacy", "p/-m"]
+for _part in ("bad value", "bad\u00a0value", "bad\u2028value") + tuple(
+        "bad" + chr(code) + "value" for code in list(range(32)) + list(range(127, 160))):
+    INVALID_IDENTITIES.extend((_part + "/m", "p/" + _part))
+
+
 class AuthorHistoryTests(unittest.TestCase):
     def test_resolution_matches_protocol(self):
         for intent, expected in (
@@ -118,6 +124,12 @@ class AuthorHistoryTests(unittest.TestCase):
         self.assertEqual(S.declared_seed(unit), S.declared_seed(plain))
         self.assertEqual(S.declared_scope(unit), S.declared_scope(plain))
 
+    def test_validate_refuses_invalid_identity_parts(self):
+        for identity in INVALID_IDENTITIES:
+            with self.subTest(identity=identity), self.assertRaisesRegex(
+                    S.PlanError, "author_history"):
+                S.validate_plan({"units": [self.unit([record(identity=identity)])]})
+
 
 class AuthorInstructionTests(unittest.TestCase):
     def intent(self, **extra):
@@ -179,7 +191,7 @@ class AuthorInstructionTests(unittest.TestCase):
                              expected)
 
     def test_each_identity_is_shell_quoted(self):
-        identities = ["p/model'with space", "q/model;$(false)"]
+        identities = ["p/model'with-quote", "q/model;$(false)"]
         intent = self.intent(provider=identities[0],
                              author_history=[record(identity=identities[1])])
         self.assertEqual(self.flags(intent), ["--author", identities[0],
@@ -187,6 +199,56 @@ class AuthorInstructionTests(unittest.TestCase):
         instruction = SA.author_instruction(intent)
         for identity in identities:
             self.assertIn("--author " + shlex.quote(identity), instruction)
+
+    def test_invalid_current_and_history_are_named_without_flags(self):
+        for identity in INVALID_IDENTITIES:
+            for current in (False, True):
+                with self.subTest(identity=identity, current=current):
+                    intent = self.intent(
+                        provider=identity if current else "p/valid",
+                        author_history=[record(identity="p/valid" if current else identity)])
+                    before = copy.deepcopy(intent)
+                    self.assertEqual(self.flags(intent), ["--author", "p/valid"])
+                    instruction = SA.author_instruction(intent)
+                    incomplete = instruction.split("The recorded lineage is incomplete: ", 1)[1]
+                    unit, attempt = ("work", "a3") if current else ("ancestor", "a0")
+                    self.assertIn(f"unit {unit!r}, attempt {attempt!r}", incomplete)
+                    self.assertIn("recorded identity is invalid", incomplete)
+                    self.assertIn("coordinator before review; do not guess.", incomplete)
+                    self.assertEqual(intent, before)
+        # The explicit model wins before validity is decided, just as before.
+        self.assertEqual(self.flags(self.intent(provider="p/-embedded", model="valid")),
+                         ["--author", "p/valid"])
+        self.assertEqual(self.flags(self.intent(provider="p/valid", model="-override")), [])
+
+    def test_leading_dash_history_reaches_guarded_real_parsers(self):
+        with mock.patch.object(sys, "path", [str(ROOT / "skills/hanig-review-gate/scripts")] + sys.path):
+            import review
+            import committee
+        invalid = "--definitely-unknown/legacy"
+        authors = ["p/current", "q/vendor/prior", "r/old"]
+        intent = self.intent(provider=authors[0], author_history=[
+            record(identity=authors[1]), record("bad-unit", "bad-attempt", invalid),
+            record(identity=authors[2]), record(identity=authors[1])])
+        flags = self.flags(intent)
+        # Both entrypoints consume their real parsers. Stop at offline handlers,
+        # before provider calls, journal writes or committee state mutations.
+        with mock.patch.object(sys, "argv", ["review.py", "--size"] + flags), \
+                mock.patch.object(review, "cmd_size", return_value=0) as run:
+            with self.assertRaises(SystemExit) as stopped:
+                guarded_main(review.main)
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertEqual(run.call_args.args[0].author, authors)
+        with mock.patch.object(sys, "argv", ["committee.py", "open", "fixture"] + flags), \
+                mock.patch.object(committee, "cmd_open", return_value=0) as run:
+            with self.assertRaises(SystemExit) as stopped:
+                guarded_main(committee.main)
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertEqual(run.call_args.args[0].author, authors)
+        self.assertEqual(flags, [arg for author in authors for arg in ("--author", author)])
+        incomplete = SA.author_instruction(intent).split("The recorded lineage is incomplete: ", 1)[1]
+        self.assertIn("unit 'bad-unit', attempt 'bad-attempt'", incomplete)
+        self.assertIn("recorded identity is invalid: " + repr(invalid), incomplete)
 
     def test_synthetic_validation_never_borrows_plan_history(self):
         unit = AuthorHistoryTests().unit([record(identity="p/ancestor")])
