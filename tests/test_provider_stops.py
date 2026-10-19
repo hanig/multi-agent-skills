@@ -206,6 +206,33 @@ class ProviderStopTests(unittest.TestCase):
             self.assertTrue(any("HEAD^{commit}" in argv for argv in calls))
             self.assertEqual(stop_record(h)["head_at_retention"], H.F.git(h.work, "rev-parse", "HEAD"))
 
+    def test_refused_advance_keeps_retention_report(self):
+        with H.scenario(message=P.CONTENT_FILTER) as h:
+            h.cli()
+            self.assertTrue(S.acquire_lease(h.sd)[0])
+            h.addCleanup(S.release_lease, h.sd)
+            state = S.load_state(h.sd)
+            changed = dict(h.plan, name="changed-plan")
+            report, _, _ = S.advance(changed, state, str(h.sd), str(h.tmp / "runs"), False, max_new=0)
+            self.assertIn("REFUSING", "\n".join(report))
+            self.assert_report("\n".join(report), h)
+            peer = dict(h.unit, id="peer")
+            state["units"]["peer"] = {"state": "RUNNING", "attempt_dir": "peer-attempt", "job_id": "peer-job"}
+            plan = dict(h.plan, units=[h.unit, peer])
+            report, _, _ = S.advance(plan, state, str(h.sd), str(h.tmp / "runs"), True, max_new=0)
+            self.assertIn("REFUSING", "\n".join(report))
+            self.assert_report("\n".join(report), h)
+
+    def test_filter_after_charge_preserves_prior_ledger(self):
+        with H.scenario() as h:
+            h.ready()
+            h.cli(change_at=2, fresh_message=P.CONTENT_FILTER)
+            h.failed()
+            self.assertEqual(stop_record(h)["reason"], "content_filter")
+            self.assertEqual(h.count(), 1)
+            h.assert_snapshot(h.record())
+            self.assertTrue(h.work.exists())
+
     def test_gate_refuses_protocol_and_permission_problems(self):
         for cfg in ({"permissions": ["pending"]}, {"prefix": "[User] "}):
             with self.subTest(cfg=cfg), H.scenario(message=P.CONTENT_FILTER, **cfg) as h:
