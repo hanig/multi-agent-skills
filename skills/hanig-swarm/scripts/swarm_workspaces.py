@@ -13,6 +13,7 @@ import paseo_io as PIO
 import recovery as R
 import swarm_code_launch as SCL
 import swarm_state as SS
+import swarm_provider_stops as SPS
 import unit as U
 import worktree as W
 
@@ -246,6 +247,10 @@ def _report_retained_worktrees(state, report, dry_run=False):
 
 def _report_would_archive_code_worktree(state, u, unit_dir, report):
     """Describe cleanup without charging a retry or contacting Paseo."""
+    us = (state.get("units") or {}).get(u["id"]) or {}
+    if SPS.retained(us, unit_dir):
+        SPS.report_retained(state, report, u["id"], Path(unit_dir).name)
+        return
     if u.get("kind") != "code" or not unit_dir:
         return
     attempt = Path(unit_dir).name
@@ -321,6 +326,10 @@ def _archive_code_worktree(state, u, unit_dir, report, state_dir=None):
     Codex runtime home is disposable at the existing terminal transition.
     """
     if not unit_dir:
+        return
+    us = (state.get("units") or {}).get(u["id"]) or {}
+    if SPS.retained(us, unit_dir):
+        SPS.report_retained(state, report, u["id"], Path(unit_dir).name)
         return
     _preserve_and_archive_code_worktree(state, u, unit_dir, report, state_dir)
     attempt = Path(unit_dir).name

@@ -248,7 +248,7 @@ class ProviderResumeTests(Checks):
       h.sent(2)
       self.contains("spent 2/2", h.cli())
       h.expect("FAILED")
-      self.assertFalse(h.work.exists())
+      self.assertTrue(h.work.exists())
       h.cli()
       h.sent(2)
 
@@ -301,7 +301,10 @@ class ProviderResumeTests(Checks):
         if not ready:
           self.absent("provider_resumes", h.us())
         if state == "FAILED":
-          self.assertFalse(h.work.exists())
+          if "flagged for possible cybersecurity risk" in cfg.get("message", "").lower():
+            self.assertTrue(h.work.exists())
+          else:
+            self.assertFalse(h.work.exists())
 
   def test_changed_observation(self):
     for stage in ("snapshot", "charge"):
