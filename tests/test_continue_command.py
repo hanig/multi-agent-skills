@@ -1,10 +1,12 @@
 """Exercise continuation seed authority and atomic plan publication via the CLI."""
+import copy
 import json
 import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from tests import test_validate_seeds as seed_fixture
 from unittest import mock
 
@@ -109,9 +111,56 @@ class ContinueCommandTests(unittest.TestCase):
                          "evidence": str(self.attempt / "evidence.md")})
         self.assertEqual(unit["prompt"].encode("utf-8"), self.prompt.read_bytes())
         expected = dict(self.unit, id="new", seed=unit["seed"], prompt=unit["prompt"],
-                        description="Continuation of old")
+                        description="Continuation of old",
+                        author_history=[{"unit": "old", "attempt": "a1", "identity": None}])
         self.assertEqual(unit, expected)
         self.assertEqual(self.snapshot(), before)
+
+    def test_multihop_carries_captured_history_and_unknowns_without_mirrors(self):
+        sys.path.insert(0, str(SWARM.parent))
+        import swarm_continue as SC
+        import swarm_code_launch as SCL
+        ancestor = {"unit": "ancestor", "attempt": "z0", "identity": "p/ancestor"}
+        # The plan and latest intent carry different lineage: reading just
+        # either one must lose a real record. A's legacy a1 is unknown.
+        self.unit["author_history"] = [ancestor]
+        captured_only = {"unit": "older", "attempt": "z1", "identity": None}
+        self.us["attempt_launch_intents"]["a2"] = dict(
+            self.intent, schema_version=6, attempt_id="a2", provider="p/second",
+            author_history=[captured_only])
+        args = SimpleNamespace(unit="old", new_id="middle", state_dir=str(self.state_dir),
+                               head_ref=None, prompt_file=str(self.prompt))
+        state_before = copy.deepcopy(self.state)
+        middle = SC._continuation(self.plan, self.state, args)
+        expected = [ancestor, {"unit": "old", "attempt": "a1", "identity": None},
+                    captured_only, {"unit": "old", "attempt": "a2", "identity": "p/second"}]
+        self.assertEqual(middle["author_history"], expected)
+        self.assertEqual(self.state, state_before)
+        self.plan["units"].append(middle)
+        middle.update(provider="p/third")
+        # Freeze B's history via the real capture path. Its seed keeps the
+        # old head; the cached source here is the coordinator's base observation.
+        source = dict(self.intent, target_commit=self.base)
+        error, anchor = SCL._capture_code_launch(
+            self.tmp / "b1", middle, dispatch_source=source)
+        self.assertIsNone(error)
+        self.assertEqual(anchor["intent"]["author_history"], expected)
+        self.state["units"]["middle"] = {
+            "attempt_dir": str(self.tmp / "b1"),
+            "attempt_launch_intents": {"b1": anchor["intent"]},
+            "attempt_produced_heads": {"b1": self.head}}
+        # Routing edits and removal of B's plan history cannot erase the
+        # captured history or change either predecessor's frozen identity.
+        middle.update(provider="changed/provider", model="changed-model", author_history=[])
+        self.unit.update(provider="changed/old", model="changed-old-model")
+        args.unit, args.new_id = "middle", "last"
+        state_before = copy.deepcopy(self.state)
+        last = SC._continuation(self.plan, self.state, args)
+        self.assertEqual(last["author_history"], expected + [
+            {"unit": "middle", "attempt": "b1", "identity": "p/third"}])
+        self.assertEqual(self.state, state_before)
+        for us in self.state["units"].values():
+            self.assertFalse([key for key in us if "author" in key])
 
     def test_write_appends_exactly_one_valid_unit(self):
         preview = self.result_unit(self.continuation())

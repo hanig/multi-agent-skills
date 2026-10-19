@@ -74,6 +74,7 @@ import swarm_workspaces as SW
 import swarm_dispatch as SD
 import swarm_continue as SC
 import swarm_provider_resume as SPRS
+import swarm_authors as SA
 from swarm_dispatch import (
     _allocate, _dep_env, _isolation_submission, _record_isolation_facts,
     _clear_isolation_marker, _slurm_exit_trap, _bind,
@@ -415,6 +416,7 @@ def validate_plan(plan, survey=None, new_attempts=True):
             continue
         SPR.declared_seed(u)
         SPR.declared_scope(u)
+        SA.declared_author_history(u)
         if "tracker" in u and not SO._nonblank_text(u["tracker"]):
             raise PlanError(
                 f"unit {u.get('id', '?')!r} has tracker={u['tracker']!r}; "
@@ -1435,7 +1437,8 @@ def _submit(u, unit_dir, dry_run, state=None, state_dir=None,
             })
         else:
             anchor_err, anchored_base = SCL._capture_code_launch(
-                unit_dir, u, dispatch_source=dispatch_source)
+                unit_dir, u, dispatch_source=dispatch_source,
+                unit_state=((state or {}).get("units") or {}).get(u["id"]))
         if anchor_err:
             return None, anchor_err
         # One warning point for cached/uncached sources and restored intents.
@@ -4130,6 +4133,11 @@ SCHEMA_FIELDS = [
     ("provider", "code", "optional",
      "default is agents.json default.provider"),
     ("model", "code", "optional", "overrides the provider's default"),
+    ("author_history", "code", "optional",
+     "JSON list of objects with exactly unit, attempt (non-empty strings), "
+     "and identity (provider/model or null). Coordinator-recorded potential "
+     "contributors; carried across attempts and continuations. Metadata only; "
+     "no effect on admission, judgment or rendered prompts"),
     ("thinking", "code", "optional",
      "default from agents.json. JSON null or \"\" suppresses the flag; the STRING "
      "\"null\" is refused"),

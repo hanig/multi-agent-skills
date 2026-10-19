@@ -992,7 +992,7 @@ def _units_with_canary(plan):
 # safe direction, because a field added next year is covered until someone
 # argues it is cosmetic.
 COSMETIC_FIELDS = {"description", "comment", "notes", "title", "owner",
-                   "tags", "_comment"}
+                   "tags", "_comment", "author_history"}
 
 
 def plan_digest(plan):

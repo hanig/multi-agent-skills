@@ -12,6 +12,7 @@ from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
 import coordinator_paths as CP
+import swarm_authors as SA
 import swarm_code_launch as SCL
 import swarm_evidence as SE
 import swarm_plan_rules as SPR
@@ -88,6 +89,7 @@ def _continuation(plan, state, args):
     seed["base"] = base
     new = copy.deepcopy(old)
     new.update(id=args.new_id, seed=seed, description="Continuation of " + args.unit,
+               author_history=SA.collect_author_history(old, us),
                # Byte decoding preserves CRLF in UTF-8 prompts.
                prompt=Path(args.prompt_file).read_bytes().decode("utf-8"))
     return new
