@@ -927,6 +927,38 @@ class TestAuthoredSkillShape(unittest.TestCase):
             with self.subTest(host_detail=host_detail):
                 self.assertNotIn(host_detail, reference)
 
+    def test_counterexample_guidance_requires_inspection_before_reproduction(self):
+        """Pin conduct instructions, not worker compliance or OS isolation."""
+        # Safe analogue of the reported credential read: cwd alone does not
+        # stop a counterexample from reading a synthetic file outside it.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempt = root / "attempt"
+            attempt.mkdir()
+            private = root / "synthetic-private-file"
+            private.write_text("synthetic-counterexample-sentinel")
+            probe = subprocess.run(
+                [sys.executable, "-c",
+                 "from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())",
+                 str(private)], cwd=attempt, capture_output=True, text=True, timeout=10)
+            self.assertEqual(probe.returncode, 0, probe.stderr)
+            self.assertEqual(probe.stdout, "synthetic-counterexample-sentinel\n")
+            self.assertEqual(private.read_text(), "synthetic-counterexample-sentinel")
+        reference = (SKILLS / "hanig-orchestrate" / "references" /
+                     "dispatch-preamble.md").read_text(encoding="utf-8")
+        order = reference.split("## Order of work", 1)[1].split("## Scoped tests", 1)[0]
+        instruction = next(line for line in order.splitlines()
+                           if "Commit each reproduced counterexample" in line)
+        for required in ("untrusted input: inspect it before execution",
+                         "synthetic fixtures for a safe equivalent",
+                         "access credentials, send data off-host, or modify unrelated resources",
+                         "Never execute those unsafe operations",
+                         "record the reason and escalate rather than running it",
+                         "Run the inspected counterexample in the attempt worktree"):
+            self.assertIn(required, instruction)
+        self.assertLess(instruction.index("inspect it before execution"),
+                        instruction.index("Run the inspected counterexample"))
+
     def test_orchestrate_concurrence_guidance_keeps_the_mandate_exception(self):
         skill = SKILLS / "hanig-orchestrate"
         declarations = {
