@@ -61,6 +61,7 @@ class TestPlanExchange(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.first, self.second = answers()
+        self.model_names = {m["model"]: m["name"] for m in MEMBERS}
         self.raw = {}
         self.requests = {}
         self.request_bodies = {}
@@ -76,7 +77,7 @@ class TestPlanExchange(unittest.TestCase):
              'text': 'The plan explicitly retains input order and never sorts.'}]
 
     def transport(self, url, payload, headers, timeout, **kwargs):
-        name = 'alpha' if payload['model'] == 'stub-alpha' else 'beta'
+        name = self.model_names[payload['model']]
         messages = payload.get('input', payload.get('messages'))
         turn = sum(m['role'] == 'user' for m in messages)
         self.requests[(name, turn)] = copy.deepcopy(messages)
@@ -148,9 +149,9 @@ class TestPlanExchange(unittest.TestCase):
         self.assert_direct_panel_refused(MEMBERS + [
             dict(MEMBERS[0], name='gamma', model='stub-gamma')])
 
-    def test_direct_same_provider_refused_before_transport(self):
+    def test_direct_same_maker_refused_before_transport(self):
         self.assert_direct_panel_refused([
-            MEMBERS[0], dict(MEMBERS[1], provider=MEMBERS[0]['provider'])])
+            MEMBERS[0], dict(MEMBERS[1], model='openai/stub-beta')])
 
     def test_direct_duplicate_seat_names_refused_before_transport(self):
         self.assert_direct_panel_refused([
@@ -158,7 +159,7 @@ class TestPlanExchange(unittest.TestCase):
 
     def test_cli_invalid_panels_refused_before_transport(self):
         for members in ([], MEMBERS[:1], MEMBERS + [dict(MEMBERS[0], name='gamma')],
-                        [MEMBERS[0], dict(MEMBERS[1], provider=MEMBERS[0]['provider'])],
+                        [MEMBERS[0], dict(MEMBERS[1], model='openai/stub-beta')],
                         [MEMBERS[0], dict(MEMBERS[1], name=MEMBERS[0]['name'])]):
             with self.subTest(members=members):
                 code, _, stderr = self.run_cli(members=members)
@@ -178,15 +179,50 @@ class TestPlanExchange(unittest.TestCase):
         self.assertIn('REVIEW_ERROR', stderr.getvalue())
         self.assertIn(plan_review._plan_panel_error(members), stderr.getvalue())
 
-    def test_exchange_same_provider_refused_before_transport(self):
+    def test_exchange_same_maker_refused_before_transport(self):
         self.assert_exchange_panel_refused([
-            MEMBERS[0], dict(MEMBERS[1], provider=MEMBERS[0]['provider'])])
+            MEMBERS[0], dict(MEMBERS[1], model='openai/stub-beta')])
 
     def test_exchange_other_invalid_panels_refused_before_transport(self):
         for members in ([], MEMBERS[:1], MEMBERS + [dict(MEMBERS[0], name='gamma')],
                         [MEMBERS[0], dict(MEMBERS[1], name=MEMBERS[0]['name'])]):
             with self.subTest(members=members):
                 self.assert_exchange_panel_refused(members)
+
+    def run_shipped_pair(self, names):
+        roster = json.loads((REPO / 'skills/hanig-review-gate/reviewers.json').read_text())
+        members = [m for m in roster['reviewers'] if m['name'] in names]
+        self.assertEqual({m['name'] for m in members}, set(names))
+        self.first, self.second = answers(names)
+        self.model_names = {m['model']: m['name'] for m in members}
+        code, report, stderr = self.run_cli('--only', ','.join(names), members=members)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(report['state'], 'PLAN_PASS')
+        self.assertEqual(set(self.requests), {(n, turn) for n in names for turn in (1, 2)})
+
+    def test_two_makers_on_one_provider_complete_both_plan_turns(self):
+        self.run_shipped_pair(('kimi-k3', 'deepseek-v4-pro'))
+
+    def test_shipped_plan_pair_completes_both_plan_turns(self):
+        self.run_shipped_pair(('astra', 'kimi-k3'))
+
+    def test_maker_contrast_uses_vendor_or_bare_model_provider(self):
+        for members in (
+                [MEMBERS[0], dict(MEMBERS[1], model='openai/stub-beta')],
+                [dict(MEMBERS[0], model='/stub-alpha'), dict(MEMBERS[1], model='openai/stub-beta')],
+                [dict(MEMBERS[0], model='stub/alpha'), MEMBERS[1]],
+                [MEMBERS[0], dict(MEMBERS[1], model='stub-beta', provider='openai')]):
+            with self.subTest(members=members):
+                self.assertIn('model maker', plan_review._plan_panel_error(members))
+                code, _, stderr = self.run_cli(members=members)
+                self.assertEqual(code, 4)
+                self.assertIn('model maker', stderr)
+                self.assertEqual(self.requests, {})
+
+    def test_invalid_model_ids_refuse_without_transport(self):
+        for model in (None, '', 1, []):
+            with self.subTest(model=model):
+                self.assert_direct_panel_refused([MEMBERS[0], dict(MEMBERS[1], model=model)])
 
     def test_cli_uses_joint_verdict_in_plan_owner(self):
         self.finding()
@@ -732,8 +768,8 @@ class TestJointPlanPanel(unittest.TestCase):
         first, second = answers(['alpha'])
         self.assert_unavailable(MEMBERS[:1], first, second)
 
-    def test_same_provider_is_unavailable(self):
-        members = [MEMBERS[0], dict(MEMBERS[1], provider=MEMBERS[0]['provider'])]
+    def test_same_maker_is_unavailable(self):
+        members = [MEMBERS[0], dict(MEMBERS[1], model='openai/stub-beta')]
         first, second = answers(m['name'] for m in members)
         self.assert_unavailable(members, first, second)
 

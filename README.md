@@ -836,16 +836,23 @@ author on `gpt-6.2-astra`, a seat pinned to `gpt-6-astra` and resolved to
 `gpt-6.1-astra`) is not excluded. Seat names are labels and keep their names when the model
 moves.
 
-**Two contrasting models for a plan, never escalated.** A third adds agreement,
+**Two contrasting model makers for a plan, never escalated.** A maker is the
+vendor segment of the model id when present, otherwise the provider. Two makers
+can use one gateway; one maker cannot fill both seats. A third adds agreement,
 not insight. That is measured, not assumed. `reviewers.json` carries routing
 only (endpoint, model id, effort, profile membership) and deliberately no
 quality scores, because a stale ranking is worse than none. Availability is
 probed live by `--list`; a key being set is not availability.
 
-`committee.py` is the other half of this skill: a persistent two-member
+`committee.py` is the other half of this skill: a persistent two- or three-member
 committee that plans, then reviews its own plan's implementation
 (`open`, `ask`, `review`, `show`). It is modelled on Shreshth's
-`paseo-committee`.
+`paseo-committee`. `committee.py open --profile NAME` selects enabled members;
+the default is `committee` for step-backs. `planning` serves the forthcoming
+hanig-project design step separately because authors cannot join their own
+committee. Explicit `--member` overrides the profile. Every profile requires
+two or three members, at least two providers and no authors. Unknown or empty
+profile selections refuse. Later commands retain the session's members.
 
 `PROTOCOL.md` states the full model. The enforceable parts are enforced by
 `review.py` rather than left to memory, because these rules were written down

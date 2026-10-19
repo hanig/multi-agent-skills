@@ -233,8 +233,8 @@ def _plan_panel_error(members):
         return "plan reviewers must be a sequence of seat definitions."
     if any(not isinstance(m, dict)
            or any(not isinstance(m.get(key), str) or not m[key]
-                  for key in ("name", "provider")) for m in members):
-        return "plan reviewers require nonempty name and provider strings."
+                  for key in ("name", "provider", "model")) for m in members):
+        return "plan reviewers require nonempty name, provider and model strings."
     if any(m["provider"] not in providers for m in members):
         return "plan reviewers require supported providers."
     names = ", ".join(sorted(r["name"] for r in members)) or "none"
@@ -243,12 +243,15 @@ def _plan_panel_error(members):
             f"a plan review is exactly TWO contrasting models; this panel "
             f"has {len(members)} ({names}). A third adds agreement, not "
             f"insight, and one is not a committee. Drop --only, or name "
-            f"exactly two reviewers from different providers.")
-    if len({r["provider"] for r in members}) != 2:
+            f"exactly two reviewers from different model makers.")
+    makers = {(r["model"].split("/", 1)[0] or r["provider"]) if "/" in r["model"]
+              else r["provider"] for r in members}
+    if len(makers) != 2:
         return (
-            f"the two plan reviewers ({names}) share a provider, so they "
+            f"the two plan reviewers ({names}) share a model maker, so they "
             f"can share a failure mode. Contrasting means different "
-            f"providers. Name one from each.")
+            f"model makers (the model id's vendor segment, or else its "
+            f"provider). Name one from each.")
     if len({r["name"] for r in members}) != 2:
         return f"the two plan reviewers ({names}) must have unique seat names."
     return None
