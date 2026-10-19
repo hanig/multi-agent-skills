@@ -234,6 +234,29 @@ class ProviderStopTests(unittest.TestCase):
             h.assert_snapshot(h.record())
             self.assertTrue(h.work.exists())
 
+    def test_deadline_does_not_hide_content_filter(self):
+        for second in (False, True):
+            with self.subTest(second=second), H.scenario() as h:
+                h.unit["deadline_s"] = 315
+                h.change_plan()
+                state = S.load_state(h.sd)
+                state["units"]["code"]["allocated_at"] = 1000
+                S.U.write_json(h.sd / S.STATE_FILE, state)
+                if second:
+                    h.ready()
+                    h.cli(change_at=2, fresh_message=P.CONTENT_FILTER, delay_charge=True)
+                else:
+                    h.cli(now=1330, message=P.CONTENT_FILTER)
+                h.failed()
+                self.assertTrue(h.work.exists())
+                self.assertEqual(stop_record(h)["reason"], "content_filter")
+                self.assertEqual(stop_record(h)["phase"], "retained")
+                if second:
+                    self.assertEqual(h.count(), 1)
+                    h.assert_snapshot(h.record())
+                else:
+                    self.assertNotIn("provider_resumes", h.us())
+
     def test_gate_refuses_protocol_and_permission_problems(self):
         for cfg in ({"permissions": ["pending"]}, {"prefix": "[User] "}):
             with self.subTest(cfg=cfg), H.scenario(message=P.CONTENT_FILTER, **cfg) as h:
