@@ -212,7 +212,8 @@ class ProviderStopTests(unittest.TestCase):
             self.assertTrue(S.acquire_lease(h.sd)[0])
             h.addCleanup(S.release_lease, h.sd)
             state = S.load_state(h.sd)
-            changed = dict(h.plan, name="changed-plan")
+            changed = copy.deepcopy(h.plan)
+            changed["units"][0]["provider_resume"]["max"] = 1
             report, _, _ = S.advance(changed, state, str(h.sd), str(h.tmp / "runs"), False, max_new=0)
             self.assertIn("REFUSING", "\n".join(report))
             self.assert_report("\n".join(report), h)
