@@ -29,6 +29,18 @@ REASON = "The failure needs a manual observation."
 OPTIONAL_FIELDS = ({}, {"counterexample": COUNTEREXAMPLE},
                    {"non_executable_reason": REASON},
                    {"counterexample": COUNTEREXAMPLE, "non_executable_reason": REASON})
+EXAMPLE_PLACEHOLDERS = (None, {}, {"setup": ""},
+                        dict.fromkeys(COUNTEREXAMPLE, None),
+                        dict.fromkeys(COUNTEREXAMPLE, " \t\n"),
+                        {"setup": None, "input": "", "expected": " \t", "observed": "\n"})
+REASON_PLACEHOLDERS = (None, "", " \t\n")
+PLACEHOLDER_FIELDS = tuple(
+    {"counterexample": example, "non_executable_reason": reason}
+    for example in EXAMPLE_PLACEHOLDERS for reason in REASON_PLACEHOLDERS
+) + tuple({"counterexample": example, "non_executable_reason": REASON}
+          for example in EXAMPLE_PLACEHOLDERS
+) + tuple({"counterexample": COUNTEREXAMPLE, "non_executable_reason": reason}
+          for reason in REASON_PLACEHOLDERS)
 
 
 class TestCounterexampleSchema(unittest.TestCase):
@@ -50,12 +62,28 @@ class TestCounterexampleSchema(unittest.TestCase):
         self.assertIsNone(review.verdict_schema_error(verdict))
         self.assertTrue(review.is_confirmed(verdict["findings"][0]))
 
+    def test_placeholders_validate_in_both_kinds_without_mutating_fields(self):
+        plan = review._load_plan_review()
+        for fields in PLACEHOLDER_FIELDS:
+            for severity in ("critical", "major", "minor"):
+                for kind, validate in (("implementation", review.verdict_schema_error),
+                                       ("plan", lambda v: plan._plan_schema_error(v, []))):
+                    with self.subTest(fields=fields, severity=severity, kind=kind):
+                        verdict = self.verdict(copy.deepcopy(fields))
+                        verdict["findings"][0]["severity"] = severity
+                        before = copy.deepcopy(verdict)
+                        self.assertIsNone(validate(verdict))
+                        self.assertEqual(verdict, before)
+
     def test_malformed_counterexample_is_refused(self):
-        malformed = [None, [], "text", 7, False, {}]
+        malformed = [[], "text", "", " \t\n", 7, False,
+                     {"extra": "non-empty"}, {"setup": []}, {"setup": False}]
         for field in COUNTEREXAMPLE:
             missing = dict(COUNTEREXAMPLE)
             del missing[field]
             malformed.append(missing)
+            malformed.append({field: "one supplied value"})
+            malformed.append(dict.fromkeys(COUNTEREXAMPLE, "") | {field: "supplied"})
             for value in ("", " \t\n", None, [], {}, 7, False):
                 malformed.append(dict(COUNTEREXAMPLE, **{field: value}))
         for example in malformed:
@@ -65,16 +93,22 @@ class TestCounterexampleSchema(unittest.TestCase):
                                             "non_executable_reason": REASON})
                     verdict["findings"][0]["severity"] = severity
                     self.assertIn("counterexample", review.verdict_schema_error(verdict))
+                    self.assertIn("counterexample", review._load_plan_review()._plan_schema_error(
+                        verdict, []))
 
     def test_malformed_non_executable_reason_is_refused(self):
-        for reason in ("", " \t\n", None, [], {}, 7, False):
-            with self.subTest(reason=reason):
-                self.assertIn("non_executable_reason", review.verdict_schema_error(
-                    self.verdict({"non_executable_reason": reason,
-                                  "counterexample": COUNTEREXAMPLE})))
+        for reason in ([], {}, 7, False):
+            for severity in ("critical", "major", "minor"):
+                with self.subTest(reason=reason, severity=severity):
+                    verdict = self.verdict({"non_executable_reason": reason,
+                                            "counterexample": COUNTEREXAMPLE})
+                    verdict["findings"][0]["severity"] = severity
+                    self.assertIn("non_executable_reason", review.verdict_schema_error(verdict))
+                    self.assertIn("non_executable_reason", review._load_plan_review()._plan_schema_error(
+                        verdict, []))
 
     def test_confirmation_filter_ignores_optional_fields(self):
-        for fields in OPTIONAL_FIELDS:
+        for fields in OPTIONAL_FIELDS + PLACEHOLDER_FIELDS:
             for severity in ("critical", "major", "minor"):
                 for confidence in ("high", "medium", "low"):
                     for in_scope in (True, False):
@@ -122,6 +156,7 @@ class TestReproductionEvidence(unittest.TestCase):
                    "profiles": ["standard"], "enabled": True}
                   for provider in ("openai", "openrouter")]
         captured = []
+        self.system_prompts = []
         verdict = json.dumps({
             "verdict": "refuted" if findings else "upheld",
             "findings": list(findings),
@@ -134,9 +169,11 @@ class TestReproductionEvidence(unittest.TestCase):
         def transport(_url, payload, *_args, **_kwargs):
             if "input" in payload:
                 captured.append(payload["input"])
+                self.system_prompts.append(payload["input"].split("\n\n---\n\n", 1)[0])
                 return {"output": [{"type": "message", "content": [
                     {"type": "output_text", "text": verdict}]}]}, None
             captured.append(payload["messages"][1]["content"])
+            self.system_prompts.append(payload["messages"][0]["content"])
             return {"choices": [{"message": {"content": verdict},
                                  "finish_reason": "stop"}]}, None
 
@@ -265,11 +302,14 @@ class TestReproductionEvidence(unittest.TestCase):
         self.assertFalse(self.marker.exists())
 
     def test_counterexamples_render_and_do_not_change_verdict_or_execute(self):
-        for severity in ("critical", "major"):
-            for fields in OPTIONAL_FIELDS:
+        for severity in ("critical", "major", "minor"):
+            for fields in OPTIONAL_FIELDS + PLACEHOLDER_FIELDS:
                 with self.subTest(severity=severity, fields=fields):
                     fields = copy.deepcopy(fields)
-                    if "counterexample" in fields:
+                    has_example = fields.get("counterexample") == COUNTEREXAMPLE
+                    has_reason = fields.get("non_executable_reason") == REASON
+                    confirmed = severity != "minor"
+                    if has_example:
                         fields["counterexample"]["input"] = (
                             "touch " + shlex.quote(str(self.marker)))
                     finding = dict(severity=severity, confidence="high", file="candidate.py",
@@ -278,23 +318,40 @@ class TestReproductionEvidence(unittest.TestCase):
                     for json_output in (True, False):
                         code, error, prompts, output = self.invoke(
                             self.entry, findings=[finding], json_output=json_output)
-                        self.assertEqual(code, 1, error)
+                        self.assertEqual(code, 1 if confirmed else 3, error)
                         self.assertEqual(len(prompts), 2)
                         self.assertFalse(self.marker.exists(), "counterexample executed")
                         if json_output:
                             report = json.loads(output)
-                            self.assertEqual(report["state"], "REVIEW_FAIL")
+                            self.assertEqual(report["state"],
+                                             "REVIEW_FAIL" if confirmed else "REVIEW_PARTIAL")
                             for result in report["results"]:
                                 self.assertEqual(result["findings"], [finding])
+                                self.assertFalse(result["retried"])
+                            self.assertEqual(len(report["confirmed_findings"]), 2 if confirmed else 0)
                             for confirmed in report["confirmed_findings"]:
                                 self.assertEqual({k: v for k, v in confirmed.items()
                                                   if k != "reviewer"}, finding)
                         else:
-                            self.assertEqual("no counterexample" in output, not fields)
-                            for field, value in fields.get("counterexample", {}).items():
-                                self.assertIn(field + ": " + value, output)
-                            if "non_executable_reason" in fields:
+                            self.assertEqual(output.count("no counterexample"),
+                                             2 if confirmed and not (has_example or has_reason) else 0)
+                            self.assertEqual("      counterexample:" in output,
+                                             confirmed and has_example)
+                            self.assertEqual("      non_executable_reason:" in output,
+                                             confirmed and has_reason)
+                            if confirmed and has_example:
+                                for field, value in fields["counterexample"].items():
+                                    self.assertIn(field + ": " + value, output)
+                            if confirmed and has_reason:
                                 self.assertIn("non_executable_reason: " + REASON, output)
+
+    def test_delivered_prompt_asks_to_omit_unused_field_without_dropping_findings(self):
+        code, error, _, _ = self.invoke(self.entry)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(len(self.system_prompts), 2)
+        for prompt in self.system_prompts:
+            self.assertIn("omit the field you do\nnot use rather than send an empty value", prompt)
+            self.assertIn("optional in the schema; do not drop or soften a finding that lacks them", prompt)
 
     def test_new_evidence_fields_keep_existing_contamination_removal(self):
         offender = ("(re-run to capture full finding text; the prior round returned "

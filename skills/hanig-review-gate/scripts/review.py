@@ -448,7 +448,9 @@ admissible, defect-free work does refute the claim.
 For every critical or major finding, provide a "counterexample" describing a
 check the worker can run: "setup", "input", "expected", and "observed", each a
 non-empty string. If none can be written, give a non-empty
-"non_executable_reason" instead. Both fields may be supplied. These fields are
+"non_executable_reason" instead. These are alternatives: omit the field you do
+not use rather than send an empty value. Both fields may be supplied when both
+contain evidence. These fields are
 optional in the schema; do not drop or soften a finding that lacks them.
 The gate never executes counterexamples; the worker reproduces them.
 
@@ -466,8 +468,7 @@ Reply with ONLY a JSON object, no prose or code fences:
      "in_scope": true|false,
      "counterexample": {"setup": "required environment/state",
                         "input": "command or input the worker can run",
-                        "expected": "correct result", "observed": "failure result"},
-     "non_executable_reason": "why no executable check can be written"}
+                        "expected": "correct result", "observed": "failure result"}}
   ],
   "claims": [
     {"claim_index": 0, "claim": "verbatim claim",
@@ -1539,6 +1540,24 @@ def unassessed_claims(returned, asserted):
     return missing
 
 
+def empty_evidence_value(value):
+    """Recognize only null and blank strings, without changing stored bytes."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def counterexample_placeholder(value):
+    """An empty object or one containing only blank/null values is absent."""
+    return value is None or (isinstance(value, dict)
+                             and all(empty_evidence_value(v) for v in value.values()))
+
+
+def finding_for_text(finding):
+    """Omit optional placeholders from a display copy, never the audit value."""
+    return {key: value for key, value in finding.items()
+            if not ((key == "counterexample" and counterexample_placeholder(value))
+                    or (key == "non_executable_reason" and empty_evidence_value(value)))}
+
+
 def verdict_schema_error(v, require_claims=0, asserted=None):
     """Reject anything that is not actually a review.
 
@@ -1570,18 +1589,17 @@ def verdict_schema_error(v, require_claims=0, asserted=None):
                 (not isinstance(scen, str) or not scen.strip()):
             return (f"{sev} finding has no failure_scenario: "
                     f"{str(f.get('summary'))[:60]!r}")
-        if "counterexample" in f:
-            example = f["counterexample"]
+        example = f.get("counterexample")
+        if not counterexample_placeholder(example):
             if not isinstance(example, dict):
                 return "finding counterexample must be an object"
             for field in ("setup", "input", "expected", "observed"):
                 value = example.get(field)
                 if not isinstance(value, str) or not value.strip():
                     return f"finding counterexample.{field} must be a non-empty string"
-        if "non_executable_reason" in f:
-            reason = f["non_executable_reason"]
-            if not isinstance(reason, str) or not reason.strip():
-                return "finding non_executable_reason must be a non-empty string"
+        reason = f.get("non_executable_reason")
+        if reason is not None and not isinstance(reason, str):
+            return "finding non_executable_reason must be a string or null"
     for c in v.get("claims") or []:
         if not isinstance(c, dict):
             return "claims must contain objects"
@@ -3066,12 +3084,23 @@ def cmd_plan_review(args, members, prompt, label, truncated, profile_reason, exc
         for name, member in exchange["members"].items():
             for answer in member["answers"]:
                 print(redact(f"\n{name} TURN {answer['turn']} usage={answer['usage']}"))
-                print(redact(answer["raw"] or answer["error"] or "[no reply]"))
+                raw = answer["raw"] or answer["error"] or "[no reply]"
+                verdict = answer["verdict"]
+                if isinstance(verdict, dict) and isinstance(verdict.get("findings"), list):
+                    displayed = dict(verdict, findings=[finding_for_text(f) if isinstance(f, dict) else f
+                                                       for f in verdict["findings"]])
+                    if displayed != verdict:
+                        raw = json.dumps(displayed, indent=2)
+                print(redact(raw))
                 if answer["error"]:
                     print(redact(f"ERROR: {answer['error']}"))
         print("\nJOINT TABLE:")
         for row in exchange["joint_table"]:
-            print(redact(json.dumps(row)))
+            finding = finding_for_text(row["finding"])
+            print(redact(json.dumps(dict(row, finding=finding))))
+            if (is_confirmed(finding) and "counterexample" not in finding
+                    and "non_executable_reason" not in finding):
+                print("      no counterexample")
         for entry in unavailable:
             print(redact(f"{entry['name']}: {entry['reason']}"))
         print(f"\n{state} — two seats, two turns; a pass is not proof.")
@@ -3566,13 +3595,15 @@ def _main():
                 print(f"  [{f['reviewer']}] {f.get('severity','?').upper()} {loc}")
                 print(redact(f"      {f.get('summary','')}"))
                 print(redact(f"      -> {f.get('failure_scenario','')}"))
-                if "counterexample" in f:
+                has_example = not counterexample_placeholder(f.get("counterexample"))
+                has_reason = not empty_evidence_value(f.get("non_executable_reason"))
+                if has_example:
                     print("      counterexample:")
                     for field in ("setup", "input", "expected", "observed"):
                         print(redact(f"        {field}: {f['counterexample'][field]}"))
-                if "non_executable_reason" in f:
+                if has_reason:
                     print(redact(f"      non_executable_reason: {f['non_executable_reason']}"))
-                elif "counterexample" not in f:
+                elif not has_example:
                     print("      no counterexample")
 
         if out_of_scope:
