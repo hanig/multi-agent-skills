@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare local recovery material, without publication or cleanup (Python 3.8+)."""
+"""Local recovery preparation (Python 3.8+)."""
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -115,7 +115,7 @@ def stopped(agent):
 
 
 def content(work, base):
-    """Inspect the filesystem too: Git can silently omit special entries."""
+    """Detect entries Git can silently omit."""
     tracked = set()
     for row in git(work, "ls-files", "--stage", "-z").split("\0"):
         if not row:
@@ -135,14 +135,14 @@ def content(work, base):
                 continue
             relative = path.relative_to(work).as_posix()
             mode = path.lstat().st_mode
-            entries.append((relative, mode))
+            nested = stat.S_ISDIR(mode) and ((path / ".git").exists() or (
+                (path / "HEAD").is_file() and (path / "objects").is_dir()
+                and (path / "refs").is_dir()))
+            entries.append((relative, mode, nested))
             if stat.S_ISDIR(mode):
-                if (path / ".git").exists() or ((path / "HEAD").is_file()
-                        and (path / "objects").is_dir() and (path / "refs").is_dir()):
-                    raise Refusal("unsupported nested Git repository: " + repr(relative))
                 walk(path)
     walk(Path(work))
-    untracked = [p for p, _ in entries if p not in tracked]
+    untracked = [p for p, _, _ in entries if p not in tracked]
     ignored = set()
     if untracked:
         rc, out, err = run(["git", "-C", str(work), "check-ignore", "-z", "--stdin"],
@@ -150,10 +150,12 @@ def content(work, base):
         if rc not in (0, 1):
             raise Refusal("cannot classify ignored paths: " + err)
         ignored = set(out.rstrip("\0").split("\0")) if out else set()
-    for path, mode in entries:
+    for path, mode, nested in entries:
         if path in ignored:
             if not stat.S_ISDIR(mode):
                 print(repr(path) + ": omitted (ignored; kept only in the pre-removal snapshot)")
+        elif nested:
+            raise Refusal("unsupported nested Git repository: " + repr(path))
         elif not (stat.S_ISREG(mode) or stat.S_ISLNK(mode) or stat.S_ISDIR(mode)):
             raise Refusal("unsupported special file: " + repr(path))
 
@@ -179,7 +181,7 @@ def prepare(args, plan):
         if (any(receipt.get(k) != v for k, v in binding.items())
                 or receipt.get("publication_digest") != digest(payload)
                 or not receipt.get("prepared_at")):
-            raise Refusal("prepared receipt disagrees with retained binding/digest")
+            raise Refusal("receipt disagrees with binding/digest")
         expected = oid(receipt.get("prepared_head"))
         identity_facts = dict(facts, branch="HEAD")
     else:

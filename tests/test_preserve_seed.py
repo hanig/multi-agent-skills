@@ -11,13 +11,8 @@ import unittest
 
 from tests import test_attempt_worktrees as F
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skills/hanig-swarm/scripts"
-sys.path.insert(0, str(SCRIPTS))
-import swarm as S
-import swarm_state as SS
-
-OPERATOR = ROOT / "skills/hanig-orchestrate/scripts/preserve_seed.py"
+S, SS = F.S, F.S.SS
+OPERATOR = F.ROOT / "skills/hanig-orchestrate/scripts/preserve_seed.py"
 
 
 class TestPreserveSeed(unittest.TestCase):
@@ -105,7 +100,10 @@ class TestPreserveSeed(unittest.TestCase):
         (self.work / "mode").chmod(0o755)
         (self.work / "new").write_text("new\n")
         (self.work / "link").symlink_to("edit")
-        (self.work / ".gitignore").write_text("*.ignored\n")
+        (self.work / ".gitignore").write_text("*.ignored\ncache/\n")
+        nested = self.work / "cache" / "nested"
+        nested.mkdir(parents=True)
+        self.git(nested, "init", "-q")
         (self.work / "tracked.ignored").write_text("tracked change\n")
         (self.work / "secret.ignored").write_text("fixture only\n")
 
@@ -133,6 +131,7 @@ class TestPreserveSeed(unittest.TestCase):
         files = self.git(self.work, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
         self.assertNotIn("deleted", files)
         self.assertNotIn("secret.ignored", files)
+        self.assertNotIn("cache/nested", files)
         self.assertTrue(self.git(self.work, "ls-tree", "HEAD", "mode").startswith("100755"))
         self.assertTrue(self.git(self.work, "ls-tree", "HEAD", "link").startswith("120000"))
         self.eq(self.git(self.work, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
