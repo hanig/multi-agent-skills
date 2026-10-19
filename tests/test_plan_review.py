@@ -126,6 +126,26 @@ class TestPlanExchange(unittest.TestCase):
         self.assertEqual(len(records), 1)
         return records[0]
 
+    def test_plan_findings_accept_counterexample_fields_or_neither(self):
+        example = {"setup": "records B,A", "input": "read records",
+                   "expected": "B,A", "observed": "A,B"}
+        reason = "Design has no executable implementation yet."
+        for fields in ({}, {"counterexample": example}, {"non_executable_reason": reason},
+                       {"counterexample": example, "non_executable_reason": reason}):
+            with self.subTest(fields=fields):
+                self.first, self.second = answers()
+                self.finding(response='concur', kept=True)
+                finding = dict(FINDING, **fields)
+                self.first['alpha']['findings'] = [finding]
+                self.second['beta']['findings'] = [finding]
+                report = self.run_checked('PLAN_FAIL')
+                record = self.journal(report)
+                self.assertIsNone(record['round'])
+                for result in record['results']:
+                    for stored in result['findings']:
+                        for field, value in finding.items():
+                            self.assertEqual(stored[field], value)
+
     def assert_direct_panel_refused(self, members):
         args = SimpleNamespace(claim=[CLAIM], timeout=1, json=True,
                                panel_policy={}, input_redactions=[])

@@ -89,6 +89,22 @@ class TestAdjudication(unittest.TestCase):
             results=[{"name": "independent", "findings": []}], reviewed_head=head)
         return path
 
+    def test_journal_preserves_counterexample_fields_without_changing_identity(self):
+        example = {"setup": " fixture\nsecond line ", "input": "probe missing input",
+                   "expected": "explicit error", "observed": "empty result"}
+        reason = " Requires manual observation. "
+        for fields in ({}, {"counterexample": example}, {"non_executable_reason": reason},
+                       {"counterexample": example, "non_executable_reason": reason}):
+            with self.subTest(fields=fields):
+                finding = dict(self.finding, **fields)
+                path = self.seed(finding=finding)
+                record = json.loads(path.read_text())
+                stored = record["results"][0]["findings"][0]
+                self.assertEqual(stored, dict(finding, location="sample.py:7", confirmed=True,
+                                              finding_digest=self.digest))
+                self.assertEqual(record["round"], 1)
+                self.assertEqual(record["verdict"], "REVIEW_FAIL")
+
     def test_clean_head_ignores_malformed_other_head_regardless_of_recency(self):
         for other_head in ("2" * 40, "ab" * 32):
             for malformed_first in (False, True):
