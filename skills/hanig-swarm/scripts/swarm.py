@@ -75,6 +75,7 @@ import swarm_dispatch as SD
 import swarm_continue as SC
 import swarm_provider_resume as SPRS
 import swarm_authors as SA
+import swarm_provider_stops as SPS
 from swarm_dispatch import (
     _allocate, _dep_env, _isolation_submission, _record_isolation_facts,
     _clear_isolation_marker, _slurm_exit_trap, _bind,
@@ -2009,6 +2010,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     U.SACCT_UNAVAILABLE = False
     units = {u["id"]: u for u in SPR._units_with_canary(plan)}
     report, dispatched, halted = [], 0, state.get("halted")
+    SPS.report_retained(state, report)
     advance_observed_at = time.time()
     dispatch_targets = {}
     dispatch_refusal = None
@@ -2031,7 +2033,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
                           and SS._occupies_live_resources(
                               units[uid], SS._unit_state(state, uid))))
         if real:
-            return ([f"REFUSING to dry-run against a state directory that "
+            return (report + [f"REFUSING to dry-run against a state directory that "
                      f"holds REAL attempts ({', '.join(real)}).",
                      f"A dry run records placeholder job ids, and a unit that "
                      f"has one can never be judged or re-dispatched, so this "
@@ -2132,7 +2134,7 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
         # re-dispatches DONE units and duplicates live jobs: a refusal whose
         # named action is worse than the fault. Raising a budget ceiling is a
         # DESIGNED human intervention, so there must be a way to say yes.
-        return ([f"REFUSING to advance: the plan file changed while units are "
+        return (report + [f"REFUSING to advance: the plan file changed while units are "
                  f"live (digest {state['plan_digest'][:12]} -> {digest[:12]}). "
                  f"A mid-flight edit redefines what the recorded attempts were "
                  f"for.",
@@ -2170,7 +2172,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
     # scheduler. Ask before dispatching anything else.
     for uid, u in sorted(units.items()):
         us = SS._unit_state(state, uid)
-        if us.get("state") in SS.OPERATOR_TERMINAL_STATES:
+        if (us.get("state") in SS.OPERATOR_TERMINAL_STATES
+                or SPS.retained(us, us.get("attempt_dir"))):
             continue
         if dry_run or not us["attempt_dir"]:
             continue
@@ -2396,7 +2399,8 @@ def advance(plan, state, state_dir, root, dry_run, max_new=None,
             SS.save_state(state_dir, state)
             return report, dispatched, state["halted"]
         us = SS._unit_state(state, uid)
-        if us.get("state") in SS.OPERATOR_TERMINAL_STATES:
+        if (us.get("state") in SS.OPERATOR_TERMINAL_STATES
+                or SPS.retained(us, us.get("attempt_dir"))):
             continue
         if not us["attempt_dir"]:
             continue
@@ -3756,6 +3760,10 @@ def cmd_stop_unit(args):
                              args.unit, us, units[args.unit])
         print(f"{args.unit}: {target} -- {args.reason}" +
               (f" (successor: {successor})" if successor else ""))
+        retention_report = []
+        SPS.report_retained(state, retention_report, args.unit)
+        for line in retention_report:
+            print(line)
         return EXIT_OK
     finally:
         SS.release_lease(args.state_dir)
@@ -4935,9 +4943,15 @@ def cmd_status(args):
     state = SS.load_state(args.state_dir)
     rep = status_report(plan, state, args.state_dir)
 
+    retention_report = []
+    SPS.report_retained(state, retention_report)
+    if retention_report:
+        rep["retained_provider_stops"] = retention_report
     if args.json:
         print(json.dumps(rep, indent=2, sort_keys=True))
     else:
+        for line in retention_report:
+            print(line)
         rows = rep["units"]
         w = max([len(r["id"]) for r in rows] + [4])
         print(f"  observed at {rep['observed_at']}")

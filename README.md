@@ -1029,6 +1029,19 @@ A plan is JSON with a `units` list. Fields the coordinator reads:
 | `provider_resume` | `{"max": N}`: code, int 0..3, default off; same attempt; 5 minute initial / 15 minute later backoff |
 | `pool`, `gpu_hours`, `env` | declared resource facts |
 
+For code units with provider resumes enabled, an eligible content-filter stop
+or exhausted resume budget leaves the outcome FAILED and retains the worktree.
+Coordinator state records `attempt_provider_stops[attempt]`, including the
+anchored branch, `worktree_path`, `head_at_retention`, observation time, reason
+and `refs/heads/recovery/<unit>-<attempt>`, with phase `retained`. A missing or
+inconsistent checkout has a null head and a `retention_problem` diagnostic.
+This record is separate from `provider_resumes`: content filters create no
+resume ledger, and any earlier resume charges stay intact. Advance, status and
+operator dispositions name retained paths and refs, including historical
+attempts. Retention alone does not occupy execution slots or output claims and a
+plan edit cannot cancel it. Publication and release are not implemented here;
+these worktrees consume disk indefinitely until that operator workflow exists.
+
 Provider resumes send at most `max` per attempt without delivery confirmation; crashes may lose resumes, and persistent eligible errors spend budget.
 
 Every `code` unit runs in a coordinator-created linked worktree at its anchored

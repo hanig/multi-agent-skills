@@ -7,6 +7,7 @@ import paseo_io as PIO
 import recovery as R
 import swarm_evidence as SE
 import swarm_state as SS
+import swarm_provider_stops as SPS
 import unit as U
 import worktree as W
 
@@ -51,8 +52,8 @@ def _eligible(agent):
     if not isinstance(message, str):
         return None
     message = message.lower()
-    if "flagged for possible cybersecurity risk" in message:
-        return None
+    if SPS.CONTENT_FILTER in message:
+        return SPS.CONTENT_FILTER
     return next((s for s in RETRYABLE_PROVIDER_MESSAGES if s in message), None)
 
 
@@ -74,10 +75,13 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     limit = (u.get("provider_resume") or {}).get("max", 0)
     if not limit or u.get("kind") != "code" or not us.get("job_id"):
         return False
-    if SS._deadline_exceeded(u, us, state, uid):
-        return False
     matched = _eligible(us["job_id"])
     if not matched:
+        return False
+    if matched == SPS.CONTENT_FILTER:
+        SPS.record_stop(state_dir, state, uid, us, "content_filter", matched, report)
+        return False
+    if SS._deadline_exceeded(u, us, state, uid):
         return False
     now = time.time()
     attempt = Path(us["attempt_dir"]).name
@@ -89,6 +93,7 @@ def maybe_resume(state_dir, uid, u, us, report, state):
         records[attempt] = entry
     if entry["resumes_attempted"] >= limit:
         report.append(f"{uid}: spent {entry['resumes_attempted']}/{limit} provider resumes")
+        SPS.record_stop(state_dir, state, uid, us, "provider_resume_exhausted", matched, report)
         return False
     if entry["next_not_before"] is None:
         report.append(f"{uid}: resume backoff unknown; slot retained")
@@ -118,7 +123,12 @@ def maybe_resume(state_dir, uid, u, us, report, state):
     finally:
         os.close(descriptor)
     matched = _eligible(us["job_id"])
-    if not matched or SS._deadline_exceeded(u, us, state, uid):
+    if not matched:
+        return False
+    if matched == SPS.CONTENT_FILTER:
+        SPS.record_stop(state_dir, state, uid, us, "content_filter", matched, report)
+        return False
+    if SS._deadline_exceeded(u, us, state, uid):
         return False
     entry["fingerprint"] = {"message_class": matched, "observed_at": _utc(time.time())}
     rc, out, err = U.run(["paseo", "send", str(us["job_id"]), "--no-wait", RESUME_PROMPT], timeout=120)
