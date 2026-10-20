@@ -246,6 +246,20 @@ class TestPreserveSeed(Harness):
     self.save()
     self.call(expected=2)
 
+  def test_retry_finishes_sync(self):
+    real, calls = P.os.fsync, []
+    def sync(fd):
+      calls.append(fd)
+      if len(calls) == 3:
+        raise OSError("interrupted directory sync")
+      return real(fd)
+    with mock.patch.object(P.os, "fsync", side_effect=sync):
+      self.call(expected=2)
+    self.assertTrue(self.receipt.exists())
+    with mock.patch.object(P.os, "fsync", wraps=real) as retry:
+      self.call()
+    self.assertGreaterEqual(retry.call_count, 5)
+
   def test_durable_ancestors(self):
     seen = set()
     original = P.os.open
