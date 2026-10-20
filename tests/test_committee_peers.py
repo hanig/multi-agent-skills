@@ -166,6 +166,23 @@ class TestCommitteePeers(unittest.TestCase):
         with self.subTest(consumer="decision input"):
             self.assertEqual(inputs["latest_prompt"], expected)
 
+    def test_successful_no_reply_prefix_is_delivered_verbatim(self):
+        reply = "[no reply: revised design]\nUse the revised layout."
+        self.session["members"]["beta"]["history"] = []
+
+        def successful_reply(member, history, prompt, timeout, **kwargs):
+            return (reply if member["name"] == "beta" else
+                    self.replies[member["name"]]), None, None
+
+        with mock.patch.object(committee, "_ask_member", side_effect=successful_reply):
+            committee.run_turn(self.roster, self.session, "Design", 1, "ask")
+        self.assertNotIn("errors", self.session["members"]["beta"])
+        prompts = self.invoke()
+        for recipient in ("alpha", "gamma"):
+            with self.subTest(recipient=recipient):
+                self.assertIn("Peer beta's latest reply", prompts[recipient])
+                self.assertIn(reply, prompts[recipient])
+
 
 if __name__ == "__main__":
     unittest.main()
