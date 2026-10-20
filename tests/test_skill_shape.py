@@ -933,9 +933,8 @@ class TestAuthoredSkillShape(unittest.TestCase):
         reference = (SKILLS / "hanig-orchestrate" / "references" /
                      "dispatch-preamble.md").read_text(encoding="utf-8")
         scoped = reference.split("## Scoped tests\n", 1)[1].split("\n## ", 1)[0]
-        bullet = next((item for item in re.split(r"(?m)(?=^- )", scoped)
-                       if re.match(r"- Always\s+run\s+the\s+guards\s+that\s+scan\s+"
-                                   r"every\s+test\s+file\b", item)), "")
+        bullet = next((item for item in re.split(r"(?m)(?=^[ \t]*[-+*][ \t]+)", scoped)
+                       if "`tests.test_review_watchdog`" in item), "")
         for module in (
                 "tests.test_review_watchdog", "tests.test_project",
                 "tests.test_docs_truth", "tests.test_swarm_code_launch",
@@ -948,21 +947,26 @@ class TestAuthoredSkillShape(unittest.TestCase):
                 self.assertIn("`" + module + "`", bullet)
         self.assertIn("<!-- declaration: delegation.preamble -->", bullet)
 
-    def test_dispatch_preamble_guard_check_accepts_wrapped_bullet(self):
+    def test_dispatch_preamble_guard_check_accepts_equivalent_bullets(self):
         reference = (SKILLS / "hanig-orchestrate" / "references" /
                      "dispatch-preamble.md").read_text(encoding="utf-8")
-        start = reference.index("- Always")
-        marker_end = reference.index("-->", start) + 3
-        bullet = reference[start:marker_end]
+        scoped = reference.split("## Scoped tests\n", 1)[1].split("\n## ", 1)[0]
+        bullet = next(item for item in re.split(r"(?m)(?=^[ \t]*[-+*][ \t]+)", scoped)
+                      if "`tests.test_review_watchdog`" in item)
         prose, marker = bullet.split(" <!--", 1)
+        variants = [
+            ("reworded", bullet.replace("every test file", "all test files")),
+            ("padded", bullet.replace("- ", "-  ", 1)),
+        ]
         for width in (32, 88):
-            with self.subTest(width=width):
-                wrapped = textwrap.fill(
-                    prose, width=width, subsequent_indent="  ",
-                    break_long_words=False, break_on_hyphens=False)
-                wrapped += " <!--" + marker
+            wrapped = textwrap.fill(
+                prose, width=width, subsequent_indent="  ",
+                break_long_words=False, break_on_hyphens=False)
+            variants.append(("wrapped-%d" % width, wrapped + " <!--" + marker))
+        for label, variant in variants:
+            with self.subTest(layout=label):
                 with mock.patch.object(Path, "read_text", return_value=
-                                       reference.replace(bullet, wrapped)):
+                                       reference.replace(bullet, variant)):
                     self.test_dispatch_preamble_names_tree_wide_test_guards()
 
     def test_counterexample_guidance_requires_inspection_before_reproduction(self):
