@@ -669,14 +669,38 @@ class TestReviewAndPushBeforeAgentCreation(unittest.TestCase):
     def test_missing_push_clause_refuses_before_agent_creation(self):
         self.assert_missing_clause_refuses(PUSH_CLAUSE, "push discipline")
 
+    def test_author_exclusion_required_in_every_branch(self):
+        real_protocol = SCP._code_completion_protocol
+        for current, history in (
+                (None, []), ("p/current", []),
+                (None, [{"unit": "prior", "attempt": "a0", "identity": "p/old"}]),
+                ("p/current", [{"unit": "prior", "attempt": "a0", "identity": None}])):
+            intent = dict(INTENT, provider=current, author_history=history)
+            with self.subTest(current=current, history=history):
+                prompt = S._dispatch_prompt({"kind": "code"}, intent)
+                self.assertIsNone(S._code_protocol_problem(prompt, intent))
+                with mock.patch.object(SCP, "_code_completion_protocol", side_effect=
+                                       lambda i: real_protocol(i).replace("--author", "")):
+                    broken = S._dispatch_prompt({"kind": "code"}, intent)
+                    self.assertEqual(S._code_protocol_problem(broken, intent),
+                                     "missing author exclusion")
+
     def test_intact_protocol_reaches_agent_creation(self):
+        self.unit["author_history"] = [
+            {"unit": "prior", "attempt": "a0", "identity": "p/prior"},
+            {"unit": "earlier", "attempt": "a1", "identity": "q/earlier"},
+            {"unit": "prior", "attempt": "a2", "identity": "p/prior"}]
         _job, error = self.submit()
         self.assertEqual(len(self.launches), 1, error)
         prompt = self.launches[0][-1]
         self.assertIn(GATE_CLAUSE, prompt)
         self.assertIn(PUSH_CLAUSE, prompt)
         # This is a NEW launch: its default is recorded before agent creation.
-        self.assertIn("--author " + S.DEFAULT_AGENT_PROVIDER, prompt)
+        self.assertIn("Pass --author " + S.DEFAULT_AGENT_PROVIDER +
+                      " --author p/prior --author q/earlier on every review.py "
+                      "or committee.py run so the gate excludes all known "
+                      "contributing models.", prompt)
+        self.assertEqual(prompt.count("--author p/prior"), 1)
 
 
 class TestRecoveryCommandsPreserveContent(unittest.TestCase):

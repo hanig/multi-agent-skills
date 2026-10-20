@@ -153,8 +153,18 @@ class CommitIdentityTests(unittest.TestCase):
             nested, {"unit": "code", "attempt": "a2", "identity": "p/two"}])
         original = json.dumps(intent, sort_keys=True).encode()
         prompt = S._dispatch_prompt(unit, intent)
-        self.assertEqual(prompt, S._dispatch_prompt(
-            dict(unit, author_history=[]), dict(intent, author_history=[])))
+        singleton = ("Pass --author p/current on every review.py or committee.py "
+                     "run so the gate excludes this unit's own model.")
+        inherited = ("Pass --author p/current --author p/override --author p/ancestor "
+                     "--author p/two on every review.py or committee.py run so the "
+                     "gate excludes all known contributing models. "
+                     "The recorded lineage is incomplete: unit 'prior', attempt 'z0'. "
+                     "Report these unknown identities to the coordinator before review; "
+                     "do not guess.")
+        plain_prompt = S._dispatch_prompt(
+            dict(unit, author_history=[]), dict(intent, author_history=[]))
+        self.assertIn(singleton, plain_prompt)
+        self.assertEqual(prompt, plain_prompt.replace(singleton, inherited))
         unit["author_history"] = []
         unit.update(provider="p/changed", model="changed")
         S.save_state(state_dir, state)
@@ -164,6 +174,7 @@ class CommitIdentityTests(unittest.TestCase):
         durable = S.load_state(state_dir)["units"]["code"]
         self.assertEqual(json.dumps(durable["attempt_launch_intents"]["fresh"],
                                     sort_keys=True).encode(), original)
+        self.assertEqual(self.fake.launches[-1][-1], prompt)
         self.assertFalse([key for key in durable if "author" in key])
         facts = durable["attempt_launch_facts"]["fresh"]
         record = json.loads(S.W.launch_record_path(attempt).read_text())
