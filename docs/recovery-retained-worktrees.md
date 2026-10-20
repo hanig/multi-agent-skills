@@ -154,8 +154,12 @@ absolute paths. Run commands individually and inspect each result.
    completion evidence, a review pass, or authority to resume.
 
 8. Under the operator's continuation authority, write `FILE` describing the
-   preserved work, stop reason, review status and remaining task. Choose a fresh
-   unit ID. The existing continue command uses the old unit's **current**
+   preserved work, stop reason, review status and remaining task. Tell the
+   successor to follow its injected seed protocol: fetch the recovery ref and
+   replay the declared range on its new attempt branch, skipping confirmed
+   empty label commits. The coordinator checks reachability but does not replay
+   the work for the agent. Choose a fresh unit ID. The existing continue command
+   uses the old unit's **current**
    recorded attempt for its launch anchors; if recovering an older retained
    attempt, stop for coordinator reconciliation rather than silently borrowing
    a newer attempt's base. Then append the successor using the verified ref:
