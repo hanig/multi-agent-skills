@@ -4,7 +4,7 @@ Date: 2026-10-20
 Title: D5 integration preparation
 Purpose: Record inactive integration contracts.
 
-**D5 is not active.** Production, mandate and declarations are unchanged.
+**D5 is not active.**
 The [manifest](../tests/fixtures/d5/integration-manifest.json) pins parsers and
 source functions; unresolved evidence blocks dependents.
 
