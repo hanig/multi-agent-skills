@@ -1,4 +1,8 @@
-"""Inert D5 store. Keep authority.lock permanent; reread after filesystem errors."""
+"""Inert D5 store. Keep authority.lock permanent; reread after filesystem errors.
+
+No authority decision is made on unknown filesystem state: a lookup or
+durability failure refuses.
+"""
 import fcntl
 import hashlib
 import json
@@ -113,12 +117,24 @@ def _load(path):
 @contextmanager
 def _locked(directory):
     directory = Path(directory)
-    fd = os.open(str(directory / LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield directory
-    finally:
-        os.close(fd)
+        fd = os.open(str(directory / LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield directory
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise AuthorityError("record: filesystem operation failed: {}".format(exc)) from exc
+
+def _present(path, field):
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise AuthorityError(field + ": lookup failed") from exc
+    return True
 
 def _sync_directory(directory):
     fd = os.open(str(directory), os.O_RDONLY)
@@ -138,12 +154,12 @@ def _write(path, raw):
         os.replace(name, str(path))
         _sync_directory(path.parent)
     finally:
-        if os.path.exists(name):
+        if _present(name, "temporary"):
             os.unlink(name)
 
 def _unused_id(directory, record):
-    _require(not os.path.lexists(directory / "superseded" /
-                                (record["grant_id"] + ".json")),
+    _require(not _present(directory / "superseded" /
+                         (record["grant_id"] + ".json"), "grant_id"),
             "grant_id", "already superseded; use a fresh grant ID")
 
 def create(directory, record):
@@ -151,7 +167,7 @@ def create(directory, record):
     validate(record)
     raw = _encode(record)
     with _locked(directory) as directory:
-        _require(not os.path.lexists(directory / RECORD_NAME), "record", "already exists")
+        _require(not _present(directory / RECORD_NAME, "record"), "record", "already exists")
         _unused_id(directory, record)
         _write(directory / RECORD_NAME, raw)
     return _decode(raw)
@@ -208,7 +224,7 @@ def replace(directory, new):
         archive.mkdir(mode=0o700, exist_ok=True)
         _sync_directory(directory)
         predecessor = archive / (old["grant_id"] + ".json")
-        if os.path.lexists(predecessor):
+        if _present(predecessor, "superseded"):
             _require(predecessor.read_bytes() == old_raw, "superseded",
                     "predecessor archive has different bytes")
         _write(predecessor, old_raw)
