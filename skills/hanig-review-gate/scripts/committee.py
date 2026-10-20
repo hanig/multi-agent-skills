@@ -443,7 +443,8 @@ def peer_prompts(session, prompt):
     blocks = {}
     for name, rec in session["members"].items():
         reply = next((h["content"] for h in reversed(rec["history"])
-                      if h["role"] == "assistant"), None)
+                      if h["role"] == "assistant"
+                      and not h["content"].startswith("[no reply:")), None)
         if reply is None:
             continue
         nonce = secrets.token_hex(16)
@@ -473,10 +474,14 @@ def cmd_ask(args):
         else args.prompt
     if not prompt or not prompt.strip():
         die("pass --prompt or --prompt-file")
-    prompt = (peer_prompts(session, prompt.rstrip()) if args.with_peers else
-              prompt.rstrip() + NO_EDITS)
-    results = run_turn(members, session, prompt,
+    original_prompt = prompt.rstrip() + NO_EDITS
+    prompts = (peer_prompts(session, prompt.rstrip()) if args.with_peers else
+               original_prompt)
+    results = run_turn(members, session, prompts,
                        args.timeout, args.label or "ask")
+    if args.with_peers:
+        # Member histories retain delivery; the shared turn stays a string.
+        session["turns"][-1]["prompt"] = original_prompt
     save_session(args.name, session)
     ok = show_results(results)
     return STATES["COMMITTEE_OK"] if ok == len(members) else STATES["UNAVAILABLE"]
