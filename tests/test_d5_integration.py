@@ -137,7 +137,7 @@ class TestD5Integration(unittest.TestCase):
   def test_import_literals(self):
     path = ROOT / 'skills/hanig-orchestrate/scripts/skill_paths.py'
     original = path.read_text()
-    self.reading(path, original + '\ndef help_text(): return "inspect scripts/d5_host.py"\n', 'test_inactive')
+    self.reading(path, original + '\ndef import_module(name): return "inspect scripts/d5_host.py"\nimport_module("d5_host")\n', 'test_inactive')
     for code in ('import d5_host', '__import__("d5_host")',
           'importlib.import_module("d5_host")',
           'importlib.util.spec_from_file_location("host", "scripts/d5_host.py")'):
@@ -154,8 +154,8 @@ class TestD5Integration(unittest.TestCase):
         names = []
         if isinstance(n, (ast.Import, ast.ImportFrom)):
           names = [a.name for a in n.names] + [getattr(n, 'module', '') or '']
-        if isinstance(n, ast.Call) and getattr(n.func, 'id', getattr(n.func, 'attr', '')) in (
-            '__import__', 'import_module', 'spec_from_file_location', 'SourceFileLoader'):
+        if isinstance(n, ast.Call) and ast.unparse(n.func) in (
+            '__import__', 'importlib.import_module', 'importlib.util.spec_from_file_location', 'importlib.machinery.SourceFileLoader'):
           for arg in n.args:
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
               assert arg.value != 'd5_host' and not arg.value.endswith('/d5_host.py'), path
