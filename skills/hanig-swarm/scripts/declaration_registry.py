@@ -86,6 +86,7 @@ CLOSED_DECLARATIONS = {
         limit.base-branch-comparison compatibility.python
     """),
     "hanig-orchestrate": _closed_ids("""
+        code.recovery-seed
         placement.behavior-deciding placement.reference-elaboration
         placement.reference-dialect capability.host-policy
         capability.dependencies paths.skill-directory authority.source
