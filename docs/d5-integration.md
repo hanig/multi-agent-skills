@@ -2,12 +2,11 @@
 Status: live
 Date: 2026-10-20
 Title: D5 integration preparation
-Purpose: Record inactive source and host contracts for bounded lease work.
+Purpose: Record inactive integration contracts.
 
-**D5 is not active.** No production caller, mandate or declaration changes.
-The [manifest](../tests/fixtures/d5/integration-manifest.json) checks parsers and
-source functions; it cannot discover every effect.
-Unresolved verifier internals block dependent work.
+**D5 is not active.** Production, mandate and declarations are unchanged.
+The [manifest](../tests/fixtures/d5/integration-manifest.json) pins parsers and
+source functions, not undiscovered effects. Unresolved evidence blocks dependents.
 
 Locks: coordinator → journal; merge releases before advance reacquires;
 drain then takes project → receipt. Continuation locks the plan. Review releases
@@ -15,20 +14,20 @@ round locking before spend; journals use exclusive directories. Committee has
 no session lock. Verification releases coordinator, takes binding across SSH,
 then reacquires to publish. Remote cleanup: sibling → stage. No lease TTL.
 
-Jobs/agents/engines/watchers survive dispatch; remote requests may finish after
-disconnect. Watchers advance/resume, merge advances/drains, SSH submits/cancels.
-Each retry is a fresh start; helper launch is not blanket permission.
+Jobs/agents/engines/watchers outlive dispatch; requests can finish after disconnect.
+Watchers advance/resume; merge advances/drains; SSH submits/cancels.
+Each retry needs its own permission.
 
 Worker path: `swarm_code_protocol._code_completion_protocol` → loaded review.py,
-complete range, authors excluded. Only review is a worker outward CLI; no D5
-permit exists. `child_environment` does not isolate daemon keys. Narrow mode
-remains read/survey/plan/gate/report before confirmation.
+complete range, author exclusion. Only review is a worker outward CLI; no D5
+permit. `child_environment` leaves daemon keys. Before confirmation: narrow
+read/survey/plan/gate/report mode.
 
 Outbox fields: key/project/unit/verb/seq, closing_evidence/kind/unit_state/why/at,
 job_id/attempt_dir/evidence, optional tracker. Envelope: schema_version,
 project/unit/attempt/idempotency_key/requested_operation/evidence_digest/
 required_connector_capability. D5 grant/destination scope is absent.
 
-Recommend the plan's separate Git-common-directory authority namespace.
+Recommend a separate Git-common-directory authority namespace.
 Independent installs ship identical `skill_paths.py` copies with an equality
 guard: the packaging precedent. U1 decides.
