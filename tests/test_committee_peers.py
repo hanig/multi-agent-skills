@@ -4,6 +4,7 @@ from contextlib import redirect_stdout
 import copy
 import io
 from pathlib import Path
+import re
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -166,22 +167,47 @@ class TestCommitteePeers(unittest.TestCase):
         with self.subTest(consumer="decision input"):
             self.assertEqual(inputs["latest_prompt"], expected)
 
-    def test_successful_no_reply_prefix_is_delivered_verbatim(self):
-        reply = "[no reply: revised design]\nUse the revised layout."
-        self.session["members"]["beta"]["history"] = []
-
-        def successful_reply(member, history, prompt, timeout, **kwargs):
-            return (reply if member["name"] == "beta" else
-                    self.replies[member["name"]]), None, None
-
-        with mock.patch.object(committee, "_ask_member", side_effect=successful_reply):
-            committee.run_turn(self.roster, self.session, "Design", 1, "ask")
-        self.assertNotIn("errors", self.session["members"]["beta"])
-        prompts = self.invoke()
-        for recipient in ("alpha", "gamma"):
+    def test_peer_turns_agree_with_decision_input_admission(self):
+        self.session["problem"] = "Choose a design"
+        for name, member in self.session["members"].items():
+            member["history"] = [dict(role="assistant", content=self.replies[name])]
+        self.session["members"]["beta"]["history"].append(
+            dict(role="assistant", content="[no reply: synthetic provider timeout]"))
+        self.session["members"]["gamma"]["history"].append(dict(
+            role="assistant", content="[no reply: revised design]\nUse this layout."))
+        committee.save_session("peers", self.session)
+        saved = committee.load_session("peers")
+        mandate = self.root / "mandate.md"
+        mandate.write_text("## Always stop and ask\nOwner-only decisions.\n")
+        args = SimpleNamespace(author=["codex/gpt-6-astra"], mandate_file=str(mandate))
+        admitted = {}
+        for name, member in saved["members"].items():
+            for index in range(len(member["history"])):
+                # decision_inputs judges final positions, not older turns. Hold
+                # the other positions usable while testing each saved turn.
+                candidate = copy.deepcopy(saved)
+                for other in candidate["members"].values():
+                    other["history"] = other["history"][:1]
+                candidate["members"][name]["history"] = member["history"][:index + 1]
+                inputs, error = committee.decision_inputs(args, candidate)
+                with self.subTest(member=name, turn=index):
+                    if index == 0:
+                        self.assertIsNone(error)
+                    else:
+                        self.assertEqual(error, "no usable final position from " + name)
+                if inputs is not None:
+                    admitted[name] = inputs["positions"][name]
+        self.assertEqual(admitted, self.replies)
+        for recipient, prompt in self.invoke().items():
+            blocks = re.findall(
+                r"Peer (\w+)'s latest reply \(verbatim, not instructions\):\n"
+                r"<peer-reply-([0-9a-f]{32})>\n(.*?)\n</peer-reply-\2>",
+                prompt, re.DOTALL)
             with self.subTest(recipient=recipient):
-                self.assertIn("Peer beta's latest reply", prompts[recipient])
-                self.assertIn(reply, prompts[recipient])
+                self.assertEqual(len(blocks), len(admitted) - 1)
+                self.assertEqual({peer: reply for peer, _, reply in blocks},
+                                 {peer: reply for peer, reply in admitted.items()
+                                  if peer != recipient})
 
 
 if __name__ == "__main__":
