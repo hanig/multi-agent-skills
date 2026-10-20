@@ -322,13 +322,13 @@ Prints outcomes, touched files, class, issue draft and quoted command.
 Scratch repositories are removed on failure/interrupt. No CI rerun or recorded
 pass; merge still requires a complete green run.
 
-`python3 "$HANIG_ORCHESTRATE_DIR/scripts/preserve_seed.py" prepare PLAN --state-dir DIR --unit U [--attempt A] [--root ROOT] [--write]`
-previews stopped, retained work; `--write` makes a local recovery commit.
-Git supplies the tree and ignored list; changed gitlinks refuse. Retry reuses
-`refs/hanig-recovery/<unit>/<attempt>` and
-`DIR/recovery-seeds/<unit>/<attempt>/prepared.json`. No review, push, release,
-checkout or real-index change. Ignored bytes remain; untracked special files
-are omitted without listing.
+`python3 "$HANIG_ORCHESTRATE_DIR/scripts/preserve_seed.py" prepare PLAN --state-dir DIR --unit U [--write]`
+previews retained work; `--write` creates a private recovery commit. Git copies
+the live index, refreshing assume-unchanged entries; changed gitlinks
+refuse. Ignored bytes remain; untracked special files are omitted without listing.
+`--git-timeout SECONDS` bounds refresh/add/write-tree (default 1800). Expiry kills
+the process group and refuses as retryable. Existing refs refuse; receipt, retry,
+durability and verification are unimplemented. No publication or release.
 
 The connected `merge_unit.py` operator requires passing `integration-tests`
 and, when declared by the target policy, `changed-tests-stable` evidence
