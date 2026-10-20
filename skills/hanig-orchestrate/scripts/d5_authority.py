@@ -1,9 +1,7 @@
-"""Inert D5 store; callers supply directory, time and bytes.
+"""Inert local D5 store: no registration, custody transitions or enforcement.
 
-No registration, custody transitions or enforcement. Keep authority.lock
-permanent. Filesystem errors propagate; reread before retrying failed writes.
-Replacement archives exact predecessor bytes first; an interrupted replacement
-can retry when the archive matches. Each retry repeats the durable archive write.
+Keep authority.lock permanent. Filesystem errors propagate; reread before
+retrying. Replacement durably archives exact predecessor bytes on every retry.
 """
 import fcntl
 import hashlib
@@ -45,19 +43,22 @@ def _integer(value, field):
     _require(type(value) is int, field, "expected integer, not bool")
 
 
-def _json_value(value, field):
+def _json_value(value, field, ancestors=()):
     """Refuse lossy Python-to-JSON coercions in opaque custody data."""
     if value is None or type(value) in (str, int, bool):
         return
+    if type(value) in (dict, list):
+        _require(id(value) not in ancestors, field, "cyclic JSON value")
+        ancestors += (id(value),)
     if type(value) is float:
         _require(math.isfinite(value), field, "expected finite JSON number")
     elif type(value) is list:
         for index, item in enumerate(value):
-            _json_value(item, "{}[{}]".format(field, index))
+            _json_value(item, "{}[{}]".format(field, index), ancestors)
     elif type(value) is dict:
         for key, item in value.items():
             _require(type(key) is str, field, "expected string object key")
-            _json_value(item, "{}.{}".format(field, key))
+            _json_value(item, "{}.{}".format(field, key), ancestors)
     else:
         raise AuthorityError("{}: expected JSON value".format(field))
 
@@ -112,8 +113,18 @@ def mandate_digest(mandate_bytes):
 
 
 def _encode(value):
-    return (json.dumps(value, ensure_ascii=True, allow_nan=False,
-                       sort_keys=True, indent=2) + "\n").encode("ascii")
+    # Scalars use literal UTF-8; explicit surrogate code units use JSON escapes.
+    return (json.dumps(value, ensure_ascii=False, allow_nan=False,
+                       sort_keys=True, indent=2) + "\n").encode("utf-8", "backslashreplace")
+
+
+def _decode(raw):
+    # Preserve escaped code units separately; json.loads otherwise joins pairs.
+    # Consume every escape, so a literal backslash followed by 'u' stays literal.
+    text = raw.decode(json.detect_encoding(raw), "surrogatepass")
+    text = re.sub(r"\\(?:u([dD][89a-fA-F][0-9a-fA-F]{2})|.)",
+                  lambda m: chr(int(m[1], 16)) if m[1] else m[0], text)
+    return json.loads(text, object_pairs_hook=_pairs)
 
 
 def _pairs(pairs):
@@ -127,7 +138,7 @@ def _pairs(pairs):
 def _load(path):
     raw = path.read_bytes()
     try:
-        record = json.loads(raw, object_pairs_hook=_pairs)
+        record = _decode(raw)
     except (ValueError, UnicodeError) as exc:
         raise AuthorityError("record: invalid JSON: {}".format(exc)) from exc
     validate(record)
@@ -182,7 +193,7 @@ def create(directory, record):
         _require(not os.path.lexists(directory / RECORD_NAME), "record", "already exists")
         _unused_id(directory, record)
         _write(directory / RECORD_NAME, raw)
-    return json.loads(raw)
+    return _decode(raw)
 
 
 def read(directory):
@@ -251,4 +262,4 @@ def replace(directory, new):
                      "predecessor archive has different bytes")
         _write(predecessor, old_raw)
         _write(directory / RECORD_NAME, raw)
-    return json.loads(raw)
+    return _decode(raw)
