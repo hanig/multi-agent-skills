@@ -1,10 +1,12 @@
 """Peer delivery through the real ask command and saved committee history."""
 
 from contextlib import redirect_stdout
+import copy
 import io
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -116,6 +118,53 @@ class TestCommitteePeers(unittest.TestCase):
             tag = "peer-reply-" + safe
             self.assertIn("<" + tag + ">\n" + reply + "\n</" + tag + ">", prompt)
             self.assertEqual(prompt.count("</" + tag + ">"), 1)
+
+    def test_failed_turn_uses_latest_real_reply_or_contributes_nothing(self):
+        del self.session["members"]["gamma"]
+        original = copy.deepcopy(self.session)
+        for failed in ("alpha", "beta"):
+            for prior_reply in (False, True):
+                with self.subTest(failed=failed, prior_reply=prior_reply):
+                    self.session = copy.deepcopy(original)
+                    if not prior_reply:
+                        self.session["members"][failed]["history"] = []
+
+                    def fail_member(member, history, prompt, timeout, **kwargs):
+                        if member["name"] == failed:
+                            return None, "synthetic provider timeout", None
+                        return self.replies[member["name"]], None, None
+
+                    with mock.patch.object(committee, "_ask_member",
+                                           side_effect=fail_member):
+                        committee.run_turn(self.roster[:2], self.session,
+                                           "Initial question", 1, "ask")
+                    self.assertEqual(self.session["members"][failed]["history"][-1],
+                                     {"role": "assistant", "content":
+                                      "[no reply: synthetic provider timeout]"})
+                    prompts = self.invoke()
+                    recipient = "beta" if failed == "alpha" else "alpha"
+                    self.assertNotIn("[no reply:", prompts[recipient])
+                    if prior_reply:
+                        self.assertIn(self.replies[failed], prompts[recipient])
+                    else:
+                        self.assertEqual(prompts[recipient],
+                                         "Cross-critique" + committee.NO_EDITS)
+
+    def test_saved_turn_and_decision_input_keep_original_prompt_string(self):
+        self.session["problem"] = "Choose a design"
+        prompt = "Cross-critique\nwith details \t\n"
+        self.invoke(prompt)
+        saved = committee.load_session("peers")
+        mandate = self.root / "mandate.md"
+        mandate.write_text("## Always stop and ask\nOwner-only decisions.\n")
+        inputs, error = committee.decision_inputs(SimpleNamespace(
+            author=["codex/gpt-6-astra"], mandate_file=str(mandate)), saved)
+        self.assertIsNone(error)
+        expected = prompt.rstrip() + committee.NO_EDITS
+        with self.subTest(consumer="saved turn"):
+            self.assertEqual(saved["turns"][-1]["prompt"], expected)
+        with self.subTest(consumer="decision input"):
+            self.assertEqual(inputs["latest_prompt"], expected)
 
 
 if __name__ == "__main__":
