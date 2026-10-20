@@ -1,20 +1,9 @@
-"""Inert D5 store. Keep authority.lock permanent; reread after filesystem errors.
-
-No authority decision is made on unknown filesystem state: a lookup or
-durability failure refuses.
-"""
-import fcntl
+"""Pure D5 grant records; persistence and enforcement belong to callers."""
+import copy
 import hashlib
 import json
-import os
 import re
-import stat
-import tempfile
-from contextlib import contextmanager
-from pathlib import Path
 
-RECORD_NAME = "authority.json"
-LOCK_NAME = "authority.lock"
 _FIELDS = {"schema_version", "grant_id", "issued_at", "confirmed_at",
            "expires_at", "session_cap", "mandate_sha256", "scope",
            "confirmation", "custody", "invalidation"}
@@ -92,12 +81,23 @@ def mandate_digest(mandate_bytes):
     _require(type(mandate_bytes) is bytes, "mandate_bytes", "expected bytes")
     return hashlib.sha256(mandate_bytes).hexdigest()
 
-def _encode(value):
-    return (json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True,
+def encode(record):
+    """Validate and encode exact scalar strings as UTF-8 JSON bytes."""
+    validate(record)
+    return (json.dumps(record, ensure_ascii=False, allow_nan=False, sort_keys=True,
                        separators=(",", ":")) + "\n").encode("utf-8")
 
-def _decode(raw):
-    return json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
+
+def decode(data):
+    """Refuse malformed bytes, duplicate keys and schema-invalid records."""
+    _require(type(data) is bytes, "record", "expected bytes")
+    try:
+        record = json.loads(data.decode("utf-8"), object_pairs_hook=_pairs)
+    except (ValueError, RecursionError) as exc:
+        raise AuthorityError("record: invalid JSON: {}".format(exc)) from exc
+    validate(record)
+    return record
+
 
 def _pairs(pairs):
     result = {}
@@ -106,134 +106,48 @@ def _pairs(pairs):
         result[key] = value
     return result
 
-def _load(path):
-    raw = path.read_bytes()
-    try:
-        record = _decode(raw)
-    except (ValueError, RecursionError) as exc:
-        raise AuthorityError("record: invalid JSON: {}".format(exc)) from exc
+
+def evaluate(record, now, mandate_bytes):
+    """Return state and the mandate-change invalidation a caller must persist.
+
+    Precedence: invalidated, mandate_changed, expired, valid. This function
+    does not modify the record; callers must retain the returned invalidation
+    before relying on a later evaluation of the same grant.
+    """
     validate(record)
-    return record, raw
-
-@contextmanager
-def _locked(directory):
-    directory = Path(directory)
-    try:
-        fd = os.open(str(directory / LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield directory
-        finally:
-            os.close(fd)
-    except OSError as exc:
-        raise AuthorityError("record: filesystem operation failed: {}".format(exc)) from exc
-
-def _present(path, field):
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        raise AuthorityError(field + ": lookup failed") from exc
-    return True
-
-def _sync_directory(directory):
-    fd = os.open(str(directory), os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-def _write(path, raw):
-    """Caller holds the directory lock."""
-    fd, name = tempfile.mkstemp(prefix=".authority-", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(raw)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(name, str(path))
-        _sync_directory(path.parent)
-    finally:
-        if _present(name, "temporary"):
-            os.unlink(name)
-
-def _unused_id(directory, record):
-    _require(not _present(directory / "superseded" /
-                         (record["grant_id"] + ".json"), "grant_id"),
-            "grant_id", "already superseded; use a fresh grant ID")
-
-def create(directory, record):
-    """Create once, without recycling retired IDs."""
-    validate(record)
-    raw = _encode(record)
-    with _locked(directory) as directory:
-        _require(not _present(directory / RECORD_NAME, "record"), "record", "already exists")
-        _unused_id(directory, record)
-        _write(directory / RECORD_NAME, raw)
-    return _decode(raw)
-
-def read(directory):
-    """Read a complete validated record."""
-    with _locked(directory) as directory:
-        return _load(directory / RECORD_NAME)[0]
-
-def check(directory, now, mandate_bytes):
-    """Precedence: invalidated, durable mandate_changed, expired, valid."""
     _timestamp(now, "now")
     digest = mandate_digest(mandate_bytes)
-    with _locked(directory) as directory:
-        record, _ = _load(directory / RECORD_NAME)
-        if record["invalidation"] is not None:
-            return "invalidated"
-        if record["mandate_sha256"] != digest:
-            record["invalidation"] = {"at": now, "kind": "mandate_changed",
-                                      "reason": "mandate byte digest changed"}
-            _write(directory / RECORD_NAME, _encode(record))
-            return "mandate_changed"
-        return "expired" if now >= record["expires_at"] else "valid"
+    if record["invalidation"] is not None:
+        return "invalidated", None
+    if record["mandate_sha256"] != digest:
+        return "mandate_changed", {"at": now, "kind": "mandate_changed",
+                                   "reason": "mandate byte digest changed"}
+    return ("expired" if now >= record["expires_at"] else "valid"), None
 
-def revoke(directory, now, reason):
-    """Preserve the first terminal invalidation."""
+
+def revoked(record, now, reason):
+    """Return an independent record, preserving the first terminal invalidation."""
+    validate(record)
     _timestamp(now, "now")
     _reason(reason)
-    with _locked(directory) as directory:
-        record, _ = _load(directory / RECORD_NAME)
-        if record["invalidation"] is None:
-            record["invalidation"] = {"at": now, "kind": "revoked", "reason": reason}
-            _write(directory / RECORD_NAME, _encode(record))
-        return record
+    result = copy.deepcopy(record)
+    if result["invalidation"] is None:
+        result["invalidation"] = {"at": now, "kind": "revoked", "reason": reason}
+    return result
 
-def replace(directory, new):
-    """Archive verbatim, then replace without moving custody."""
+
+def replacement_allowed(old, new):
+    """Decide consent reuse or fresh confirmation; neither record is modified."""
+    validate(old)
     validate(new)
-    raw = _encode(new)
-    with _locked(directory) as directory:
-        old, old_raw = _load(directory / RECORD_NAME)
-        _require(new["grant_id"] != old["grant_id"], "grant_id", "must be fresh")
-        _unused_id(directory, new)
-        if new["confirmation"] == old["confirmation"]:
-            _require(old["invalidation"] is None, "confirmation", "invalidated consent")
-            _require(new["expires_at"] <= old["expires_at"],
-                    "expires_at", "extension requires fresh confirmation")
-            for key in _SCOPES:
-                _require(set(new["scope"][key]) <= set(old["scope"][key]),
-                        "scope." + key, "expansion requires fresh confirmation")
-        else:
-            _require(new["invalidation"] is None, "invalidation", "new grant must be clear")
-        archive = directory / "superseded"
-        try:
-            os.mkdir(archive, 0o700)
-        except FileExistsError:
-            pass
-        _require(_present(archive, "superseded") and
-                 stat.S_ISDIR(os.lstat(archive).st_mode),
-                 "superseded", "expected directory")
-        _sync_directory(directory)
-        predecessor = archive / (old["grant_id"] + ".json")
-        if _present(predecessor, "superseded"):
-            _require(predecessor.read_bytes() == old_raw, "superseded",
-                    "predecessor archive has different bytes")
-        _write(predecessor, old_raw)
-        _write(directory / RECORD_NAME, raw)
-    return _decode(raw)
+    _require(new["grant_id"] != old["grant_id"], "grant_id", "must be fresh")
+    if new["confirmation"] == old["confirmation"]:
+        _require(old["invalidation"] is None, "confirmation", "invalidated consent")
+        _require(new["expires_at"] <= old["expires_at"],
+                 "expires_at", "extension requires fresh confirmation")
+        for key in _SCOPES:
+            _require(set(new["scope"][key]) <= set(old["scope"][key]),
+                     "scope." + key, "expansion requires fresh confirmation")
+    else:
+        _require(new["invalidation"] is None, "invalidation", "new grant must be clear")
+    return True

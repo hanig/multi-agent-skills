@@ -1,17 +1,10 @@
-"""Real temporary grant stores: schema, terminal history and durable transitions."""
+"""Pure grant schema, exact codec and terminal record transitions."""
 import copy
-import errno
-import fcntl
 import hashlib
 import json
-import os
-import stat
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from contextlib import contextmanager
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
@@ -20,506 +13,365 @@ import d5_authority as A
 MANDATE = b"grant\nbounds\n"
 
 def grant(identifier="a" * 32):
-  return {
-    "schema_version": 1, "grant_id": identifier,
-    "issued_at": 100, "confirmed_at": 100, "expires_at": 86500,
-    "session_cap": 1, "mandate_sha256": hashlib.sha256(MANDATE).hexdigest(),
-    "scope": {"plans": ["p"], "repositories": ["r"],
-        "actions": ["read", "write"], "trackers": ["t"]},
-    "confirmation": {"owner_response": "  yes\r\n\t\u00e9\x00 ",
-            "displayed_bounds": "\tbound\nexact\r\n "},
-    "custody": None,
-    "invalidation": None,
-  }
+    return {
+        "schema_version": 1, "grant_id": identifier,
+        "issued_at": 100, "confirmed_at": 100, "expires_at": 86500,
+        "session_cap": 1, "mandate_sha256": hashlib.sha256(MANDATE).hexdigest(),
+        "scope": {"plans": ["p"], "repositories": ["r"],
+                "actions": ["read", "write"], "trackers": ["t"]},
+        "confirmation": {"owner_response": "  yes\r\n\t\u00e9\x00 ",
+                        "displayed_bounds": "\tbound\nexact\r\n "},
+        "custody": None,
+        "invalidation": None,
+    }
+
 
 class TestD5Authority(unittest.TestCase):
-  eq = unittest.TestCase.assertEqual
 
-  def setUp(self):
-    self.temp = tempfile.TemporaryDirectory()
-    self.addCleanup(self.temp.cleanup)
-    self.d = Path(self.temp.name)
-    self.path = self.d / A.RECORD_NAME
+    def refuses(self, field, op, *args):
+        with self.assertRaisesRegex(A.AuthorityError, field):
+            op(*args)
 
-  def refuses(self, field, op, *args):
-    with self.assertRaisesRegex(A.AuthorityError, field):
-      op(*args)
-
-  def bad_field(self, key, value):
-    r = grant()
-    r[key] = value
-    self.refuses(key, A.create, self.d, r)
-
-  def create(self):
-    A.create(self.d, grant())
-
-  def stored(self, expected):
-    self.eq(A.read(self.d), expected)
-
-  def successor(self, old=None, fresh=False):
-    new = copy.deepcopy(old if old is not None else grant())
-    new["grant_id"] = "b" * 32
-    if fresh:
-      new["confirmation"]["owner_response"] += " fresh"
-      new["invalidation"] = None
-    return new
-
-  @contextmanager
-  def filesystem_refusal(self, field="record"):
-    with self.assertRaisesRegex(A.AuthorityError, field) as caught:
-      yield
-    raise caught.exception.__cause__
-
-  def test_exact_roundtrip(self):
-    r = grant()
-    self.eq(A.create(self.d, r), r)
-    loaded = A.read(self.d)
-    self.eq(loaded, r)
-    for key in r["confirmation"]:
-      self.eq(loaded["confirmation"][key].encode("utf-8"),
-              r["confirmation"][key].encode("utf-8"))
-    loaded["scope"]["plans"].append("local")
-    self.stored(r)
-    self.refuses("record", A.create, self.d, grant())
-
-  def test_top_level_schema(self):
-    for key in grant():
-      with self.subTest(missing=key):
+    def bad_field(self, key, value):
         r = grant()
-        del r[key]
-        self.refuses(key, A.create, self.d, r)
-    for value in (None, [], "record", True):
-      self.refuses("record", A.create, self.d, value)
-    r = grant()
-    r["extension"] = 1
-    self.refuses("extension", A.create, self.d, r)
-    self.assertFalse(self.path.exists())
+        r[key] = value
+        self.refuses(key, A.validate, r)
 
-  def test_integers_and_cap(self):
-    for key in ("schema_version", "issued_at", "confirmed_at", "expires_at",
-          "session_cap"):
-      for value in (None, True, False, 1.0, "1", []):
-        with self.subTest(key=key, value=value):
-          r = grant()
-          r[key] = value
-          self.refuses(key, A.create, self.d, r)
-    for key in ("schema_version", "session_cap"):
-      for value in (0, 2):
-        self.bad_field(key, value)
+    def successor(self, old=None, fresh=False):
+        new = copy.deepcopy(old if old is not None else grant())
+        new["grant_id"] = "b" * 32
+        if fresh:
+            new["confirmation"]["owner_response"] += " fresh"
+            new["invalidation"] = None
+        return new
 
-  def test_expiry_bounds(self):
-    for duration in (-1, 0, 86401):
-      r = grant()
-      r["expires_at"] = r["issued_at"] + duration
-      self.refuses("expires_at", A.create, self.d, r)
-    self.create()
-    self.eq(A.check(self.d, 86499, MANDATE), "valid")
-    self.eq(A.check(self.d, 86500, MANDATE), "expired")
-    self.eq(A.check(self.d, 86501, MANDATE), "expired")
-    r = grant()
-    r["expires_at"] = 101
-    A.validate(r)
-
-  def test_hex_fields(self):
-    for key, width in (("grant_id", 32), ("mandate_sha256", 64)):
-      for value in (None, 1, "A" * width, "g" * width,
-            "a" * (width - 1), "a" * (width + 1), "a" * width + "\n"):
-        self.bad_field(key, value)
-
-  def test_nested_schemas(self):
-    for field, keys in (("scope", ("plans", "repositories", "actions", "trackers")),
-              ("confirmation", ("owner_response", "displayed_bounds")),
-              ("invalidation", ("at", "kind", "reason"))):
-      base = grant()
-      base["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
-      for key in keys:
-        r = copy.deepcopy(base)
-        del r[field][key]
-        self.refuses(field + "." + key, A.create, self.d, r)
-      r = copy.deepcopy(base)
-      r[field]["extra"] = 1
-      self.refuses(field + ".extra", A.create, self.d, r)
-      for value in ([], "object", True):
-        r = copy.deepcopy(base)
-        r[field] = value
-        self.refuses(field, A.create, self.d, r)
-    for key in grant()["scope"]:
-      for value in ("p", ["p", "p"], [1], [True], [None], [[]], None):
+    def test_top_level_schema(self):
+        for key in grant():
+            with self.subTest(missing=key):
+                r = grant()
+                del r[key]
+                self.refuses(key, A.validate, r)
+        for value in (None, [], "record", True):
+            self.refuses("record", A.validate, value)
         r = grant()
-        r["scope"][key] = value
-        self.refuses("scope." + key, A.create, self.d, r)
-    for key in grant()["confirmation"]:
-      r = grant()
-      r["confirmation"][key] = None
-      self.refuses("confirmation." + key, A.create, self.d, r)
-    for key, value in (("at", True), ("at", 1.5), ("kind", "expired"),
-            ("kind", []), ("reason", ""), ("reason", 1)):
-      r = grant()
-      r["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
-      r["invalidation"][key] = value
-      self.refuses("invalidation." + key, A.create, self.d, r)
+        r["extension"] = 1
+        self.refuses("extension", A.validate, r)
 
-  def test_custody_must_be_null(self):
-    for value in ({}, {"session": "opaque"}, [], True, False, "holder", 0, 1):
-      r = grant()
-      r["custody"] = value
-      self.refuses("custody", A.create, self.d, r)
-      self.path.write_text(json.dumps(r))
-      self.refuses("custody", A.read, self.d)
-      self.path.unlink()
-    self.create()
-    self.assertIsNone(A.read(self.d)["custody"])
+    def test_integers_and_cap(self):
+        for key in ("schema_version", "issued_at", "confirmed_at", "expires_at",
+                    "session_cap"):
+            for value in (None, True, False, 1.0, "1", []):
+                with self.subTest(key=key, value=value):
+                    r = grant()
+                    r[key] = value
+                    self.refuses(key, A.validate, r)
+        for key in ("schema_version", "session_cap"):
+            for value in (0, 2):
+                self.bad_field(key, value)
 
-  def test_digest_and_terminal_change(self):
-    for content in (MANDATE.replace(b"grant", b"Grant"),
-            MANDATE.replace(b"\n", b"\r\n"), MANDATE + b" ", b"\xff"):
-      with self.subTest(content=content), tempfile.TemporaryDirectory() as d:
-        self.eq(A.mandate_digest(content), hashlib.sha256(content).hexdigest())
-        self.assertNotEqual(A.mandate_digest(content), A.mandate_digest(MANDATE))
-        A.create(d, grant())
-        self.eq(A.check(d, 102, content), "mandate_changed")
-        old = A.read(d)
-        self.eq(old["invalidation"]["kind"], "mandate_changed")
-        self.eq(old["invalidation"]["at"], 102)
-        self.eq(A.check(d, 103, MANDATE), "invalidated")
-        self.eq(A.check(d, 104, content), "invalidated")
-        self.eq(A.revoke(d, 105, "later"), old)
-        self.eq(A.read(d), old)
+    def test_hex_fields(self):
+        for key, width in (("grant_id", 32), ("mandate_sha256", 64)):
+            for value in (None, 1, "A" * width, "g" * width,
+                        "a" * (width - 1), "a" * (width + 1), "a" * width + "\n"):
+                self.bad_field(key, value)
 
-  def test_revoke_and_expired_mismatch(self):
-    self.create()
-    old = A.revoke(self.d, 102, "  owner said stop\n")
-    self.eq(old["invalidation"],
-            {"at": 102, "kind": "revoked", "reason": "  owner said stop\n"})
-    self.eq(A.revoke(self.d, 103, "again"), old)
-    self.eq(A.check(self.d, 86501, b"changed"), "invalidated")
-    with tempfile.TemporaryDirectory() as d:
-      A.create(d, grant())
-      self.eq(A.check(d, 86501, b"changed"), "mandate_changed")
+    def test_nested_schemas(self):
+        for field, keys in (("scope", ("plans", "repositories", "actions", "trackers")),
+                            ("confirmation", ("owner_response", "displayed_bounds")),
+                            ("invalidation", ("at", "kind", "reason"))):
+            base = grant()
+            base["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
+            for key in keys:
+                r = copy.deepcopy(base)
+                del r[field][key]
+                self.refuses(field + "." + key, A.validate, r)
+            r = copy.deepcopy(base)
+            r[field]["extra"] = 1
+            self.refuses(field + ".extra", A.validate, r)
+            for value in ([], "object", True):
+                r = copy.deepcopy(base)
+                r[field] = value
+                self.refuses(field, A.validate, r)
+        for key in grant()["scope"]:
+            for value in ("p", ["p", "p"], [1], [True], [None], [[]], None):
+                r = grant()
+                r["scope"][key] = value
+                self.refuses("scope." + key, A.validate, r)
+        for key in grant()["confirmation"]:
+            r = grant()
+            r["confirmation"][key] = None
+            self.refuses("confirmation." + key, A.validate, r)
+        for key, value in (("at", True), ("at", 1.5), ("kind", "expired"),
+                        ("kind", []), ("reason", ""), ("reason", 1)):
+            r = grant()
+            r["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
+            r["invalidation"][key] = value
+            self.refuses("invalidation." + key, A.validate, r)
 
-  def test_argument_refusals(self):
-    self.create()
-    for now in (True, 1.0, "101", None, 0, -1, 2**63, 1 << 16384):
-      self.refuses("now", A.check, self.d, now, MANDATE)
-      self.refuses("now", A.revoke, self.d, now, "stop")
-    for content in ("text", None, bytearray(MANDATE)):
-      self.refuses("mandate_bytes", A.check, self.d, 101, content)
-    for reason in ("", None, 1):
-      self.refuses("reason", A.revoke, self.d, 101, reason)
-    self.stored(grant())
+    def test_surrogates_refuse_with_field(self):
+        for value in (chr(0xD800), chr(0xDFFF), chr(0xD83D) + chr(0xDE00)):
+            for group, keys in (("scope", grant()["scope"]), ("confirmation", grant()["confirmation"])):
+                for key in keys:
+                    r = grant()
+                    r[group][key] = [value] if group == "scope" else value
+                    self.refuses(group + "." + key, A.validate, r)
+            r = grant()
+            r["invalidation"] = {"at": 101, "kind": "revoked", "reason": value}
+            self.refuses("invalidation.reason", A.validate, r)
+        r = grant()
+        self.refuses("invalidation.reason", A.revoked, r, 101, chr(0xD800))
+        self.assertEqual(r, grant())
 
-  def test_replacement_custody(self):
-    self.create()
-    for custody in ({}, {"session": "new"}, [], True, "holder", 1):
-      new = self.successor(fresh=True)
-      new["custody"] = custody
-      self.refuses("custody", A.replace, self.d, new)
-    new = self.successor()
-    new["scope"]["actions"] = ["read"]
-    new["expires_at"] -= 1
-    self.eq(A.replace(self.d, new), new)
-    self.stored(new)
-    self.eq(list(self.d.glob("*.json")), [self.path])
-    self.eq(json.loads((self.d / "superseded" /
-                  ("a" * 32 + ".json")).read_bytes()), grant())
+    def test_purity(self):
+        source = Path(A.__file__).read_text()
+        for forbidden in ("open(", "os.", "fcntl", "pathlib", "tempfile", "shutil",
+                          "import os"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
 
-  def test_expansion_needs_consent(self):
-    self.create()
-    new = self.successor()
-    new["issued_at"] += 1
-    new["expires_at"] += 1
-    self.refuses("expires_at", A.replace, self.d, new)
-    for key in grant()["scope"]:
-      new = self.successor()
-      new["scope"][key].append("additional")
-      self.refuses("scope." + key, A.replace, self.d, new)
-    self.stored(grant())
-    new = self.successor(fresh=True)
-    new["issued_at"] += 1
-    new["expires_at"] += 1
-    for values in new["scope"].values():
-      values.append("additional")
-    self.eq(A.replace(self.d, new), new)
+    def test_exact_roundtrip(self):
+        r = grant()
+        raw = A.encode(r)
+        self.assertIs(type(raw), bytes)
+        raw.decode("utf-8")
+        self.assertEqual(A.decode(raw), r)
+        loaded = A.decode(raw)
+        self.assertEqual(loaded, r)
+        for key in r["confirmation"]:
+            self.assertEqual(loaded["confirmation"][key].encode("utf-8"),
+                             r["confirmation"][key].encode("utf-8"))
+        loaded["scope"]["plans"].append("local")
+        self.assertEqual(A.decode(raw), r)
+        self.assertEqual(r, grant())
 
-  def test_reordering_and_new_bounds(self):
-    self.create()
-    new = self.successor()
-    new["scope"]["actions"].reverse()
-    self.eq(A.replace(self.d, new), new)
-    later = self.successor(new)
-    later["grant_id"] = "c" * 32
-    later["confirmation"]["displayed_bounds"] += " new"
-    later["scope"]["actions"].append("more")
-    self.eq(A.replace(self.d, later), later)
+    def test_expiry_bounds(self):
+        for duration in (-1, 0, 86401):
+            r = grant()
+            r["expires_at"] = r["issued_at"] + duration
+            self.refuses("expires_at", A.validate, r)
+        r = grant()
+        self.assertEqual(A.evaluate(r, 86499, MANDATE), ("valid", None))
+        self.assertEqual(A.evaluate(r, 86500, MANDATE), ("expired", None))
+        self.assertEqual(A.evaluate(r, 86501, MANDATE), ("expired", None))
+        r["expires_at"] = 101
+        A.validate(r)
 
-  def test_same_id_refused(self):
-    self.create()
-    self.refuses("grant_id", A.replace, self.d, grant())
-    A.revoke(self.d, 101, "stop")
-    new = grant()
-    new["confirmation"]["owner_response"] += " new"
-    self.refuses("grant_id", A.replace, self.d, new)
-    self.assertIsNotNone(A.read(self.d)["invalidation"])
+    def test_custody_must_be_null(self):
+        for value in ({}, {"session": "opaque"}, [], True, False, "holder", 0, 1):
+            r = grant()
+            r["custody"] = value
+            self.refuses("custody", A.validate, r)
+            self.refuses("custody", A.decode, json.dumps(r).encode())
+        self.assertIsNone(A.decode(A.encode(grant()))["custody"])
 
-  def test_terminal_archive(self):
-    self.create()
-    A.check(self.d, 101, b"changed")
-    old = A.read(self.d)
+    def test_digest_and_terminal_change(self):
+        for content in (MANDATE.replace(b"grant", b"Grant"),
+                        MANDATE.replace(b"\n", b"\r\n"), MANDATE + b" ", b"\xff"):
+            with self.subTest(content=content):
+                self.assertEqual(A.mandate_digest(content), hashlib.sha256(content).hexdigest())
+                self.assertNotEqual(A.mandate_digest(content), A.mandate_digest(MANDATE))
+                r = grant()
+                state, invalidation = A.evaluate(r, 102, content)
+                self.assertEqual(state, "mandate_changed")
+                self.assertEqual(r, grant())
+                old = copy.deepcopy(r)
+                old["invalidation"] = invalidation  # Future storage layer persists this.
+                self.assertEqual(old["invalidation"]["kind"], "mandate_changed")
+                self.assertEqual(old["invalidation"]["at"], 102)
+                self.assertEqual(A.evaluate(old, 103, MANDATE), ("invalidated", None))
+                self.assertEqual(A.evaluate(old, 104, content), ("invalidated", None))
+                self.assertEqual(A.revoked(old, 105, "later"), old)
+                self.assertEqual(A.decode(A.encode(old)), old)
 
-    raw = json.dumps(old, indent=4).encode() + b" \n"
-    self.path.write_bytes(raw)
-    self.refuses("confirmation", A.replace, self.d, self.successor(old))
-    new = self.successor(old, fresh=True)
-    self.eq(A.replace(self.d, new), new)
-    archive = self.d / "superseded" / (old["grant_id"] + ".json")
-    self.eq(archive.read_bytes(), raw)
-    self.eq(json.loads(archive.read_bytes())["invalidation"], old["invalidation"])
-    self.eq(A.check(self.d, 102, MANDATE), "valid")
-    recycled = grant()
-    recycled["confirmation"]["owner_response"] += " new again"
-    self.refuses("grant_id", A.replace, self.d, recycled)
-    self.path.unlink()
-    self.refuses("grant_id", A.create, self.d, recycled)
-    self.eq(archive.read_bytes(), raw)
+    def test_revoke_and_expired_mismatch(self):
+        r = grant()
+        old = A.revoked(r, 102, "  owner said stop\n")
+        self.assertEqual(old["invalidation"],
+                         {"at": 102, "kind": "revoked", "reason": "  owner said stop\n"})
+        self.assertEqual(A.revoked(old, 103, "again"), old)
+        self.assertEqual(A.evaluate(old, 86501, b"changed"), ("invalidated", None))
+        self.assertEqual(A.evaluate(r, 86501, b"changed")[0], "mandate_changed")
+        self.assertEqual(r, grant())
+        old["scope"]["plans"].append("local")
+        self.assertEqual(r, grant())
+        again = A.revoked(old, 103, "again")
+        again["invalidation"]["reason"] = "local"
+        self.assertEqual(old["invalidation"]["reason"], "  owner said stop\n")
 
-  def test_fresh_consent_clear(self):
-    self.create()
-    new = self.successor(fresh=True)
-    new["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
-    self.refuses("invalidation", A.replace, self.d, new)
+    def test_argument_refusals(self):
+        r = grant()
+        for now in (True, 1.0, "101", None, 0, -1, 2**63, 1 << 16384):
+            self.refuses("now", A.evaluate, r, now, MANDATE)
+            self.refuses("now", A.revoked, r, now, "stop")
+        for content in ("text", None, bytearray(MANDATE)):
+            self.refuses("mandate_bytes", A.evaluate, r, 101, content)
+            self.refuses("record", A.decode, content)
+        for reason in ("", None, 1):
+            self.refuses("reason", A.revoked, r, 101, reason)
+        self.assertEqual(r, grant())
 
-  def test_archive_conflict(self):
-    self.create()
-    archive = self.d / "superseded"
-    archive.mkdir()
-    prior = archive / ("a" * 32 + ".json")
-    prior.write_bytes(b"different")
-    self.refuses("superseded", A.replace, self.d, self.successor())
-    self.stored(grant())
-    self.eq(prior.read_bytes(), b"different")
+    def test_replacement_custody(self):
+        old = grant()
+        for custody in ({}, {"session": "new"}, [], True, "holder", 1):
+            new = self.successor(fresh=True)
+            new["custody"] = custody
+            self.refuses("custody", A.replacement_allowed, old, new)
+            bad_old = copy.deepcopy(old)
+            bad_old["custody"] = custody
+            self.refuses("custody", A.replacement_allowed, bad_old, self.successor())
+        new = self.successor()
+        new["scope"]["actions"] = ["read"]
+        new["expires_at"] -= 1
+        before = copy.deepcopy(new)
+        self.assertIs(A.replacement_allowed(old, new), True)
+        self.assertEqual(new, before)
+        self.assertEqual(A.decode(A.encode(new)), new)
+        self.assertEqual(old, grant())
 
-  def test_interrupted_write(self):
-    self.create()
-    old_raw = self.path.read_bytes()
-    for op in (lambda: A.revoke(self.d, 101, "stop"),
-            lambda: A.check(self.d, 101, b"changed")):
-      with mock.patch.object(A.os, "replace", side_effect=OSError("injected before replace")):
-        with self.assertRaisesRegex(OSError, "injected"), self.filesystem_refusal():
-          op()
-      self.eq(self.path.read_bytes(), old_raw)
-      self.stored(grant())
-      self.eq(list(self.d.glob(".authority-*")), [])
+    def test_expansion_needs_consent(self):
+        old = grant()
+        new = self.successor()
+        new["issued_at"] += 1
+        new["expires_at"] += 1
+        self.refuses("expires_at", A.replacement_allowed, old, new)
+        for key in grant()["scope"]:
+            new = self.successor()
+            new["scope"][key].append("additional")
+            self.refuses("scope." + key, A.replacement_allowed, old, new)
+        self.assertEqual(old, grant())
+        new = self.successor(fresh=True)
+        new["issued_at"] += 1
+        new["expires_at"] += 1
+        for values in new["scope"].values():
+            values.append("additional")
+        self.assertIs(A.replacement_allowed(old, new), True)
 
-  def test_replacement_retry(self):
-    self.create()
-    old_raw = self.path.read_bytes()
-    replace = os.replace
-    def fail_head(src, dst):
-      if Path(dst) == self.path:
-        raise OSError("head interrupted")
-      return replace(src, dst)
-    with mock.patch.object(A.os, "replace", side_effect=OSError("archive interrupted")):
-      with self.assertRaisesRegex(OSError, "archive interrupted"), self.filesystem_refusal():
-        A.replace(self.d, self.successor())
-    self.stored(grant())
-    with mock.patch.object(A.os, "replace", side_effect=fail_head):
-      with self.assertRaisesRegex(OSError, "head interrupted"), self.filesystem_refusal():
-        A.replace(self.d, self.successor())
-    self.stored(grant())
-    archive = self.d / "superseded" / ("a" * 32 + ".json")
-    self.eq(archive.read_bytes(), old_raw)
-    self.eq(A.replace(self.d, self.successor()), self.successor())
-    self.eq(archive.read_bytes(), old_raw)
+    def test_reordering_and_new_bounds(self):
+        new = self.successor()
+        new["scope"]["actions"].reverse()
+        self.assertIs(A.replacement_allowed(grant(), new), True)
+        later = self.successor(new)
+        later["grant_id"] = "c" * 32
+        later["confirmation"]["displayed_bounds"] += " new"
+        later["scope"]["actions"].append("more")
+        self.assertIs(A.replacement_allowed(new, later), True)
 
-  def test_archive_fsync_retry(self):
-    self.create()
-    sync = A._sync_directory
-    def fail_archive(path):
-      if path.name == "superseded":
-        raise OSError("archive fsync failed")
-      return sync(path)
-    with mock.patch.object(A, "_sync_directory", side_effect=fail_archive):
-      with self.assertRaisesRegex(OSError, "archive fsync failed"), self.filesystem_refusal():
-        A.replace(self.d, self.successor())
-    self.stored(grant())
-    with mock.patch.object(A.os, "replace", wraps=A.os.replace) as install:
-      A.replace(self.d, self.successor())
-    self.eq([Path(call.args[1]).parent for call in install.call_args_list],
-            [self.d / "superseded", self.d])
+    def test_same_id_refused(self):
+        self.refuses("grant_id", A.replacement_allowed, grant(), grant())
+        old = A.revoked(grant(), 101, "stop")
+        new = grant()
+        new["confirmation"]["owner_response"] += " new"
+        self.refuses("grant_id", A.replacement_allowed, old, new)
+        self.assertIsNotNone(old["invalidation"])
 
-  def test_corrupt_reads_refuse(self):
-    r = grant()
-    r["session_cap"] = True
-    duplicate = json.dumps(grant()).replace('"session_cap": 1',
-                        '"session_cap": 2, "session_cap": 1')
-    for raw in (b'{"grant_id":', b"", b"not-json", b"\xff", b"[]",
-          json.dumps(r).encode(), duplicate.encode()):
-      self.path.write_bytes(raw)
-      for op in (lambda: A.read(self.d),
-              lambda: A.check(self.d, 101, MANDATE),
-              lambda: A.revoke(self.d, 101, "stop"),
-              lambda: A.replace(self.d, self.successor())):
-        with self.assertRaises(A.AuthorityError):
-          op()
-      self.eq(self.path.read_bytes(), raw)
+    def test_terminal_archive(self):
+        # Only the predecessor's pure consent/terminal-state assertions remain.
+        old = grant()
+        old["invalidation"] = A.evaluate(old, 101, b"changed")[1]
+        self.refuses("confirmation", A.replacement_allowed, old, self.successor(old))
+        new = self.successor(old, fresh=True)
+        self.assertIs(A.replacement_allowed(old, new), True)
+        self.assertEqual(A.evaluate(new, 102, MANDATE), ("valid", None))
+        self.assertEqual(old["invalidation"]["kind"], "mandate_changed")
+        old = A.revoked(grant(), 101, "stop")
+        self.refuses("confirmation", A.replacement_allowed, old, self.successor(old))
+        self.assertIs(A.replacement_allowed(old, self.successor(old, fresh=True)), True)
 
-  def test_target_directory_is_input(self):
-    missing = self.d / "not-created"
-    for op in (lambda: A.create(missing, grant()), lambda: A.read(missing),
-            lambda: A.check(missing, 101, MANDATE),
-            lambda: A.revoke(missing, 101, "stop"),
-            lambda: A.replace(missing, self.successor())):
-      with self.assertRaises(FileNotFoundError), self.filesystem_refusal():
-        op()
-      self.assertFalse(missing.exists())
+    def test_fresh_consent_clear(self):
+        new = self.successor(fresh=True)
+        new["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
+        self.refuses("invalidation", A.replacement_allowed, grant(), new)
 
-  def test_durable_write_protocol(self):
-    events = []
-    fsync, replace = os.fsync, os.replace
-    def sync(fd):
-      events.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
-      return fsync(fd)
-    def install(src, dst):
-      src, dst = Path(src), Path(dst)
-      self.eq(src.parent, dst.parent)
-      self.assertNotEqual(src, dst)
-      with (self.d / A.LOCK_NAME).open("rb") as handle:
-        with self.assertRaises(BlockingIOError):
-          fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-      self.eq(events[-1], "file")
-      events.append("replace")
-      return replace(str(src), str(dst))
-    with mock.patch.object(A.os, "fsync", side_effect=sync), \
-        mock.patch.object(A.os, "replace", side_effect=install):
-      self.create()
-      A.check(self.d, 101, b"changed")
-      A.replace(self.d, self.successor(fresh=True))
-      A.revoke(self.d, 102, "stop")
-    self.eq(events.count("replace"), 5)
-    for index, event in enumerate(events):
-      if event == "replace":
-        self.eq(events[index - 1:index + 2], ["file", "replace", "directory"])
+    def test_corrupt_reads_refuse(self):
+        r = grant()
+        r["session_cap"] = True
+        duplicate = json.dumps(grant()).replace('"session_cap": 1',
+                                                '"session_cap": 2, "session_cap": 1')
+        for raw in (b'{"grant_id":', b"", b"not-json", b"\xff", b"[]",
+                    json.dumps(r).encode(), duplicate.encode()):
+            with self.assertRaises(A.AuthorityError):
+                A.decode(raw)
+        for op in (lambda: A.encode(r), lambda: A.evaluate(r, 101, MANDATE),
+                   lambda: A.revoked(r, 101, "stop"),
+                   lambda: A.replacement_allowed(r, self.successor()),
+                   lambda: A.replacement_allowed(grant(), r)):
+            self.refuses("session_cap", op)
 
-  def test_scalar_strings_exact(self):
-    tokens = [chr(0x1F600), chr(0x10FFFF), r"\ud83d\ude00", "\\", '"', "é", "\n", "\x00", "e\u0301"]
-    r = grant()
-    r["scope"]["plans"] = tokens
-    text = "|".join(a + b for a in tokens for b in tokens)
-    r["confirmation"] = {key: text for key in r["confirmation"]}
-    self.eq(A.create(self.d, r), r)
-    self.stored(r)
-    self.path.read_bytes().decode("utf-8")
-    new = self.successor(r)
-    self.eq(A.replace(self.d, new), new)
-    self.stored(new)
-    revoked = A.revoke(self.d, 101, text)
-    self.stored(revoked)
-    self.eq(revoked["invalidation"]["reason"], text)
+    def test_scalar_strings_exact(self):
+        tokens = [chr(0x1F600), chr(0x10FFFF), r"\ud83d\ude00", "\\", '"', "é",
+                  "\n", "\x00", "e\u0301"]
+        r = grant()
+        r["scope"]["plans"] = tokens
+        text = "|".join(a + b for a in tokens for b in tokens)
+        r["confirmation"] = {key: text for key in r["confirmation"]}
+        self.assertEqual(A.decode(A.encode(r)), r)
+        self.assertEqual(A.decode(A.encode(r)), r)
+        A.encode(r).decode("utf-8")
+        new = self.successor(r)
+        self.assertIs(A.replacement_allowed(r, new), True)
+        self.assertEqual(A.decode(A.encode(new)), new)
+        revoked = A.revoked(new, 101, text)
+        self.assertEqual(A.decode(A.encode(revoked)), revoked)
+        self.assertEqual(revoked["invalidation"]["reason"], text)
 
-  def test_surrogates_refuse_with_field(self):
-    for value in (chr(0xD800), chr(0xDFFF), chr(0xD83D) + chr(0xDE00)):
-      for group, keys in (("scope", grant()["scope"]), ("confirmation", grant()["confirmation"])):
-        for key in keys:
-          r = grant()
-          r[group][key] = [value] if group == "scope" else value
-          self.refuses(group + "." + key, A.create, self.d, r)
-      r = grant()
-      r["invalidation"] = {"at": 101, "kind": "revoked", "reason": value}
-      self.refuses("invalidation.reason", A.create, self.d, r)
-    self.assertFalse(self.path.exists())
-    self.create()
-    self.refuses("invalidation.reason", A.revoke, self.d, 101, chr(0xD800))
-    self.stored(grant())
+    def test_reused_consent_invalidated(self):
+        new = self.successor()
+        new["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
+        self.assertIs(A.replacement_allowed(grant(), new), True)
+        self.assertEqual(A.evaluate(new, 102, MANDATE), ("invalidated", None))
+        self.assertEqual(A.decode(A.encode(new)), new)
 
+    def test_malformed_utf8(self):
+        raw = A.encode(grant())
+        for bad in (b'\xed\xa0\x80', b'\xff', b'\xc0\xaf', b'\xe2\x82'):
+            corrupt = raw.replace(b'"p"', b'"' + bad + b'"', 1)
+            self.refuses("record", A.decode, corrupt)
 
+    def test_timestamp_bounds(self):
+        for key in ("issued_at", "confirmed_at", "expires_at", "at"):
+            for value in (0, -1, 2**63, 1 << 16384):
+                r = grant()
+                r["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
+                (r["invalidation"] if key == "at" else r)[key] = value
+                self.refuses("invalidation.at" if key == "at" else key, A.validate, r)
+        for issued, expires in ((1, 86401), (2**63 - 86401, 2**63 - 1)):
+            for confirmed in (1, 2**63 - 1):
+                r = grant()
+                r.update(issued_at=issued, confirmed_at=confirmed, expires_at=expires)
+                self.assertEqual(A.decode(A.encode(r)), r)
+                self.assertEqual(A.decode(A.encode(r)), r)
+                self.assertEqual(A.evaluate(r, expires, MANDATE), ("expired", None))
+                revoked = A.revoked(r, confirmed, "stop")
+                self.assertEqual(revoked["invalidation"]["at"], confirmed)
+        for field in (None, "scope", "confirmation", "invalidation"):
+            r = grant()
+            r["invalidation"] = {"at": 100, "kind": "revoked", "reason": "stop"}
+            (r if field is None else r[field])[1 << 16384] = 0
+            self.refuses(field or "record", A.validate, r)
 
-  def test_reused_consent_invalidated(self):
-    self.create()
-    new = self.successor()
-    new["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
-    self.eq(A.replace(self.d, new), new)
-    self.eq(A.check(self.d, 102, MANDATE), "invalidated")
-    self.stored(new)
+    def test_json_grammar(self):
+        r = grant()
+        r["scope"]["plans"] = ["p", "q"]
+        raw = json.dumps(r, separators=(",", ":")).encode()
+        self.assertEqual(A.decode(raw), r)
+        for fragment in (b'[1 2]', b'[1,]', b'{"x" 1}', b'{"x":}', b'{"x":1,}',
+                         b'{"x":1 "y":2}', b'[truefalse]', b'01', b'"a":"b"',
+                         b'NaN', b'Infinity', b'-Infinity'):
+            self.refuses("record|scope", A.decode, raw.replace(b'["p","q"]', fragment))
+        for suffix in (b' {}', b',null', b','):
+            self.refuses("record", A.decode, raw + suffix)
 
-  def test_malformed_utf8(self):
-    self.create()
-    raw = self.path.read_bytes()
-    for bad in (b'\xed\xa0\x80', b'\xff', b'\xc0\xaf', b'\xe2\x82'):
-      corrupt = raw.replace(b'"p"', b'"' + bad + b'"', 1)
-      self.path.write_bytes(corrupt)
-      self.refuses("record", A.read, self.d)
-      self.refuses("record", A.check, self.d, 100, MANDATE)
-      self.eq(self.path.read_bytes(), corrupt)
-
-  def test_timestamp_bounds(self):
-    for key in ("issued_at", "confirmed_at", "expires_at", "at"):
-      for value in (0, -1, 2**63, 1 << 16384):
+    def test_duplicate_keys_anywhere_refuse(self):
         r = grant()
         r["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
-        (r["invalidation"] if key == "at" else r)[key] = value
-        self.refuses("invalidation.at" if key == "at" else key, A.create, self.d, r)
-    for issued, expires in ((1, 86401), (2**63 - 86401, 2**63 - 1)):
-      for confirmed in (1, 2**63 - 1):
-        with tempfile.TemporaryDirectory() as d:
-          r = grant()
-          r.update(issued_at=issued, confirmed_at=confirmed, expires_at=expires)
-          self.eq(A.create(d, r), r)
-          self.eq(A.read(d), r)
-          self.eq(A.check(d, expires, MANDATE), "expired")
-          A.revoke(d, confirmed, "stop")
-          self.eq(A.read(d)["invalidation"]["at"], confirmed)
-    for field in (None, "scope", "confirmation", "invalidation"):
-      r = grant()
-      r["invalidation"] = {"at": 100, "kind": "revoked", "reason": "stop"}
-      (r if field is None else r[field])[1 << 16384] = 0
-      self.refuses(field or "record", A.create, self.d, r)
+        raw = json.dumps(r)
+        for key, value in (("session_cap", 1), ("plans", ["p"]),
+                           ("owner_response", r["confirmation"]["owner_response"]),
+                           ("kind", "revoked")):
+            pair = json.dumps(key) + ": " + json.dumps(value)
+            duplicate = raw.replace(pair, pair + ", " + pair, 1).encode()
+            self.refuses("duplicate JSON field", A.decode, duplicate)
 
-
-
-  def test_json_grammar(self):
-    r = grant()
-    r["scope"]["plans"] = ["p", "q"]
-    raw = json.dumps(r, separators=(",", ":")).encode()
-    self.path.write_bytes(raw)
-    self.stored(r)
-    for fragment in (b'[1 2]', b'[1,]', b'{"x" 1}', b'{"x":}', b'{"x":1,}',
-                    b'{"x":1 "y":2}', b'[truefalse]', b'01', b'"a":"b"',
-                    b'NaN', b'Infinity', b'-Infinity'):
-      self.path.write_bytes(raw.replace(b'["p","q"]', fragment))
-      self.refuses("record|scope", A.read, self.d)
-    for suffix in (b' {}', b',null', b','):
-      self.path.write_bytes(raw + suffix)
-      self.refuses("record", A.read, self.d)
-  def test_duplicate_keys_anywhere_refuse(self):
-    r = grant()
-    r["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
-    raw = json.dumps(r)
-    for key, value in (("session_cap", 1), ("plans", ["p"]),
-                                          ("owner_response", r["confirmation"]["owner_response"]), ("kind", "revoked")):
-      pair = json.dumps(key) + ": " + json.dumps(value)
-      duplicate = raw.replace(pair, pair + ", " + pair, 1).encode()
-      self.path.write_bytes(duplicate)
-      self.refuses("duplicate JSON field", A.read, self.d)
-      self.eq(self.path.read_bytes(), duplicate)
-
-
-  def test_retired_id_lookup_error(self):
-    self.create()
-    A.revoke(self.d, 101, "stop")
-    A.replace(self.d, self.successor(fresh=True))
-    prior = self.d / "superseded" / ("a" * 32 + ".json")
-    raw = prior.read_bytes()
-    self.path.unlink()
-    lstat = os.lstat
-    def denied(path, *args, **kwargs):
-      if Path(path) == prior:
-        raise PermissionError("archive lookup denied")
-      return lstat(path, *args, **kwargs)
-    with mock.patch.object(A.os, "lstat", side_effect=denied):
-      with self.assertRaises(PermissionError), self.filesystem_refusal("grant_id"):
-        A.create(self.d, grant())
-    self.assertFalse(self.path.exists())
-    self.eq(prior.read_bytes(), raw)
 
 if __name__ == "__main__":
-  unittest.main()
+    unittest.main()
