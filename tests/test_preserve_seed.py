@@ -73,6 +73,11 @@ class TestPreserveSeed(unittest.TestCase):
   def wg(self, *args):
     return self.git(self.work, *args)
 
+  def wrap(self, code):
+    self.operator = self.tmp / "wrapper.py"
+    self.operator.write_text("import sys, os\nsys.path.insert(0," + repr(str(OPERATOR.parent)) +
+      ")\nimport preserve_seed as p\n" + code + "\nraise SystemExit(p.main())\n")
+
   def save(self):
     self.plan_path.write_text(json.dumps(self.plan))
     (self.sd / SS.STATE_FILE).write_text(json.dumps(self.state))
@@ -170,6 +175,7 @@ class TestPreserveSeed(unittest.TestCase):
       receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
     self.eq(receipt["prepared_head"], prepared)
     self.eq(receipt["destination_ref"], "refs/heads/recovery/u-a1")
+    self.wg("config", "i18n.logOutputEncoding", "UTF-16")
     before = self.snapshot()
     self.ok("--write")
     self.eq(self.snapshot(), before)
@@ -201,15 +207,19 @@ class TestPreserveSeed(unittest.TestCase):
 
   def test_detached_ignore_configuration(self):
     excludes = self.tmp / "excludes"
-    excludes.write_text("draft.txt\n")
+    excludes.write_text("draft.txt\npipe\nnested/\n")
     config = self.tmp / "branch.cfg"
     config.write_text("[core]\n excludesFile = /dev/null\n")
     self.wg("config", "core.excludesFile", str(excludes))
     self.wg("config", "includeIf.onbranch:swarm-a1.path", str(config))
     (self.work / "draft.txt").write_text("draft\n")
+    os.mkfifo(self.work / "pipe")
+    (self.work / "nested").mkdir()
+    self.git(self.work / "nested", "init", "-q")
     result = self.ok("--write")
     self.eq(self.wg("ls-files", "draft.txt"), "")
-    self.assertIn("'draft.txt'" + OMITTED, result.stdout)
+    for name in ("draft.txt", "pipe", "nested"):
+      self.assertIn(repr(name) + OMITTED, result.stdout)
 
   def test_deep_paths(self):
     path = self.work
@@ -217,11 +227,21 @@ class TestPreserveSeed(unittest.TestCase):
       path /= "d"
       path.mkdir()
     (path / "leaf").write_text("deep\n")
-    self.operator = self.tmp / "limited.py"
-    self.operator.write_text("import sys\nsys.path.insert(0, " + repr(str(OPERATOR.parent)) +
-      ")\nimport preserve_seed as p\nsys.setrecursionlimit(100)\nraise SystemExit(p.main())\n")
+    self.wrap("sys.setrecursionlimit(100)")
     self.ok("--write")
     self.eq(self.wg("show", "HEAD:" + (path / "leaf").relative_to(self.work).as_posix()), "deep")
+
+  def test_receipt_directory_sync(self):
+    trace = self.tmp / "sync.txt"
+    self.wrap("real=os.fsync\ndef sync(fd):\n with open(" + repr(str(trace)) +
+      ", 'a') as f:f.write(str(os.fstat(fd)[:3])+'\\n')\n real(fd)\nos.fsync=sync")
+    for _ in range(2):
+      trace.write_text("")
+      self.ok("--write")
+      for directory in self.receipt.parents:
+        self.assertIn(str(directory.stat()[:3]), trace.read_text())
+        if directory == self.sd:
+          break
 
   def test_authority_refusals(self):
     unrelated = self.git(self.repo, "commit-tree", "HEAD^{tree}", "-m", "unrelated")

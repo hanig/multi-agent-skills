@@ -151,6 +151,15 @@ def digest(receipt):
              .encode("utf-8")).hexdigest()
 
 
+def save_receipt(path, receipt, state_dir):
+  path.parent.mkdir(parents=True, exist_ok=True)
+  durable_write(path, receipt)
+  for parent in path.parents:
+    S.SJ._fsync_directory(parent)
+    if parent == Path(state_dir):
+      break
+
+
 def prepare(args, plan):
   attempt, record, facts, work, agent = authority(args, plan)
   original = oid(record.get("head_at_retention"))
@@ -182,12 +191,15 @@ def prepare(args, plan):
     raise Refusal("HEAD disagrees with retention/receipt")
   git(work, "merge-base", "--is-ancestor", oid(facts["base_commit"]), original)
   stopped(agent)
-  content(work)
+  if receipt is not None or not args.write:
+    content(work)
   if receipt is not None:
     if (dirty(work)
         or git(work, "rev-parse", "HEAD^").strip() != original
-        or not git(work, "log", "-1", "--format=%B").startswith(PREFIX)):
+        or not git(work, "log", "-1", "--encoding=UTF-8", "--format=%B").startswith(PREFIX)):
       raise Refusal("receipt disagrees with worktree content or commit")
+    if args.write:
+      save_receipt(receipt_path, receipt, args.state_dir)
     print(json.dumps(receipt, sort_keys=True))
     return
   print(git(work, "status", "--short", "--untracked-files=all"), end="")
@@ -206,8 +218,7 @@ def prepare(args, plan):
   if dirty(work):
     raise Refusal("dirty worktree after commit; no receipt written")
   receipt["publication_digest"] = digest(receipt)
-  receipt_path.parent.mkdir(parents=True, exist_ok=True)
-  durable_write(receipt_path, receipt)
+  save_receipt(receipt_path, receipt, args.state_dir)
   print(json.dumps(receipt, sort_keys=True))
 
 
