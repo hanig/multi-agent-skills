@@ -143,6 +143,8 @@ def message(unit, attempt, stop):
 
 
 def validate_commit(work, commit, tree, parent, body):
+  if git(work, "cat-file", "-t", oid(commit)) != b"commit\n":
+    raise Refusal("recovery object must be a commit")
   raw = git(work, "cat-file", "commit", oid(commit))
   headers, separator, actual = raw.partition(b"\n\n")
   rows = headers.split(b"\n")

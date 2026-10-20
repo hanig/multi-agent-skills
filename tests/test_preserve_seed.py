@@ -55,11 +55,11 @@ class TestPreserveSeed(Harness):
   def put(self, name, text):
     (self.work / name).write_text(text)
 
-  def git(self, *args, at=None):
+  def git(self, *args, at=None, raw=False):
     p = subprocess.run(["git", "-C", str(at or self.work), *args],
              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
     self.eq(p.returncode, 0, p.stderr)
-    return os.fsdecode(p.stdout).strip()
+    return p.stdout if raw else os.fsdecode(p.stdout).strip()
 
   def save(self):
     (self.sd / P.S.STATE_FILE).write_text(json.dumps(self.state))
@@ -70,7 +70,7 @@ class TestPreserveSeed(Harness):
 
   def snapshot(self):
     return (self.git("rev-parse", "HEAD"), self.git("symbolic-ref", "HEAD"),
-        self.git("status", "--porcelain=v1"),
+        self.git("status", "--porcelain=v1", raw=True),
         Path(self.git("rev-parse", "--git-path", "index")).read_bytes(),
         (self.sd / P.S.STATE_FILE).read_bytes(),
         self.git("show-ref", at=self.remote))
@@ -98,6 +98,7 @@ class TestPreserveSeed(Harness):
     (self.work / "delete").unlink()
     (self.work / "mode").chmod(0o755)
     self.put("new", "new\n")
+    self.eq(self.snapshot()[2][-1:], b"\n")
     preview = self.call(write=False)
     self.assertFalse(self.receipt.exists())
     self.eq(self.git("for-each-ref", self.ref), "")
@@ -204,6 +205,10 @@ class TestPreserveSeed(Harness):
       self.assertIn("simulated receipt failure", self.call(expected=2))
     commit = self.git("rev-parse", self.ref)
     self.assertFalse(self.receipt.exists())
+    self.git("tag", "-a", "tag", "-m", "tag", commit)
+    self.git("update-ref", self.ref, self.git("rev-parse", "tag"))
+    self.assertIn("commit", self.call(expected=2))
+    self.git("update-ref", self.ref, commit)
     self.eq(self.call()["commit"], commit)
     saved = json.loads(self.receipt.read_text())
     saved["tree"] = self.base
