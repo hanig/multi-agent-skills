@@ -217,6 +217,43 @@ class TestDocumentedReviewCommands(unittest.TestCase):
         self.assertEqual((calls, markers), ([], []))
 
 
+class TestDocumentedCommitteeCrossCritique(unittest.TestCase):
+    def test_project_cross_critique_delivers_other_designs(self):
+        document = ROOT / 'skills/hanig-project/SKILL.md'
+        commands = [shlex.split(line) for line in document.read_text().splitlines()
+                    if line.startswith('python3 ') and 'committee.py" ask NAME' in line]
+        self.assertEqual(len(commands), 1)
+        argv = commands[0][1:]
+        self.assertIn('--with-peers', argv)
+        argv = ['codex/gpt-6-astra' if word == 'PROVIDER/MODEL' else word for word in argv]
+        roster = [dict(name=name, model='test-' + name, provider=provider)
+                  for name, provider in [('alpha', 'openai'), ('beta', 'openrouter')]]
+        session = dict(name='NAME', turns=[], members={
+            r['name']: dict(provider=r['provider'], model=r['model'], history=[
+                dict(role='assistant', content=r['name'] + ' saved design')])
+            for r in roster})
+        calls = {}
+
+        def answer(member, history, prompt, timeout, **kwargs):
+            calls[member['name']] = prompt
+            return 'Cross-critique complete', None, None
+
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            stack.enter_context(patch.object(committee, 'SESSIONS', Path(tmp)))
+            stack.enter_context(patch.object(committee.R, 'load_reviewers', return_value=roster))
+            stack.enter_context(patch.object(committee, '_ask_member', side_effect=answer))
+            stack.enter_context(patch.object(sys, 'argv', argv))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            committee.save_session('NAME', session)
+            with self.assertRaises(SystemExit) as stopped:
+                guarded_main(committee.main)
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertEqual(set(calls), {'alpha', 'beta'})
+        for name, peer in [('alpha', 'beta'), ('beta', 'alpha')]:
+            self.assertIn(peer + ' saved design', calls[name])
+            self.assertNotIn(name + ' saved design', calls[name])
+
+
 class TestAuditCitations(unittest.TestCase):
     def test_closed_findings_name_existing_tests(self):
         text = (ROOT / 'docs/audit-protocol-enforcement.md').read_text()

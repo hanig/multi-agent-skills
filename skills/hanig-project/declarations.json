@@ -119,7 +119,7 @@
     },
     {
       "id": "plan.design-step",
-      "normative_text": "Between interview and plan, convene the planning committee with `committee.py open --profile planning` on the survey output and interview answers, put one cross-critique to it with `ask`, then `synthesize`; send divergence to the tiebreak seat or the owner, and never let the committee change an owner decision."
+      "normative_text": "Between interview and plan, convene the planning committee with `committee.py open --profile planning` on the survey output and interview answers, put one cross-critique to it with `ask --with-peers`, then `synthesize`; send divergence to the tiebreak seat or the owner, and never let the committee change an owner decision."
     },
     {
       "id": "plan.decision-ledger",
