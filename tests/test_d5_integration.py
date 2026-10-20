@@ -1,11 +1,5 @@
-"""Inactive integration inventory: real parsers, source symbols and mandate bytes."""
-import argparse
-import ast
-import importlib.util
-import json
-import re
-import sys
-import unittest
+"""D5 parser, AST and mandate contracts."""
+import argparse, ast, importlib.util, json, re, sys, unittest
 from pathlib import Path
 from unittest import mock
 from tests.watchdog_guard import guarded_main
@@ -68,7 +62,7 @@ def sections(text):
 
 
 class TestD5Integration(unittest.TestCase):
-    def test_parsers_and_manifest(self):
+    def test_manifest(self):
         m = json.loads((FIXTURES / 'integration-manifest.json').read_text())
         assert set(m['tools']) == {'swarm.py','merge_unit.py','linear_sync.py',
                                    'tickets.py','review.py','committee.py'}
@@ -82,7 +76,7 @@ class TestD5Integration(unittest.TestCase):
                 assert any('--write' in a.option_strings for a in sub.choices['continue']._actions)
             rows = [dict(zip(m['entry_columns'], r)) for r in tool['commands'].values()]
             for row in rows + list(tool.get('modes', {}).values()):
-                function_exists(tool['file'], row['source_function'])
+                function_exists(tool['file'], row['handler'])
                 assert row['classification'] in ('read_only','outward','local_mutation','unresolved')
                 assert row['worker'] is (name == 'review.py')
                 assert all(lock in m['locks'] for lock in row['locks'])
@@ -105,31 +99,30 @@ class TestD5Integration(unittest.TestCase):
             for command, classification in expected.items():
                 assert m['tools'][tool]['commands'][command][0] == classification
 
-    def test_parser_fixture_and_missing_function(self):
+    def test_fixture(self):
         parser = argparse.ArgumentParser()
         parser.add_subparsers().add_parser('added')
         assert subcommands(parser) != {'<root>'}
         with self.assertRaises(AssertionError):
-            function_exists('skills/hanig-project/scripts/linear_sync.py', 'nonexistent_function')
+            function_exists('linear_sync.py', 'nonexistent_function')
 
-    def test_mandate_baseline(self):
+    def test_mandate(self):
         self.assertEqual(sections((ROOT / 'docs/orchestrator-mandate.md').read_text()),
                          json.loads((FIXTURES / 'mandate-baseline.json').read_text()))
 
-    def test_no_production_import(self):
+    def test_inactive(self):
         paths = list((ROOT / 'skills').glob('hanig-*/scripts/**/*.py'))
         paths += list((ROOT / 'lib').rglob('*.py')) + list((ROOT / 'scripts').rglob('*.py'))
         for path in paths:
             if path.name == 'd5_host.py':
                 continue
-            for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.Import):
-                    assert all('d5_host' not in a.name.split('.') for a in node.names), path
-                elif isinstance(node, ast.ImportFrom):
-                    assert 'd5_host' not in (node.module or '').split('.'), path
-                    assert all(a.name != 'd5_host' for a in node.names), path
-                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    assert node.value != 'd5_host' and not node.value.endswith('/d5_host.py'), path
+            for n in ast.walk(ast.parse(path.read_text())):
+                names = []
+                if isinstance(n, (ast.Import, ast.ImportFrom)):
+                    names = [a.name for a in n.names] + [getattr(n, 'module', '') or '']
+                if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                    assert n.value != 'd5_host' and not n.value.endswith('/d5_host.py'), path
+                assert all('d5_host' not in name.split('.') for name in names), path
 
 
 if __name__ == '__main__':
