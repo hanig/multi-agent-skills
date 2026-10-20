@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import stat
 import subprocess
 import sys
@@ -46,8 +45,8 @@ def dirty(work):
 
 
 def token(value):
-  if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value) or value.endswith("."):
-    raise Refusal("invalid unit/attempt component: " + repr(value))
+  if not value or value in (".", "..") or any(c in value for c in ("/", "\\", "\0")):
+    raise Refusal("unsafe unit/attempt: " + repr(value))
   return value
 
 
@@ -57,7 +56,7 @@ def authority(args, plan):
     raise Refusal("plan differs from coordinator's recorded digest")
   unit = next((u for u in plan["units"] if u["id"] == args.unit), None)
   if not unit or unit["kind"] != "code":
-    raise Refusal("unit must name a recorded code unit")
+    raise Refusal("not a recorded code unit")
   us = state.get("units", {}).get(args.unit, {})
   current = Path(us.get("attempt_dir") or "").name
   attempt = token(args.attempt or current)
@@ -91,7 +90,7 @@ def authority(args, plan):
   agent = (us.get("job_id") if attempt == current else
       (us.get("code_terminal_watches", {}).get(attempt) or {}).get("agent_id"))
   if not agent:
-    raise Refusal("missing coordinator agent binding: " + attempt)
+    raise Refusal("missing agent binding: " + attempt)
   return attempt, record, facts, work, agent
 
 
@@ -99,7 +98,7 @@ def stopped(agent):
   rc, out, err = run(["paseo", "inspect", "--json", str(agent)])
   rec = PIO.first_json_object(out) if rc == 0 else None
   if not rec:
-    raise Refusal("cannot inspect retained agent: " + err)
+    raise Refusal("cannot inspect agent: " + err)
   status = str(rec.get("Status") or rec.get("status") or "").lower()
   if rec.get("PendingPermissions") or rec.get("pendingPermissions"):
     raise Refusal("agent has pending permissions")
@@ -110,7 +109,6 @@ def stopped(agent):
 
 
 def content(work):
-  """Detect entries Git can silently omit."""
   index = git(work, "ls-files", "--stage", "-z").split("\0")
   for row in index + git(work, "ls-tree", "-rz", "HEAD").split("\0"):
     if row.startswith("160000 "):
@@ -158,7 +156,7 @@ def prepare(args, plan):
   original = oid(record.get("head_at_retention"))
   destination = "refs/heads/recovery/{}-{}".format(args.unit, attempt)
   if record.get("recovery_ref") != destination or not record.get("reason"):
-    raise Refusal("invalid retained destination or stop reason")
+    raise Refusal("invalid recovery ref or reason")
   git(work, "check-ref-format", destination)
   receipt_path = Path(args.state_dir) / "recovery-seeds" / args.unit / attempt / "prepared.json"
   receipt = read_object(receipt_path) if receipt_path.exists() else None
@@ -181,7 +179,7 @@ def prepare(args, plan):
   if problem:
     raise Refusal(problem)
   if git(work, "rev-parse", "--verify", "HEAD^{commit}").strip() != expected:
-    raise Refusal("HEAD disagrees with retained head or receipt")
+    raise Refusal("HEAD disagrees with retention/receipt")
   git(work, "merge-base", "--is-ancestor", oid(facts["base_commit"]), original)
   stopped(agent)
   content(work)
@@ -224,7 +222,8 @@ def main(argv=None):
   parser.add_argument("--write", action="store_true")
   args = parser.parse_args(argv)
   try:
-    token(args.unit)
+    for part in args.unit.split("/"):
+      token(part)
     plan = read_object(args.plan)
     authority(args, plan)  # path policy before opening the lease
     # Preview never creates a missing lease file.

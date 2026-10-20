@@ -322,7 +322,7 @@ Prints outcomes, touched files, class, issue draft and quoted command.
 Scratch repositories are removed on failure/interrupt. No CI rerun or recorded
 pass; merge still requires a complete green run.
 
-Prepare a retained provider-stopped worktree locally with:
+Prepare a retained worktree:
 
 ```sh
 python3 "$HANIG_ORCHESTRATE_DIR/scripts/preserve_seed.py" prepare plan.json \
@@ -331,9 +331,8 @@ python3 "$HANIG_ORCHESTRATE_DIR/scripts/preserve_seed.py" prepare plan.json \
 
 Add `--write` for a detached `RECOVERY, NOT READY:` commit and fsynced
 `recovery-seeds/UNIT/ATTEMPT/prepared.json` receipt. Preview lists ignored
-omissions without changes; clean retries reuse the receipt. Configure Git
-identity; filters may normalize content. No push or cleanup. `publication_digest`
-hashes the other fields as sorted compact JSON; it proves no inspection.
+omissions without changes; clean retries reuse the receipt. No push or cleanup.
+`publication_digest` hashes the other fields as sorted compact JSON.
 
 The connected `merge_unit.py` operator requires passing `integration-tests`
 and, when declared by the target policy, `changed-tests-stable` evidence

@@ -1,4 +1,3 @@
-"""Recovery CLI with real Git and a bare remote."""
 import hashlib
 import json
 import os
@@ -28,35 +27,31 @@ class TestPreserveSeed(unittest.TestCase):
     self.env = {k: v for k, v in os.environ.items()
           if not k.startswith(("GIT_", "HANIG_", "SWARM_"))}
     self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
-            GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
-            GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid")
-    for name in ("edit", "deleted", "mode", "tracked.ignored"):
-      (self.repo / name).write_text("base\n")
-    self.git(self.repo, "add", "-A")
-    self.git(self.repo, "commit", "-qm", "base")
-    self.git(self.repo, "push", "-q", "origin", "main")
-    self.base = self.git(self.repo, "rev-parse", "HEAD")
+            GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@x",
+            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@x")
     self.sd = self.tmp / "state"
-    self.root = self.tmp / "runs"
-    self.attempt = self.root / "u" / "a1"
-    self.attempt.mkdir(parents=True)
+    root = self.tmp / "runs"
+    attempt = root / "u" / "a1"
+    attempt.mkdir(parents=True)
     unit = dict(F.code_unit(self.repo, "u"), outputs=["evidence.md"])
     self.plan = {"name": "seed-test", "units": [unit]}
-    self.state = {"units": {}, "root": str(self.root), "plan_digest": S.plan_digest(self.plan)}
-    S._capture_artifact_basis(self.state, "u", str(self.attempt), unit)
-    job, error = S._submit(unit, str(self.attempt), False, self.state, str(self.sd))
+    self.state = {"units": {}, "root": str(root), "plan_digest": S.plan_digest(self.plan)}
+    S._capture_artifact_basis(self.state, "u", str(attempt), unit)
+    job, error = S._submit(unit, str(attempt), False, self.state, str(self.sd))
     self.assertIsNone(error)
     self.us = self.state["units"]["u"]
     self.work = Path(self.us["attempt_launch_facts"]["a1"]["execution_workspace"])
     self.wg("push", "-q", "origin", "HEAD:refs/heads/swarm-a1")
+    for name in ("edit", "deleted", "mode", "tracked.ignored"):
+      (self.work / name).write_text("base\n")
     (self.work / "committed").write_text("unpushed\n")
-    self.wg("add", "committed")
+    self.wg("add", "-A")
     self.wg("commit", "-qm", "unpushed")
     self.head = self.wg("rev-parse", "HEAD")
     self.record = {"phase": "retained", "branch": "swarm-a1", "reason": "content_filter",
       "worktree_path": str(self.work), "head_at_retention": self.head,
       "recovery_ref": "refs/heads/recovery/u-a1"}
-    self.us.update(state="FAILED", attempt_dir=str(self.attempt), job_id=job,
+    self.us.update(state="FAILED", attempt_dir=str(attempt), job_id=job,
            attempt_provider_stops={"a1": self.record})
     (self.sd / SS.LOCK).touch()
     self.plan_path = self.tmp / "plan.json"
@@ -234,7 +229,7 @@ class TestPreserveSeed(unittest.TestCase):
          (["attempt_launch_intents", "a1", "attempt_id"], "a2"),
          (["attempt_provider_stops", "a1", "worktree_path"], str(self.repo)),
          (["attempt_launch_facts", "a1", "attempt_id"], "a2"),
-         (["attempt_provider_stops", "a1", "head_at_retention"], self.base)]
+         (["attempt_provider_stops", "a1", "head_at_retention"], self.git(self.repo, "rev-parse", "HEAD"))]
     original = json.dumps(self.state)
     for keys, value in faults + [(None, unrelated)]:
       with self.subTest(keys=keys):
@@ -258,6 +253,18 @@ class TestPreserveSeed(unittest.TestCase):
                   ("error", ["permission"]), ("unknown", [])):
       self.agent.write_text(json.dumps({"status": status, "pendingPermissions": permissions}))
       self.refused("agent")
+
+  def test_git_valid_unit_name(self):
+    for uid in ("../u", "u/../v", "/u"):
+      self.refused("unsafe", "--unit", uid)
+    self.plan["units"][0]["id"] = "_u/sub"
+    self.state["units"]["_u/sub"] = self.state["units"].pop("u")
+    for key in ("attempt_launch_intents", "attempt_launch_facts"):
+      self.us[key]["a1"]["unit_id"] = "_u/sub"
+    self.record["recovery_ref"] = "refs/heads/recovery/_u/sub-a1"
+    self.state["plan_digest"] = S.plan_digest(self.plan)
+    self.save()
+    self.ok("--unit", "_u/sub", "--write")
 
   def test_unsupported_content(self):
     nested = self.work / "nested"
