@@ -323,12 +323,12 @@ Scratch repositories are removed on failure/interrupt. No CI rerun or recorded
 pass; merge still requires a complete green run.
 
 `python3 "$HANIG_ORCHESTRATE_DIR/scripts/preserve_seed.py" prepare PLAN --state-dir DIR --unit U [--attempt A] [--root ROOT] [--write]`
-previews retained, stopped work; `--write` prepares a local recovery commit.
-Git supplies the tree and ignored list; changed gitlinks refuse. Matching retries
-reuse `refs/hanig-recovery/<unit>/<attempt>` and
-`DIR/recovery-seeds/<unit>/<attempt>/prepared.json`. The checkout and real index
-stay unchanged. No review, push or release occurs. Ignored bytes remain;
-standalone special files are omitted without listing.
+previews stopped, retained work; `--write` makes a local recovery commit.
+Git supplies the tree and ignored list; changed gitlinks refuse. Retry reuses
+`refs/hanig-recovery/<unit>/<attempt>` and
+`DIR/recovery-seeds/<unit>/<attempt>/prepared.json`. No review, push, release,
+checkout or real-index change. Ignored bytes remain; untracked special files
+are omitted without listing.
 
 The connected `merge_unit.py` operator requires passing `integration-tests`
 and, when declared by the target policy, `changed-tests-stable` evidence
