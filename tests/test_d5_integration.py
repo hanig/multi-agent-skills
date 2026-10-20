@@ -193,8 +193,8 @@ class TestD5Integration(unittest.TestCase):
     if isinstance(n, ast.Call) and ast.unparse(n.func).split('.')[0] not in shadowed and ast.unparse(n.func) in (
       '__import__', 'importlib.import_module', 'importlib.util.spec_from_file_location', 'importlib.machinery.SourceFileLoader'):
      call=ast.unparse(n.func)
-    index, key=(1, 'location') if call.endswith('spec_from_file_location') else ((1, 'path') if call.endswith('SourceFileLoader') else (0, 'name'))
-    for arg in n.args[index:index+1] + [k.value for k in n.keywords if k.arg == key]:
+     index, key=(1, 'location') if call.endswith('spec_from_file_location') else ((1, 'path') if call.endswith('SourceFileLoader') else (0, 'name'))
+     for arg in n.args[index:index+1] + [k.value for k in n.keywords if k.arg == key]:
       if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
        assert 'd5_host' not in arg.value.split('.') and Path(arg.value).name != 'd5_host.py', path
     assert all('d5_host' not in name.split('.') for name in names), path
