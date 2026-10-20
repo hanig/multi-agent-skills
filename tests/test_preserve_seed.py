@@ -188,8 +188,11 @@ class TestPreserveSeed(unittest.TestCase):
     self.wg("config", "user.useConfigOnly", "true")
     saved = self.env.copy()
     self.env = {k: v for k, v in saved.items() if not k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}
+    before = self.snapshot()
     self.refused("identity")
+    self.eq(self.snapshot(), before)
     self.env = saved
+    self.wg("checkout", "--detach", self.head)
     self.eq(self.wg("rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
     self.ok("--write")
 
@@ -209,17 +212,67 @@ class TestPreserveSeed(unittest.TestCase):
     excludes = self.tmp / "excludes"
     excludes.write_text("draft.txt\npipe\nnested/\n")
     config = self.tmp / "branch.cfg"
-    config.write_text("[core]\n excludesFile = /dev/null\n")
-    self.wg("config", "core.excludesFile", str(excludes))
+    config.write_text("[core]\n excludesFile = " + str(excludes) + "\n")
+    self.wg("config", "core.excludesFile", "/dev/null")
     self.wg("config", "includeIf.onbranch:swarm-a1.path", str(config))
     (self.work / "draft.txt").write_text("draft\n")
     os.mkfifo(self.work / "pipe")
     (self.work / "nested").mkdir()
     self.git(self.work / "nested", "init", "-q")
-    result = self.ok("--write")
+    for args in ((), ("--write",), ("--write",)):
+      result = self.ok(*args)
+      for name in ("draft.txt", "pipe", "nested"):
+        self.assertIn(repr(name) + OMITTED, result.stdout)
     self.eq(self.wg("ls-files", "draft.txt"), "")
-    for name in ("draft.txt", "pipe", "nested"):
-      self.assertIn(repr(name) + OMITTED, result.stdout)
+
+  def test_repeat_refusal_unchanged(self):
+    os.mkfifo(self.work / "pipe")
+    before = self.snapshot()
+    for _ in range(2):
+      self.refused("pipe")
+      self.eq(self.snapshot(), before)
+
+  def gitlink(self):
+    module = self.work / "module"
+    module.mkdir()
+    self.git(module, "init", "-q")
+    (module / "file").write_text("module\n")
+    self.git(module, "add", "file")
+    self.git(module, "commit", "-qm", "module")
+    self.wg("update-index", "--add", "--cacheinfo", "160000," + self.git(module, "rev-parse", "HEAD") + ",module")
+    self.wg("commit", "-qm", "inherited gitlink")
+    self.head = self.wg("rev-parse", "HEAD")
+    self.record["head_at_retention"] = self.head
+    self.save()
+    return module
+
+  def test_unchanged_gitlink(self):
+    module = self.gitlink()
+    (module / "file").write_text("nested edit\n")
+    entry = self.wg("ls-tree", "HEAD", "module")
+    (self.work / "edit").write_text("edit\n")
+    self.ok("--write")
+    self.eq(self.wg("ls-tree", "HEAD", "module"), entry)
+    self.eq(self.wg("show", "HEAD:edit"), "edit")
+
+  def test_uninitialized_gitlink(self):
+    shutil.rmtree(self.gitlink())
+    (self.work / "module").mkdir()
+    entry = self.wg("ls-tree", "HEAD", "module")
+    self.ok("--write")
+    self.eq(self.wg("ls-tree", "HEAD", "module"), entry)
+
+  def test_removed_gitlink(self):
+    shutil.rmtree(self.gitlink())
+    self.wg("rm", "--cached", "module")
+    self.refused("module")
+
+  def test_changed_gitlink(self):
+    module = self.gitlink()
+    self.git(module, "commit", "--allow-empty", "-qm", "changed")
+    self.refused("module")
+    self.wg("add", "module")
+    self.refused("module")
 
   def test_deep_paths(self):
     path = self.work

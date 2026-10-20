@@ -331,7 +331,11 @@ python3 "$HANIG_ORCHESTRATE_DIR/scripts/preserve_seed.py" prepare plan.json \
 
 Add `--write` for a detached `RECOVERY, NOT READY:` commit and fsynced
 `recovery-seeds/UNIT/ATTEMPT/prepared.json` receipt. Preview lists ignored
-omissions without changes; clean retries reuse the receipt. No push or cleanup.
+omissions without changes; clean retries reuse the receipt. Validation uses the
+retained branch rules before mutation; its effective ignore-file path is retained
+in the receipt for staging and retries. Unchanged gitlinks stay unchanged.
+The operator issues no network or cleanup command. Configured Git filters and
+hooks are trusted; their side effects are outside this guarantee.
 `publication_digest` hashes the other fields as sorted compact JSON.
 
 The connected `merge_unit.py` operator requires passing `integration-tests`

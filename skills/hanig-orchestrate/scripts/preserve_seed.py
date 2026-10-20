@@ -32,16 +32,23 @@ def run(command, timeout=60, cwd=None, data=None):
   return result.returncode, result.stdout, result.stderr
 
 
-def git(work, *args):
-  rc, out, err = run(["git", "-C", str(work), "-c", "core.hooksPath=/dev/null",
-            "-c", "commit.gpgsign=false"] + list(args))
+def git(work, *args, excludes=None):
+  config = [] if excludes is None else ["-c", "core.excludesFile=" + excludes]
+  rc, out, err = run(["git", "-C", str(work), "-c", "commit.gpgsign=false"] + config + list(args))
   if rc:
     raise Refusal("git {}: {}".format(args[0], err or out))
   return out
 
 
-def dirty(work):
-  return git(work, "status", "--porcelain", "--untracked-files=all")
+def dirty(work, excludes=None):
+  return git(work, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=dirty", excludes=excludes)
+
+
+def ignore_file(work):
+  rc, out, err = run(["git", "-C", str(work), "config", "--null", "--path", "--get", "core.excludesFile"])
+  if rc not in (0, 1):
+    raise Refusal("cannot read ignore configuration: " + err)
+  return out[:-1] if rc == 0 else str(Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "git/ignore")
 
 
 def token(value):
@@ -108,12 +115,17 @@ def stopped(agent):
     raise Refusal("agent status unknown: " + status)
 
 
-def content(work):
+def content(work, excludes):
   index = git(work, "ls-files", "--stage", "-z").split("\0")
-  for row in index + git(work, "ls-tree", "-rz", "HEAD").split("\0"):
-    if row.startswith("160000 "):
-      raise Refusal("unsupported submodule gitlink: " + repr(row.split("\t", 1)[1]))
   tracked = {row.split("\t", 1)[1] for row in index if row}
+  links = {row.split("\t", 1)[1] for row in git(work, "ls-tree", "-rz", "HEAD").split("\0")
+       if row.startswith("160000 ")}
+  for cached in ([], ["--cached"]):
+    rows = git(work, "diff", "--raw", "-z", "--no-renames", "--no-ext-diff",
+         "--ignore-submodules=dirty", *cached, "HEAD", "--").split("\0")
+    for pos in range(0, len(rows) - 1, 2):
+      if "160000" in rows[pos].lstrip(":").split()[:2]:
+        raise Refusal("unsupported submodule gitlink change: " + repr(rows[pos + 1]))
   entries = []
   pending = [Path(work)]
   while pending:
@@ -122,6 +134,8 @@ def content(work):
       if directory == Path(work) and path.name == ".git":
         continue
       relative = path.relative_to(work).as_posix()
+      if relative in links:
+        continue
       mode = path.lstat().st_mode
       nested = stat.S_ISDIR(mode) and ((path / ".git").exists() or (
         (path / "HEAD").is_file() and run([
@@ -132,7 +146,7 @@ def content(work):
   untracked = [p for p, _, _ in entries if p not in tracked]
   ignored = set()
   if untracked:
-    rc, out, err = run(["git", "-C", str(work), "check-ignore", "-z", "--stdin"],
+    rc, out, err = run(["git", "-C", str(work), "-c", "core.excludesFile=" + excludes, "check-ignore", "-z", "--stdin"],
              data="\0".join(untracked) + "\0")
     if rc not in (0, 1):
       raise Refusal("cannot classify ignored paths: " + err)
@@ -169,6 +183,9 @@ def prepare(args, plan):
   git(work, "check-ref-format", destination)
   receipt_path = Path(args.state_dir) / "recovery-seeds" / args.unit / attempt / "prepared.json"
   receipt = read_object(receipt_path) if receipt_path.exists() else None
+  excludes = receipt.get("excludes_file") if receipt is not None else ignore_file(work)
+  if not isinstance(excludes, str):
+    raise Refusal("receipt has no ignore configuration")
   binding = {"unit": args.unit, "attempt": attempt, "original_head": original,
        "destination_ref": destination, "stop_reason": record["reason"]}
   if receipt is not None:
@@ -182,7 +199,7 @@ def prepare(args, plan):
   else:
     expected, identity_facts = original, facts
     if (git(work, "rev-parse", "--abbrev-ref", "HEAD").strip() == "HEAD"
-        and not dirty(work)):
+        and not dirty(work, excludes)):
       identity_facts = dict(facts, branch="HEAD")
   problem = W.workspace_identity_problem(run, identity_facts)
   if problem:
@@ -191,10 +208,9 @@ def prepare(args, plan):
     raise Refusal("HEAD disagrees with retention/receipt")
   git(work, "merge-base", "--is-ancestor", oid(facts["base_commit"]), original)
   stopped(agent)
-  if receipt is not None or not args.write:
-    content(work)
+  content(work, excludes)
   if receipt is not None:
-    if (dirty(work)
+    if (dirty(work, excludes)
         or git(work, "rev-parse", "HEAD^").strip() != original
         or not git(work, "log", "-1", "--encoding=UTF-8", "--format=%B").startswith(PREFIX)):
       raise Refusal("receipt disagrees with worktree content or commit")
@@ -202,20 +218,21 @@ def prepare(args, plan):
       save_receipt(receipt_path, receipt, args.state_dir)
     print(json.dumps(receipt, sort_keys=True))
     return
-  print(git(work, "status", "--short", "--untracked-files=all"), end="")
+  print(git(work, "status", "--short", "--untracked-files=all", excludes=excludes), end="")
   if not args.write:
     print("Preview: detach at " + original + "; git add -A; create recovery label commit")
     return
+  git(work, "var", "GIT_AUTHOR_IDENT")
+  git(work, "var", "GIT_COMMITTER_IDENT")
   git(work, "checkout", "--detach", original)
-  content(work)  # includeIf.onbranch can change ignore rules after detachment.
-  git(work, "add", "-A")
+  git(work, "add", "-A", excludes=excludes)
   message = (PREFIX + " retained provider stop\n\nUnit: {}\nAttempt: {}\n"
        "Stop reason: {}\nOriginal head: {}\nNo review ran.\n").format(
          args.unit, attempt, record["reason"], original)
   git(work, "commit", "--allow-empty", "--cleanup=verbatim", "-m", message)
-  receipt = dict(binding, prepared_head=git(work, "rev-parse", "HEAD").strip(),
+  receipt = dict(binding, excludes_file=excludes, prepared_head=git(work, "rev-parse", "HEAD").strip(),
          prepared_at=datetime.now(timezone.utc).isoformat())
-  if dirty(work):
+  if dirty(work, excludes):
     raise Refusal("dirty worktree after commit; no receipt written")
   receipt["publication_digest"] = digest(receipt)
   save_receipt(receipt_path, receipt, args.state_dir)
