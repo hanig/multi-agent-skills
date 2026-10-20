@@ -16,7 +16,7 @@ did not converge.
 
 Use the coordinator's state and launch anchors, not agent-written receipts, for
 the unit, attempt, repository, branch, agent ID and stop reason. Run on the
-coordinator host under its existing authority. Replace quoted placeholders with
+coordinator host under its existing authority. Shell-escape substituted values (including quotes, backslashes, dollar signs and backticks) rather than pasting raw text into the quoted placeholders; use
 the recorded values; `<ref>` is the full `refs/heads/recovery/<unit>-<attempt>`
 printed by status. Set `HANIG_SWARM_DIR` to the directory of the loaded swarm
 skill. `PLAN`, `DIR`, `ROOT` and `FILE` below mean the existing plan, coordinator
@@ -52,7 +52,7 @@ absolute paths. Run commands individually and inspect each result.
 
    Both routes must name the anchored destination, with no extra push
    destinations; resolve any mismatch before publication. Read the full
-   `head_at_retention` from this attempt's coordinator-owned retained record.
+   `head_at_retention` from `DIR/swarm-state.json` at `units[unit].attempt_provider_stops[attempt].head_at_retention` (coordinator-owned state).
    If it is missing, stop for reconciliation. Compare the live branch with that
    recorded head before accepting it as the recovery baseline:
 
@@ -143,15 +143,37 @@ absolute paths. Run commands individually and inspect each result.
    Require a successful query. If the ref already exists, compare its full SHA
    with the prepared HEAD and stop this publication attempt, even if they
    match. Record whether it is identical or different and reconcile with the
-   prior recovery evidence before continuing. Do not overwrite it. If it is
-   absent, publish only to the required recovery ref:
+   prior recovery evidence before continuing. Do not push to a ref observed to
+   exist. If it is absent, publish only to the required recovery ref:
 
    ```sh
-   git -C "<path>" push origin "HEAD:<ref>"
+   git -C "<path>" push --porcelain --no-follow-tags origin "HEAD:<ref>"
    ```
 
-   Never force. If publication fails or another operator may have published
-   concurrently, retain the worktree and reconcile; do not retry blindly.
+   Never force. The explicit no-follow-tags option prevents inherited
+   `push.followTags` from submitting unrelated annotated tags. Save the full
+   output and exit status. In porcelain output, the first field is a flag and
+   the second field names the source and destination ref, separated by a colon;
+   fields are separated by tabs. Inspect the row for the exact recovery ref,
+   preserving the leading space in its flag.
+   Continue only when the command exits 0 and the flag is `*` for the exact recovery ref.
+
+   `*` means a new ref. A space means fast-forward: another publisher created
+   this ref between the absence query and push. Stop, report both the old head
+   shown in the update summary and the full prepared head, and do not continue
+   or remove anything. Resolve the old abbreviated object name to its full SHA
+   in the retained repository when recording those heads. This detects the race
+   **after the fact; it does not prevent it**. No work is lost by that
+   fast-forward: the other commit remains an ancestor of the prepared commit.
+   `!` means rejected and also stops the procedure. Any other flag (including
+   `=` for an already identical ref), missing/ambiguous row or nonzero exit
+   means stop and retain the worktree; do not retry blindly.
+
+   One terminal session is the sole operator. Concurrent publishers of the
+   same recovery ref are outside the supported envelope. If detected, keep
+   the worktree and both publication records, reconcile them under the sole
+   operator, and obtain continuation authority before resuming. Never reset
+   the remote ref or remove work to undo the race.
 
 7. Verify the publication independently:
 
@@ -223,7 +245,33 @@ the comparison and complete the procedure. Reverting the comparison must make
 the changed-head scenario fail its no-publication assertion: saving B as the
 initial branch SHA alone does not detect the mismatch.
 
+## Manual regression tests: publication
+
+Use disposable local repositories and bare remotes, with no real services.
+Execute the page's push command and apply its exit-status and exact-ref flag
+check to the actual porcelain output; do not trim the leading space.
+
+- Enable `push.followTags=true`, create a reachable annotated tag, and install
+  a local remote hook that rejects tags but permits recovery branches. Confirm
+  the hook rejects the tag. The documented command must create the recovery
+  ref at the prepared commit, exit 0 with `*`, and leave the tag unpublished.
+  Removing no-follow-tags must fail this success assertion.
+- After the successful absence query, interpose a publication at ancestor A.
+  The documented push then fast-forwards to prepared commit R and emits a
+  space. The procedure must stop before continuation or removal, report A and
+  R, and retain the worktree. Verify A is an ancestor of R. Removing the
+  new-ref-only flag check must fail the no-continuation assertion even though
+  the push and subsequent remote-head comparison both succeed.
+- Instead interpose a diverging commit. The documented push must exit nonzero
+  with `!`; the remote remains at the other head and the retained worktree
+  keeps the prepared commit. No continuation or removal is allowed.
+
+These tests supplement the full synthetic retained-attempt run through the
+real `record_stop` path, continuation, successor replay and guarded removal.
+
 ## Supported envelope and accepted limits
 
 - Supported: retained attempts as PR 256 records them, and an operator with push access to the anchored route.
 - Excluded: any code change, any change to the coordinator, the mandate or skill declarations, and automation of these steps.
+
+Supported envelope amendment (marked; orchestrator, 2026-10-20): one operator publishes a given recovery ref at a time, per the owner's 2026-10-20 decision that one terminal session is the sole operator. Two concurrent publishers of the same recovery ref are outside the envelope, and the page's porcelain check is the detection.
