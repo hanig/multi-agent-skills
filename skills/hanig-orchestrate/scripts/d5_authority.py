@@ -1,11 +1,9 @@
-"""Inert D5 grant store. Callers supply an existing directory, time and bytes.
+"""Inert D5 store; callers supply directory, time and bytes.
 
-No registration, custody transitions or enforcement. All operations serialize
-on authority.lock; never remove that file. Filesystem errors propagate. A failed
-directory fsync can mean a complete replacement is visible but not confirmed
-durable: reread before retrying. Replacement archives the exact predecessor
-bytes first, so a failed replacement can leave an archive and the old head;
-retrying with the same predecessor bytes is safe.
+No registration, custody transitions or enforcement. Keep authority.lock
+permanent. Filesystem errors propagate; reread before retrying failed writes.
+Replacement archives exact predecessor bytes first; an interrupted replacement
+can retry when the archive matches. Each retry repeats the durable archive write.
 """
 import fcntl
 import hashlib
@@ -251,7 +249,6 @@ def replace(directory, new):
         if os.path.lexists(predecessor):
             _require(predecessor.read_bytes() == old_raw, "superseded",
                      "predecessor archive has different bytes")
-        else:
-            _write(predecessor, old_raw)
+        _write(predecessor, old_raw)
         _write(directory / RECORD_NAME, raw)
     return json.loads(raw)
