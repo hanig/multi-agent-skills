@@ -46,25 +46,37 @@ absolute paths. Run commands individually and inspect each result.
    ```sh
    git -C "<path>" remote get-url --all origin
    git -C "<path>" remote get-url --push --all origin
-   git -C "<path>" symbolic-ref HEAD
+   git -C "<path>" symbolic-ref -q HEAD
+   git -C "<path>" rev-parse HEAD
    git -C "<path>" rev-parse "refs/heads/<attempt-branch>"
    ```
 
    Both routes must name the anchored destination, with no extra push
    destinations; resolve any mismatch before publication. Read the full
    `head_at_retention` from `DIR/swarm-state.json` at `units[unit].attempt_provider_stops[attempt].head_at_retention` (coordinator-owned state).
-   If it is missing, stop for reconciliation. Compare the live branch with that
-   recorded head before accepting it as the recovery baseline:
+   If it is missing, stop for reconciliation. If symbolic-ref exits 0, its output
+   must be exactly `refs/heads/<attempt-branch>`; an attachment to any other
+   branch stops. Exit 1 with no output means detached; any other result stops.
+   Compare both the live branch and HEAD with the recorded head before accepting
+   it as the recovery baseline:
 
    ```sh
    test "$(git -C "<path>" rev-parse "refs/heads/<attempt-branch>")" = "<head_at_retention>"
+   test "$(git -C "<path>" rev-parse HEAD)" = "<head_at_retention>"
    ```
 
    A nonzero exit means stop for reconciliation before detaching, publishing or
    creating a successor. Do not adopt a post-stop commit as the baseline or
    reset it away; retain those bytes for inspection. Save the matching full SHA
-   for the unchanged-branch check below. A previously detached checkout needs
-   reconciliation with the saved preparation evidence before restarting.
+   for the unchanged-branch check below. Apply this table; the different-branch
+   stop overrides the other rows:
+
+   | Branch | HEAD | Action |
+   |---|---|---|
+   | at head_at_retention | at head_at_retention, attached or detached | proceed; no prior preparation evidence needed |
+   | not at head_at_retention | any | stop |
+   | at head_at_retention | detached at another commit | stop for reconciliation (the only case where prior preparation evidence matters) |
+   | any | attached to a different branch | stop |
 
 2. Confirm the retained attempt's agent is no longer running using its exact
    recorded agent ID in the agent manager. Record the observation and time;
@@ -76,10 +88,12 @@ absolute paths. Run commands individually and inspect each result.
 
    ```sh
    git -C "<path>" status --porcelain=v1 --ignored
-   git -C "<path>" status --porcelain=v1 --untracked-files=all --ignored
+   git -C "<path>" status --porcelain=v1 --untracked-files=all --ignored > "<listing-file>"
+   cat "<listing-file>"
    ```
 
-   Keep the full listing and the launch base identity outside the worktree.
+   Use a new `<listing-file>` outside the worktree, and require both commands
+   to succeed. Keep this full listing and the launch base identity there.
    Inspect the actual changes for secrets and unrelated files before staging.
    Untracked ignored files are not captured by the commit; neither are special
    files or nested repositories' contents. Already tracked files remain tracked
@@ -87,13 +101,21 @@ absolute paths. Run commands individually and inspect each result.
    the nested repository's contents. Inspect submodules and nested repositories
    separately, including ignored ones; do not rely on an add warning to find them.
 
-   The mandate's [preservation requirement](orchestrator-mandate.md#preserve-before-any-cleanup-path-runs)
-   still applies: keep an external snapshot of uncommitted work with base
-   identity, content digest, full porcelain listing and a successful restore
-   check, including patch application against the recorded base. Record its
-   location and validation. This procedure does not automate that snapshot.
-   Failed preservation leaves the work in place. Preserve excluded data
-   separately before any later removal; never treat a commit as its backup.
+   For this manual procedure only, owner decision ARC-2676-OD1 (2026-10-20)
+   makes the verified recovery commit the mandate's
+   [snapshot of uncommitted work](orchestrator-mandate.md#preserve-before-any-cleanup-path-runs):
+
+   - Base identity is the recovery commit's parent, which must equal
+     `head_at_retention`.
+   - The content digest is the commit and tree ID, confirmed on the remote by
+     the verification step.
+   - The full porcelain listing is this step-3 listing, saved outside the worktree.
+   - The restore check is the verified remote ref, plus the coordinator's own
+     reachability check in `swarm.py continue`.
+
+   A failed check leaves the work in place. Ignored, nested-repository and
+   special-file data require retaining the worktree under the removal checks
+   below; they are not backed up by the recovery commit.
 
 4. Detach before staging so the attempt branch cannot move. Run the first two
    commands separately, applying the stop rule in step 5 before committing:
@@ -123,9 +145,15 @@ absolute paths. Run commands individually and inspect each result.
 
    ```sh
    git -C "<path>" rev-parse HEAD
+   git -C "<path>" rev-parse "HEAD^{tree}"
    git -C "<path>" rev-parse "refs/heads/<attempt-branch>"
+   git -C "<path>" rev-parse HEAD^
+   test "$(git -C "<path>" rev-parse HEAD^)" = "<head_at_retention>"
+   git -C "<path>" status --porcelain=v1 --untracked-files=all
    ```
 
+   Require the parent check to exit 0 and the status command to succeed and print
+   nothing. Otherwise stop before pushing. Save the full commit and tree IDs.
    Stop if the branch moved. Never commit recovery on that branch or push to it.
 
 5. Stop instead of continuing if Git warns about an embedded repository, or
@@ -159,15 +187,18 @@ absolute paths. Run commands individually and inspect each result.
    Continue only when the command exits 0 and the flag is `*` for the exact recovery ref.
 
    `*` means a new ref. A space means fast-forward: another publisher created
-   this ref between the absence query and push. Stop, report both the old head
-   shown in the update summary and the full prepared head, and do not continue
-   or remove anything. Resolve the old abbreviated object name to its full SHA
-   in the retained repository when recording those heads. This detects the race
+   this ref between the absence query and push. This detects the race
    **after the fact; it does not prevent it**. No work is lost by that
    fast-forward: the other commit remains an ancestor of the prepared commit.
-   `!` means rejected and also stops the procedure. Any other flag (including
-   `=` for an already identical ref), missing/ambiguous row or nonzero exit
-   means stop and retain the worktree; do not retry blindly.
+   Save the old head from the update summary too, resolving its abbreviated
+   object name to the full SHA in the retained repository.
+
+   `!` means rejected. On `!` or **any flag other than `*`**, including a space
+   or `=` for an identical ref, run the step-7 ls-remote command and report the
+   full remote SHA next to the full prepared HEAD. Neither continue nor remove
+   anything. A missing/ambiguous row or nonzero push exit also takes this stop
+   path. If the query fails or names no exact ref, report that observation
+   alongside the prepared HEAD; never invent a remote SHA or retry blindly.
 
    One terminal session is the sole operator. Concurrent publishers of the
    same recovery ref are outside the supported envelope. If detected, keep
@@ -175,15 +206,19 @@ absolute paths. Run commands individually and inspect each result.
    operator, and obtain continuation authority before resuming. Never reset
    the remote ref or remove work to undo the race.
 
-7. Verify the publication independently:
+7. Query the remote independently, both after a successful new-ref publication
+   and on the publication stop path:
 
    ```sh
    git -C "<path>" ls-remote origin "<ref>"
    ```
 
-   Require the exact ref and full prepared commit SHA, not merely exit 0 or a
-   similarly named ref. Save this result in the recovery evidence. Missing or
-   different output is not verified preservation. Preserved bytes are not
+   On the stop path, report the full remote SHA alongside the full prepared
+   HEAD and stop here, even when they match. Leave the worktree in place.
+   On the successful new-ref path, require the exact ref and full prepared
+   commit SHA, not merely exit 0 or a similarly named ref. That commit ID binds
+   the recorded tree ID; matching it confirms both. Save this result in the
+   recovery evidence. Missing or different output is not verified preservation. Preserved bytes are not
    completion evidence, a review pass, or authority to resume.
 
 8. Under the operator's continuation authority, write `FILE` describing the
@@ -216,34 +251,61 @@ absolute paths. Run commands individually and inspect each result.
 
 ## Manual removal and remaining status
 
-The coordinator never removes a retained worktree. Only after the recovery ref
-is verified **and the successor has merged**, the operator may remove it:
+The coordinator never removes a retained worktree. The default is to keep it.
+Only after the recovery ref is verified **and the successor has merged**, recheck
+that no writer or new work appeared and the step-3 listing and all snapshot
+checks above succeeded. Then inspect the saved listing and run:
+
+```sh
+cat "<listing-file>"
+find "<path>" \( -type p -o -type s -o -type b -o -type c \) -print
+find "<path>" -mindepth 2 -name .git -print
+```
+
+Removal is allowed only when all three commands succeed, the saved listing has
+no `!!` entry, and both find commands print nothing. Otherwise retain the
+worktree and report which check refused removal. Porcelain cannot show special
+files: a FIFO can be absent even from the full ignored listing. A nested
+repository may appear only as `?? sub/n/`; the second find detects its `.git`.
+The linked worktree's own `.git` is at depth 1 and is excluded by `-mindepth 2`.
+If the saved listing itself identifies a nested repository or special file,
+retain the worktree even if it has since disappeared from these scans.
+Ignored files can be deleted by an otherwise successful worktree removal, so
+never skip the saved-listing check. Only if every prerequisite holds, run:
 
 ```sh
 git -C "<repo>" worktree remove "<path>"
 ```
 
-First recheck that no writer or new work appeared, the external snapshot and its
-restore check are complete, and excluded data has been separately preserved.
-Ignored files can be removed along with an otherwise clean worktree: do not
-skip that check. If any requirement is unmet, leave the worktree in place. Do
-not force removal or delete the attempt branch as part of this procedure.
+Do not force removal or delete the attempt branch as part of this procedure.
 
 The status line stays even after manual removal, until a release tool exists:
 ARC-2485 is deferred. Do not edit coordinator state to hide it. Keep recovery
 and successor evidence so the stale path can be explained.
 
-## Manual regression test: a branch changed after retention
+## Manual regression tests: baseline and snapshot
 
-Use only a disposable local repository and bare remote. Build a retained attempt
-through the real `record_stop` path at commit A, then commit an extra file on
-its attempt branch to make commit B. Stop the fixture writer and execute step 1
-with the retained record still naming A. The comparison must exit nonzero;
-assert that the recovery ref is absent and no successor was appended. Keep B
-in the retained worktree. As a positive control, a branch still at A must pass
-the comparison and complete the procedure. Reverting the comparison must make
-the changed-head scenario fail its no-publication assertion: saving B as the
-initial branch SHA alone does not detect the mismatch.
+Use only disposable local repositories and bare remotes, with stopped fixture
+writers and retained records built through the real `record_stop` path at A.
+Execute the quoted commands and apply their stop rules; do not use coordinator
+preservation helpers to produce a snapshot.
+
+- Branch and attached HEAD at A proceed through verification. Detached HEAD at
+  A also proceeds with no prior preparation evidence; reinstating that evidence
+  gate must fail this success assertion.
+- Branch at A with detached HEAD at B stops at step 1 before any commit; assert
+  the stop point and absence of publication. Removing only the step-1 HEAD
+  comparison must fail the step-1 stop assertion, while the post-commit parent
+  check still stops before any push. Removing both comparisons must publish,
+  failing the no-publication assertion. Branch at B and attachment to another
+  branch each stop at step 1 too.
+- After a normal commit, show its parent equals A and its post-commit status is
+  empty. Exercise the empty-label alternative separately, starting at A.
+- Use the commit, tree ID, saved full listing, remote verification and continue
+  reachability check as the snapshot. Remove a clean worktree only after the
+  fixture successor has merged. Independently add an ignored file, a FIFO and a
+  nested repository; each must refuse removal and keep the worktree. Omitting
+  each corresponding removal check must fail its retention assertion.
 
 ## Manual regression tests: publication
 
@@ -258,13 +320,16 @@ check to the actual porcelain output; do not trim the leading space.
   Removing no-follow-tags must fail this success assertion.
 - After the successful absence query, interpose a publication at ancestor A.
   The documented push then fast-forwards to prepared commit R and emits a
-  space. The procedure must stop before continuation or removal, report A and
-  R, and retain the worktree. Verify A is an ancestor of R. Removing the
+  space. The procedure must query ls-remote, report the full remote and
+  prepared heads (both R after this update), save old head A too, and stop
+  before continuation or removal with the worktree retained. Verify A is an ancestor of R. Removing the
   new-ref-only flag check must fail the no-continuation assertion even though
   the push and subsequent remote-head comparison both succeed.
 - Instead interpose a diverging commit. The documented push must exit nonzero
   with `!`; the remote remains at the other head and the retained worktree
-  keeps the prepared commit. No continuation or removal is allowed.
+  keeps the prepared commit. Query ls-remote and report its full head alongside
+  the prepared head; reverting that instruction must fail the reporting check.
+  No continuation or removal is allowed.
 
 These tests supplement the full synthetic retained-attempt run through the
 real `record_stop` path, continuation, successor replay and guarded removal.
