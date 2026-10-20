@@ -323,10 +323,10 @@ Scratch repositories are removed on failure/interrupt. No CI rerun or recorded
 pass; merge still requires a complete green run.
 
 `python3 "$HANIG_ORCHESTRATE_DIR/scripts/preserve_seed.py" prepare PLAN --state-dir DIR --unit U [--write]`
-previews retained work; `--write` creates a private recovery commit. Git copies
-the live index, refreshing assume-unchanged entries; changed gitlinks
-refuse. Ignored bytes remain; untracked special files are omitted without listing.
-`--git-timeout SECONDS` bounds refresh/add/write-tree (default 1800). Expiry kills
+previews work; `--write` creates a private recovery commit. The index copy keeps
+its timestamp. Partial clones, assume-unchanged/skip-worktree entries and changed
+gitlinks refuse. Ignored bytes remain; untracked special files are omitted unlisted.
+`--git-timeout SECONDS` bounds add/write-tree (default 1800). Expiry kills
 the process group and refuses as retryable. Existing refs refuse; receipt, retry,
 durability and verification are unimplemented. No publication or release.
 
