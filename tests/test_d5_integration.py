@@ -1,5 +1,5 @@
 """D5 parser, AST and mandate contracts."""
-import argparse, ast, importlib.util, json, re, sys, unittest
+import argparse, ast, hashlib, importlib.util, json, re, sys, unittest
 from pathlib import Path
 from unittest import mock
 from tests.watchdog_guard import guarded_main
@@ -59,9 +59,12 @@ def function_exists(file, function):
 
 def sections(text):
   result = {}
+  bodies = []
   for h in ('Granted, without asking', 'Bounded by', 'Always stop and ask'):
     body = re.search(r'^## ' + re.escape(h) + r'\n(.*?)(?=^## |\Z)', text, re.M | re.S)[1]
+    bodies.append(body)
     result[h] = re.findall(r'^- .*?(?=\n+(?=[^ \n])|\Z)', body, re.M | re.S)
+  result['_raw'] = hashlib.sha256(json.dumps(bodies).encode()).hexdigest()
   return result
 
 
@@ -123,10 +126,13 @@ class TestD5Integration(unittest.TestCase):
     path = ROOT / 'docs/orchestrator-mandate.md'
     original = path.read_text()
     for entries in sections(original).values():
+      if isinstance(entries, str):
+        continue
       for bullet in entries:
-        changed = original.replace(bullet, bullet.rstrip('\n') + '\n\n  Exception: force-push is allowed.\n\n', 1)
-        with self.assertRaises(AssertionError):
-          self.reading(path, changed, 'test_mandate')
+        for gap in ('\n', '\n\n  ', '\n\n\t'):
+          changed = original.replace(bullet, bullet.rstrip('\n') + gap + 'Exception: force-push is allowed.\n\n', 1)
+          with self.assertRaises(AssertionError):
+            self.reading(path, changed, 'test_mandate')
 
   def test_import_literals(self):
     path = ROOT / 'skills/hanig-orchestrate/scripts/skill_paths.py'

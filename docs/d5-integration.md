@@ -6,7 +6,7 @@ Purpose: Record inactive integration contracts.
 
 **D5 is not active.** Production, mandate and declarations are unchanged.
 The [manifest](../tests/fixtures/d5/integration-manifest.json) pins parsers and
-source functions, not undiscovered effects. Unresolved evidence blocks dependents.
+source functions; unresolved evidence blocks dependents.
 
 Locks: coordinator → journal; merge releases before advance reacquires;
 drain then takes project → receipt. Continuation locks the plan. Review releases
@@ -16,12 +16,10 @@ then reacquires to publish. Remote cleanup: sibling → stage. No lease TTL.
 
 Jobs/agents/engines/watchers outlive dispatch; requests can finish after disconnect.
 Watchers advance/resume; merge advances/drains; SSH submits/cancels.
-Each retry needs its own permission.
 
 Worker path: `swarm_code_protocol._code_completion_protocol` → loaded review.py,
 complete range, author exclusion. Only review is a worker outward CLI; no D5
-permit. `child_environment` leaves daemon keys. Before confirmation: narrow
-read/survey/plan/gate/report mode.
+permit.
 
 Outbox fields: key/project/unit/verb/seq, closing_evidence/kind/unit_state/why/at,
 job_id/attempt_dir/evidence, optional tracker. Envelope: schema_version,
