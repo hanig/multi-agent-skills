@@ -1,8 +1,7 @@
 """Inactive Darwin 25.5.0 arm64 adapter; identity=(pid, kernel start_us).
 
-Host: KERN_PROCARGS2 argv[0] basename exactly claude, never p_comm. Unreadable
-args identify no host. session_id alone reads CLAUDE_CODE_SESSION_ID, the other
-D5-OD4 custody half, not selection input.
+Records contain only pid, ppid and kernel start time. session_id alone reads
+CLAUDE_CODE_SESSION_ID, the other D5-OD4 custody half. No custody is established.
 """
 import ctypes as C
 import os, struct, sys
@@ -19,7 +18,6 @@ class ProcessRecord(NamedTuple):
  pid: int
  ppid: int
  start_us: int
- command: str  # argv[0], empty if unreadable
 
 def session_id():
  """CLAUDE_CODE_SESSION_ID or None; sole environment reader."""
@@ -45,20 +43,6 @@ def _sysctl(mib, capacity=None):
   raise ValueError("sysctl overflow")
  return data.raw[:size.value]
 
-def _argv0(pid):
- try:
-  raw=_sysctl((1, 49, pid))  # CTL_KERN, KERN_PROCARGS2, pid
-  if struct.unpack_from("<i", raw)[0]<=0:
-   return ""
-  # argc, NUL-terminated exec path, NUL padding, then argv[0].
-  start=raw.index(b"\0", 4)+1
-  while start<len(raw) and raw[start]==0:
-   start += 1
-  end=raw.index(b"\0", start)
-  return raw[start:end].decode("utf-8", "surrogateescape")
- except (OSError, ValueError, struct.error):
-  return ""
-
 def _read(pid):
  if type(pid) is not int or not 0<pid<2 ** 31:
   return Unknown("invalid pid")
@@ -72,7 +56,7 @@ def _read(pid):
  ppid=struct.unpack_from("<i", raw, 560)[0]
  if found_pid!=pid or sec<=0 or not 0<=usec<1000000 or ppid<0:
   return Unknown("invalid kernel identity")
- return ProcessRecord(pid, ppid, sec*1000000+usec, _argv0(pid))
+ return ProcessRecord(pid, ppid, sec*1000000+usec)
 
 def _inspect(pid):
  try:
@@ -86,7 +70,7 @@ def process_identity(pid):
  return rec if isinstance(rec, Unknown) else ProcessIdentity(rec.pid, rec.start_us)
 
 def ancestry(pid):
- """Leaf first to topmost reachable ancestor; not atomic.
+ """Pid/ppid/start-only records, leaf first to topmost reachable; not atomic.
 
  Parent.start_us <= child.start_us; ties allowed. Stop before unreadable,
  cyclic or inverted hops. Inversion suggests PID reuse; trust nothing beyond
@@ -108,28 +92,3 @@ def ancestry(pid):
  if not chain or any(_inspect(rec.pid)!=rec for rec in chain):
   return Unknown("missing or changed ancestry")
  return tuple(chain)
-
-def select_session_ancestor(chain):
- """Outermost host in the unbroken leaf-first prefix, or None.
-
- Host: argv[0] basename exactly claude. Parent start <= child start (ties
- allowed); inversion suggests PID reuse. Trust nothing beyond broken links,
- repeated PIDs or inversions. A session started from inside
- another session's tool call binds to the outer session's process.
- """
- if isinstance(chain, Unknown) or not chain:
-  return None
- selected=None
- seen=set()
- previous=None
- for pid, ppid, start, command in chain:
-  if (type(pid) is not int or pid<=0 or pid in seen
-    or type(start) is not int or start<=0):
-   break
-  if previous and (previous.ppid!=pid or start>previous.start_us):
-   break
-  seen.add(pid)
-  if os.path.basename(command)=="claude":
-   selected=ProcessIdentity(pid, start)
-  previous=ProcessRecord(pid, ppid, start, command)
- return selected

@@ -1,1 +1,55 @@
-{"provenance":{"captured":"Claude orchestrator, 2026-10-20 ~14:28Z; two calls: ps -o pid=,ppid=,lstart=,comm= from $$. UTC-7 seconds; comm=argv[0].","columns":["pid","ppid","start_us","argv0"],"precision":"5808 kern.proc.pid start=1792027014.059298s; others converted seconds, including tied 3325/3323. PID 1 not captured.","derived":"Derived, not captured: python_runner adds Python; transient_claude adds shell/claude below 5808. Nested capture needs forbidden auto-approved tools."},"observed_shape":[[16932,5808,1792506481000000,"/bin/zsh"],[5808,3325,1792027014059298,"claude"],[3325,3323,1792026716000000,"-zsh"],[3323,1,1792026716000000,"/opt/homebrew/bin/herdr"]],"next_call":[[17046,5808,1792506482000000,"/bin/zsh"],[5808,3325,1792027014059298,"claude"],[3325,3323,1792026716000000,"-zsh"],[3323,1,1792026716000000,"/opt/homebrew/bin/herdr"]],"python_runner":[19000,16932,1792506482000000,"python"],"transient_claude":[[16932,18001,1792506481000000,"/bin/zsh"],[18001,18000,1792506421000000,"/bin/zsh"],[18000,5808,1792506420000000,"claude"],[5808,3325,1792027014059298,"claude"],[3325,3323,1792026716000000,"-zsh"],[3323,1,1792026716000000,"/opt/homebrew/bin/herdr"]]}
+{
+  "provenance": {
+    "captured": "Claude orchestrator, 2026-10-20 ~14:28Z; two calls: ps -o pid=,ppid=,lstart=,comm= from $$. Command column removed; times UTC-7 at second resolution.",
+    "columns": [
+      "pid",
+      "ppid",
+      "start_us"
+    ],
+    "precision": "5808 kern.proc.pid start=1792027014.059298s; others converted seconds, including tied 3325/3323. PID 1 not captured."
+  },
+  "observed_shape": [
+    [
+      16932,
+      5808,
+      1792506481000000
+    ],
+    [
+      5808,
+      3325,
+      1792027014059298
+    ],
+    [
+      3325,
+      3323,
+      1792026716000000
+    ],
+    [
+      3323,
+      1,
+      1792026716000000
+    ]
+  ],
+  "next_call": [
+    [
+      17046,
+      5808,
+      1792506482000000
+    ],
+    [
+      5808,
+      3325,
+      1792027014059298
+    ],
+    [
+      3325,
+      3323,
+      1792026716000000
+    ],
+    [
+      3323,
+      1,
+      1792026716000000
+    ]
+  ]
+}

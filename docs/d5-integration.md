@@ -14,25 +14,25 @@ internals block dependents.
 | Parity | Real parsers; both directions/all depths; continue --write | Not every flag |
 | Classes | Closed set; source rationale; key classes pinned | No exhaustive helper-effect proof |
 | Boundaries | Module-level def/async def exists | nothing checks that it is called or reachable. |
-| Ancestry | Leaf first to topmost reachable; three-record fixture | Not atomic |
+| Ancestry | Pid/ppid/start only; leaf first to topmost reachable; three-record and captured fixtures | Not atomic |
 | Hops | parent.start_time <= child.start_time; equality allowed; inversion suggests PID reuse | Nothing beyond a break is trusted |
-| Selection | Outermost host within unbroken leaf-first prefix, else None | a session started from inside another session's tool call binds to the outer session's process. |
 | Identity | (pid, kernel microsecond start time); reuse differs | EPERM/failure unknown, never dead |
-| Native ID | session_id alone reads CLAUDE_CODE_SESSION_ID (D5-OD4 custody half) | Not selection input or custody |
+| Native ID | session_id alone reads CLAUDE_CODE_SESSION_ID (D5-OD4 custody half) | No custody established |
 | Inactivity | Scope/merge refusal | No import scanner |
 | Mandate | U8 baseline below | No Markdown parser |
 
-Host: argv[0] basename exactly `claude`, from
-sysctl KERN_PROCARGS2 `(CTL_KERN,49,pid)`: argc, exec path, argv. Unreadable
-arguments identify no host. Never p_comm: the 2026-10-20 probe found `2.1.300`
-versus argv[0]/exec basename `claude` ([kernel source](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/kern_sysctl.c)).
-[Fixtures](../tests/fixtures/d5/host-chains.json) retain capture provenance;
-nested cases derived (live auto-approved tools forbidden); no identifying paths.
+Cut applied by the orchestrator on 2026-10-20 (DG7): host recognition and
+`select_session_ancestor` move to their first consumer, U2. Inputs are the
+round-4 empty-argv[0] counterexample (argv[1] `claude` misread as argv0), the
+`KERN_PROCARGS2` NUL-padding ambiguity, and the probe showing `p_comm` is the
+versioned binary name `2.1.300`. U0 contains no host-name rule or argument
+reader. [Fixtures](../tests/fixtures/d5/host-chains.json) retain the two real
+captures and their provenance with the command column removed.
 
 Committee **d5-u0-stepback**, 2026-10-20, NARROW_SCOPE/CONVERGED (DG4-DG6):
 U0-M3 moves to U8; U0-M5 uses scope/merge refusal. U8 mandate baseline blob
 `9491614c6ae2d7ca570b89c4ccb451f4c81f272f` at base
-`084001f14c7ada705b9dc1a8ba1a4789087b2d2a`.
+`136269424f1426f34e9afa0b227483e294a65d35`.
 
 Locks: coordinator -> journal; merge releases before advance reacquires;
 drain: project -> receipt; continuation: plan; review releases round before
