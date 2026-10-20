@@ -495,5 +495,23 @@ class TestD5Authority(unittest.TestCase):
       self.eq(self.path.read_bytes(), duplicate)
 
 
+  def test_retired_id_lookup_error(self):
+    self.create()
+    A.revoke(self.d, 101, "stop")
+    A.replace(self.d, self.successor(fresh=True))
+    prior = self.d / "superseded" / ("a" * 32 + ".json")
+    raw = prior.read_bytes()
+    self.path.unlink()
+    lstat = os.lstat
+    def denied(path, *args, **kwargs):
+      if Path(path) == prior:
+        raise PermissionError("archive lookup denied")
+      return lstat(path, *args, **kwargs)
+    with mock.patch.object(A.os, "lstat", side_effect=denied):
+      with self.assertRaises(PermissionError):
+        A.create(self.d, grant())
+    self.assertFalse(self.path.exists())
+    self.eq(prior.read_bytes(), raw)
+
 if __name__ == "__main__":
   unittest.main()
