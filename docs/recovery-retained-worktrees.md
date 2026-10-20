@@ -51,9 +51,20 @@ absolute paths. Run commands individually and inspect each result.
    ```
 
    Both routes must name the anchored destination, with no extra push
-   destinations; resolve any mismatch before publication. Save the full branch
-   SHA for the unchanged-branch check below. A previously detached checkout
-   needs reconciliation with the saved preparation evidence before restarting.
+   destinations; resolve any mismatch before publication. Read the full
+   `head_at_retention` from this attempt's coordinator-owned retained record.
+   If it is missing, stop for reconciliation. Compare the live branch with that
+   recorded head before accepting it as the recovery baseline:
+
+   ```sh
+   test "$(git -C "<path>" rev-parse "refs/heads/<attempt-branch>")" = "<head_at_retention>"
+   ```
+
+   A nonzero exit means stop for reconciliation before detaching, publishing or
+   creating a successor. Do not adopt a post-stop commit as the baseline or
+   reset it away; retain those bytes for inspection. Save the matching full SHA
+   for the unchanged-branch check below. A previously detached checkout needs
+   reconciliation with the saved preparation evidence before restarting.
 
 2. Confirm the retained attempt's agent is no longer running using its exact
    recorded agent ID in the agent manager. Record the observation and time;
@@ -199,6 +210,18 @@ not force removal or delete the attempt branch as part of this procedure.
 The status line stays even after manual removal, until a release tool exists:
 ARC-2485 is deferred. Do not edit coordinator state to hide it. Keep recovery
 and successor evidence so the stale path can be explained.
+
+## Manual regression test: a branch changed after retention
+
+Use only a disposable local repository and bare remote. Build a retained attempt
+through the real `record_stop` path at commit A, then commit an extra file on
+its attempt branch to make commit B. Stop the fixture writer and execute step 1
+with the retained record still naming A. The comparison must exit nonzero;
+assert that the recovery ref is absent and no successor was appended. Keep B
+in the retained worktree. As a positive control, a branch still at A must pass
+the comparison and complete the procedure. Reverting the comparison must make
+the changed-head scenario fail its no-publication assertion: saving B as the
+initial branch SHA alone does not detect the mismatch.
 
 ## Supported envelope and accepted limits
 
