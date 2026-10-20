@@ -360,7 +360,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/delegation-evidence.md", "review.honesty", 1),
         ("references/delegation-evidence.md", "review.panel-source", 1),
         ("references/dispatch-preamble.md", "delegation.contract", 2),
-        ("references/dispatch-preamble.md", "delegation.preamble", 26),
+        ("references/dispatch-preamble.md", "delegation.preamble", 27),
         ("references/handoff-takeover.md", "handoff.contents", 2),
         ("references/handoff-takeover.md", "handoff.transfer", 1),
         ("references/handoff-takeover.md", "limit.session-liveness", 1),
@@ -926,6 +926,24 @@ class TestAuthoredSkillShape(unittest.TestCase):
         for host_detail in ("zsh -ic", "~/.zshrc"):
             with self.subTest(host_detail=host_detail):
                 self.assertNotIn(host_detail, reference)
+
+    def test_dispatch_preamble_names_tree_wide_test_guards(self):
+        reference = (SKILLS / "hanig-orchestrate" / "references" /
+                     "dispatch-preamble.md").read_text(encoding="utf-8")
+        scoped = reference.split("## Scoped tests\n", 1)[1].split("\n## ", 1)[0]
+        bullet = next((line for line in scoped.splitlines()
+                       if line.startswith("- Always run the guards that scan every test file")), "")
+        for module in (
+                "tests.test_review_watchdog", "tests.test_project",
+                "tests.test_docs_truth", "tests.test_swarm_code_launch",
+                "tests.test_swarm_code_protocol", "tests.test_swarm_dispatch",
+                "tests.test_swarm_evidence", "tests.test_swarm_journal",
+                "tests.test_swarm_outbox", "tests.test_swarm_plan_rules",
+                "tests.test_swarm_preflight", "tests.test_swarm_routing",
+                "tests.test_swarm_state", "tests.test_swarm_workspaces"):
+            with self.subTest(module=module):
+                self.assertIn("`" + module + "`", bullet)
+        self.assertIn("<!-- declaration: delegation.preamble -->", bullet)
 
     def test_counterexample_guidance_requires_inspection_before_reproduction(self):
         """Pin conduct instructions, not worker compliance or OS isolation."""
