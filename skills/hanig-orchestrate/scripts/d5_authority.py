@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -221,7 +222,13 @@ def replace(directory, new):
         else:
             _require(new["invalidation"] is None, "invalidation", "new grant must be clear")
         archive = directory / "superseded"
-        archive.mkdir(mode=0o700, exist_ok=True)
+        try:
+            os.mkdir(archive, 0o700)
+        except FileExistsError:
+            pass
+        _require(_present(archive, "superseded") and
+                 stat.S_ISDIR(os.lstat(archive).st_mode),
+                 "superseded", "expected directory")
         _sync_directory(directory)
         predecessor = archive / (old["grant_id"] + ".json")
         if _present(predecessor, "superseded"):

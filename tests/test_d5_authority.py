@@ -1,5 +1,6 @@
 """Real temporary grant stores: schema, terminal history and durable transitions."""
 import copy
+import errno
 import fcntl
 import hashlib
 import json
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import contextmanager
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +63,12 @@ class TestD5Authority(unittest.TestCase):
       new["confirmation"]["owner_response"] += " fresh"
       new["invalidation"] = None
     return new
+
+  @contextmanager
+  def filesystem_refusal(self, field="record"):
+    with self.assertRaisesRegex(A.AuthorityError, field) as caught:
+      yield
+    raise caught.exception.__cause__
 
   def test_exact_roundtrip(self):
     r = grant()
@@ -296,7 +304,7 @@ class TestD5Authority(unittest.TestCase):
     for op in (lambda: A.revoke(self.d, 101, "stop"),
             lambda: A.check(self.d, 101, b"changed")):
       with mock.patch.object(A.os, "replace", side_effect=OSError("injected before replace")):
-        with self.assertRaisesRegex(OSError, "injected"):
+        with self.assertRaisesRegex(OSError, "injected"), self.filesystem_refusal():
           op()
       self.eq(self.path.read_bytes(), old_raw)
       self.stored(grant())
@@ -311,11 +319,11 @@ class TestD5Authority(unittest.TestCase):
         raise OSError("head interrupted")
       return replace(src, dst)
     with mock.patch.object(A.os, "replace", side_effect=OSError("archive interrupted")):
-      with self.assertRaisesRegex(OSError, "archive interrupted"):
+      with self.assertRaisesRegex(OSError, "archive interrupted"), self.filesystem_refusal():
         A.replace(self.d, self.successor())
     self.stored(grant())
     with mock.patch.object(A.os, "replace", side_effect=fail_head):
-      with self.assertRaisesRegex(OSError, "head interrupted"):
+      with self.assertRaisesRegex(OSError, "head interrupted"), self.filesystem_refusal():
         A.replace(self.d, self.successor())
     self.stored(grant())
     archive = self.d / "superseded" / ("a" * 32 + ".json")
@@ -331,7 +339,7 @@ class TestD5Authority(unittest.TestCase):
         raise OSError("archive fsync failed")
       return sync(path)
     with mock.patch.object(A, "_sync_directory", side_effect=fail_archive):
-      with self.assertRaisesRegex(OSError, "archive fsync failed"):
+      with self.assertRaisesRegex(OSError, "archive fsync failed"), self.filesystem_refusal():
         A.replace(self.d, self.successor())
     self.stored(grant())
     with mock.patch.object(A.os, "replace", wraps=A.os.replace) as install:
@@ -361,7 +369,7 @@ class TestD5Authority(unittest.TestCase):
             lambda: A.check(missing, 101, MANDATE),
             lambda: A.revoke(missing, 101, "stop"),
             lambda: A.replace(missing, self.successor())):
-      with self.assertRaises(FileNotFoundError):
+      with self.assertRaises(FileNotFoundError), self.filesystem_refusal():
         op()
       self.assertFalse(missing.exists())
 
@@ -508,7 +516,7 @@ class TestD5Authority(unittest.TestCase):
         raise PermissionError("archive lookup denied")
       return lstat(path, *args, **kwargs)
     with mock.patch.object(A.os, "lstat", side_effect=denied):
-      with self.assertRaises(PermissionError):
+      with self.assertRaises(PermissionError), self.filesystem_refusal("grant_id"):
         A.create(self.d, grant())
     self.assertFalse(self.path.exists())
     self.eq(prior.read_bytes(), raw)
