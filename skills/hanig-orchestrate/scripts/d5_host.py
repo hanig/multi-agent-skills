@@ -1,8 +1,4 @@
-"""Inactive D5 host evidence adapter; no CLI or production caller.
-
-Measured ABI: Darwin 25.5.0 arm64; SDK offsets in docs/d5-integration.md.
-Unknown includes absence; this module supplies no death verdict.
-"""
+"""Inactive adapter: measured Darwin 25.5.0 arm64 kinfo_proc ABI. No death verdict."""
 import ctypes as C
 import os
 import struct
@@ -27,7 +23,7 @@ class ProcessRecord(NamedTuple):
 
 
 def session_id():
-    """The sole environment reader; no generated identity or fallback."""
+    """Sole environment reader."""
     return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
 
 
@@ -42,7 +38,7 @@ def _kernel_rec(pid):
                       C.c_void_p, C.POINTER(C.c_size_t),
                       C.c_void_p, C.c_size_t]
     sysctl.restype = C.c_int
-    # CTL_KERN, KERN_PROC, KERN_PROC_PID. A short/changed ABI fails closed.
+    # CTL_KERN, KERN_PROC, KERN_PROC_PID.
     mib = (C.c_int * 4)(1, 14, 1, pid)
     data = C.create_string_buffer(648)
     size = C.c_size_t(len(data))
@@ -67,7 +63,7 @@ def _inspect(pid):
 
 
 def process_identity(pid):
-    """Return exact PID/start usecec, or Unknown; never infer death."""
+    """Return exact PID/start microseconds, or Unknown; never infer death."""
     rec = _inspect(pid)
     if isinstance(rec, Unknown):
         return rec
@@ -97,7 +93,7 @@ def ancestry(pid):
 
 
 def select_session_ancestor(chain):
-    """Nearest exact kernel name claude; trusted writers, not spoof resistance."""
+    """Nearest claude ancestor; assumes trusted writers."""
     if isinstance(chain, Unknown) or not chain:
         return Unknown("missing ancestry")
     seen = set()
