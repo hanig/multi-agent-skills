@@ -18,7 +18,9 @@ import string
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -931,8 +933,9 @@ class TestAuthoredSkillShape(unittest.TestCase):
         reference = (SKILLS / "hanig-orchestrate" / "references" /
                      "dispatch-preamble.md").read_text(encoding="utf-8")
         scoped = reference.split("## Scoped tests\n", 1)[1].split("\n## ", 1)[0]
-        bullet = next((line for line in scoped.splitlines()
-                       if line.startswith("- Always run the guards that scan every test file")), "")
+        bullet = next((item for item in re.split(r"(?m)(?=^- )", scoped)
+                       if re.match(r"- Always\s+run\s+the\s+guards\s+that\s+scan\s+"
+                                   r"every\s+test\s+file\b", item)), "")
         for module in (
                 "tests.test_review_watchdog", "tests.test_project",
                 "tests.test_docs_truth", "tests.test_swarm_code_launch",
@@ -944,6 +947,23 @@ class TestAuthoredSkillShape(unittest.TestCase):
             with self.subTest(module=module):
                 self.assertIn("`" + module + "`", bullet)
         self.assertIn("<!-- declaration: delegation.preamble -->", bullet)
+
+    def test_dispatch_preamble_guard_check_accepts_wrapped_bullet(self):
+        reference = (SKILLS / "hanig-orchestrate" / "references" /
+                     "dispatch-preamble.md").read_text(encoding="utf-8")
+        start = reference.index("- Always")
+        marker_end = reference.index("-->", start) + 3
+        bullet = reference[start:marker_end]
+        prose, marker = bullet.split(" <!--", 1)
+        for width in (32, 88):
+            with self.subTest(width=width):
+                wrapped = textwrap.fill(
+                    prose, width=width, subsequent_indent="  ",
+                    break_long_words=False, break_on_hyphens=False)
+                wrapped += " <!--" + marker
+                with mock.patch.object(Path, "read_text", return_value=
+                                       reference.replace(bullet, wrapped)):
+                    self.test_dispatch_preamble_names_tree_wide_test_guards()
 
     def test_counterexample_guidance_requires_inspection_before_reproduction(self):
         """Pin conduct instructions, not worker compliance or OS isolation."""
