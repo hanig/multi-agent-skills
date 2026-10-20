@@ -1,6 +1,6 @@
 <!-- docs-truth:status -->
 Status: live
-Date: 2026-10-18
+Date: 2026-10-20
 Title: Documentation index
 Purpose: Browse the maintained references, historical records, and superseded plans in this repository.
 
@@ -63,6 +63,7 @@ Link validity (ARC-1787) and factual currency of status or purpose are not check
 | [Plan: autonomous agent swarm (goal (b))](<plan-swarm.md>) | historical | 2026-10-11 | This delivered design records the autonomous swarm architecture, implementation stages, and their historical validation. |
 | [Proposal: harden the protocol enforcement (sol)](<proposal-protocol-hardening.md>) | historical | 2026-10-11 | This rejected proposal preserves the review-protocol hardening design and the findings that prevented its implementation. |
 | [Proposal: replace the action-naming lint with a refusal chokepoint](<proposal-refusal-chokepoint.md>) | historical | 2026-10-11 | This rejected specification preserves the proposed shared refusal representation and its unresolved review findings. |
+| [Recover retained provider-stopped worktrees](<recovery-retained-worktrees.md>) | live | 2026-10-20 | Manually preserve a retained provider-stopped attempt on its recovery ref and seed a successor without moving the attempt branch. |
 | [Scenario: "we want to do project X" — the whole string of events](<scenario-mach1-zebrafish.md>) | superseded by first-real-workloads.md | 2026-10-11 | This historical walkthrough illustrates a hypothetical workflow whose multi-cluster topology was corrected and replaced by the first-workload candidates. |
 | [Connecting the swarm to an issue tracker](<tracker-outbox.md>) | live | 2026-10-11 | The coordinator runs on a cluster login node. The authorized operator runs &#96;linear&#95;sync.py drain&#96; in a connected session using its &#96;LINEAR&#95;API&#95;KEY&#96;. &#96;swarm.py&#96; has no network code and holds no tracker credentials: it writes intents for that operator. Tracker state is a view of swarm state and never an input to the DAG judge. |
 | [Upstream report: model-registry failures look like absence](<upstream-agent-bus-model-registry.md>) | live | 2026-10-11 | &#96;bin/bus&#96; was vendored from Shreshth's &#96;multi-agent-skills&#96; archive dated 2026-08-25. The archive records commit &#96;a96b951e55ca632c561ff832d67ca3853cc2c62b&#96;, but it contains no remote URL and the upstream repository is not available to this checkout's GitHub identity. |
