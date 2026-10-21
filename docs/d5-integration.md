@@ -2,7 +2,7 @@
 Status: live
 Date: 2026-10-20
 Title: D5 integration preparation
-Purpose: Record inactive integration and host contracts.
+Purpose: Record inactive integration, registration and host contracts.
 
 **D5 is inactive; preparation only.** [Manifest](../tests/fixtures/d5/integration-manifest.json)
 classes cite handlers: reads=read_only, files/state=local_mutation,
@@ -47,5 +47,25 @@ Outbox: key/project/unit/verb/seq, closing_evidence/kind/unit_state/why/at,
 job_id/attempt_dir/evidence, optional tracker. Envelope: schema_version,
 project/unit/attempt/idempotency_key/requested_operation/evidence_digest/
 required_connector_capability. No D5 grant/destination scope.
-Recommend Git-common-directory authority; equal shipped skill_paths.py copies
-are the independent-install precedent. U1 decides.
+DG8 (2026-10-20) places authority outside every operated worktree at
+`coordinator_paths._external_base(worktrees) / "hanig-authority" / "v1"`.
+The Git common directory holds neither authority nor a pointer to it.
+`d5_registry.py` resolves the swarm sibling through `skill_paths`; it has no
+CLI or production caller. Registration keys are the opened Git common
+directory's `(st_dev, st_ino)`, exact `plan_id` matching
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, and the opened external state directory's
+`(st_dev, st_ino)`. Paths are locators only; plan IDs are never path components.
+The registry rejects conflicting plan/state bindings, re-verifies state
+identity on lookup, and permits two plans in one repository. Aliases of one
+filesystem object share a registration; clones and recreated inodes do not.
+
+`registry.json` is atomically published under permanent `registry.lock`;
+records live in `plans/<random-registration-id>/`. The management library
+preserves exact owner confirmation through the existing record/store APIs.
+`register`, `grant` and `revoke` refuse with "D5 is not active" until U8 changes
+`d5_active()`. Read-only `status` creates nothing, even with no authority root;
+its record evaluation is diagnostic and does not persist mandate invalidation.
+Supported: local filesystem, trusted same-UID coordinator writers, Git 2.31+.
+No claim of path-string or cross-clone equivalence, persistence across inode
+recreation, protection from malicious same-UID replacement, or TOCTOU against
+outside-lock writers. Custody, enforcement and activation remain later units.
