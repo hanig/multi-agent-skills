@@ -128,6 +128,82 @@ class SlurmEvidence(unittest.TestCase):
         record.update(changes)
         (self.attempt / U.SLURM_EXIT_RECORD).write_text(json.dumps(record))
 
+    def observation(self, **changes):
+        record = dict(schema_version=1, unit_id="unit", attempt_id=self.attempt.name,
+                      job_id="42", job_state="COMPLETED", exit_code="0:0",
+                      submit_time=self.submitted, end_time=U.now_iso(),
+                      observed_at=U.now_iso(), source="slurmctld")
+        record.update(changes)
+        path = self.root / "state" / ("slurm-terminal-observation-" + self.attempt.name + ".json")
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(record))
+        return path
+
+    def obs_check(self, expected, source):
+        result = S._check(self.attempt, artifact_basis=self.basis, state_dir=self.root / "state")
+        self.assertEqual(result[0], U.STATES[expected], result)
+        receipt = json.loads((self.attempt / U.RECEIPT).read_text())
+        self.assertEqual(receipt["basis"]["exit_status_attested_by"], source)
+        return receipt
+
+    def test_observation_precedence(self):
+        self.real_tools()
+        self.stub("sacct", "import sys; sys.exit('accounting down')")
+        for state, result in (("COMPLETED", "DONE"), ("FAILED", "FAILED"), ("PREEMPTED", "PREEMPTED")):
+            self.observation(job_state=state)
+            self.obs_check(result, "slurmctld-observed")
+        self.assertFalse(U.SACCT_UNAVAILABLE)
+        for live, recorded, result in (("RUNNING", "FAILED", "RUNNING"),
+                                       ("FAILED", "COMPLETED", "FAILED"), ("COMPLETED", "FAILED", "DONE")):
+            self.stub("scontrol", "print(%r)" % self.controller(live)[1])
+            self.observation(job_state=recorded)
+            self.obs_check(result, "slurmctld")
+        self.stub("scontrol", "import sys; sys.exit('controller down')")
+        self.obs_check("INCOMPLETE", None)
+
+    def test_observation_rejections(self):
+        self.real_tools()
+        self.stub("sacct", "print(%r)" % self.accounting())
+        for change in ({"job_id": "43"}, {"unit_id": "other"}, {"attempt_id": "other"},
+                       {"submit_time": "2000-01-01T00:00:00Z"}, {"submit_time": "2099-01-01T00:00:00Z"},
+                       {"job_state": "RUNNING"}, {"job_state": []}, {"schema_version": True},
+                       {"source": "exit-record"}, {"exit_code": ""}, {"extra": 1}):
+            with self.subTest(change=change):
+                self.observation(**dict({"job_state": "FAILED"}, **change))
+                receipt = self.obs_check("DONE", "sacct")
+                self.assertIn("controller observation ignored:", " ".join(receipt["notes"]))
+        path = self.observation()
+        for malformed in ('{', '[]', '{}'):
+            path.write_text(malformed)
+            receipt = self.obs_check("DONE", "sacct")
+            self.assertIn("controller observation ignored:", " ".join(receipt["notes"]))
+        self.stub("sacct", "pass")
+        self.exit_record()
+        self.obs_check("DONE", "exit-record")
+        (self.attempt / U.SLURM_EXIT_RECORD).unlink()
+        self.obs_check("INCOMPLETE", None)
+
+    def test_observation_path_and_absence(self):
+        self.real_tools()
+        self.stub("sacct", "print(%r)" % self.accounting())
+        baseline = self.obs_check("DONE", "sacct")
+        path = self.observation()
+        real_run = U.run
+        with mock.patch.object(U, "run", wraps=real_run) as run:
+            self.obs_check("DONE", "slurmctld-observed")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--controller-observation") + 1], str(path.resolve()))
+        path.rename(self.attempt / path.name)
+        for directory in (path.parent, self.attempt):
+            with mock.patch.object(U, "run", wraps=real_run) as run:
+                S._check(self.attempt, artifact_basis=self.basis, state_dir=directory)
+            self.assertNotIn("--controller-observation", run.call_args.args[0])
+        absent = self.obs_check("DONE", "sacct")
+        for key in ("state", "basis", "notes", "outputs"):
+            self.assertEqual(absent[key], baseline[key])
+        path.symlink_to(self.attempt / path.name)
+        self.obs_check("DONE", "sacct")
+
     def test_controller_free_text_does_not_override_scheduler_fields(self):
         for field in ("name", "user", "group", "label", "account", "qos", "command"):
             with self.subTest(field=field):

@@ -282,7 +282,7 @@
     },
     {
       "id": "judgment.by-kind",
-      "normative_text": "Judge `slurm` by Slurm accounting plus declared outputs, `pipeline` by launcher exit plus declared outputs, and `code` by agent lifecycle plus outputs plus a produced commit, each over the coordinator-pinned pre-dispatch artifact basis; closure remains a separate by-kind decision."
+      "normative_text": "Judge `slurm` by live controller, recorded controller observation after positive absence, accounting, then authorized exit record, plus outputs, `pipeline` by launcher exit plus declared outputs, and `code` by agent lifecycle plus outputs plus a produced commit, each over the coordinator-pinned pre-dispatch artifact basis; closure remains a separate by-kind decision."
     },
     {
       "id": "slurm.command-boundary",
