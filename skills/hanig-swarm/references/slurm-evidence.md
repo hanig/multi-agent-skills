@@ -25,12 +25,12 @@ process attribution nor scientific correctness.
 3. If accounting selects no owned row, an authorized exit record may supply
   the last fallback. An owned row, even one with a missing state, blocks this
   weaker evidence. Unowned historical rows neither certify nor veto it.
-  Before this fallback, without usable accounting and only after positive
+  Before this fallback, without usable accounting and only after positive <!-- declaration: isolation.done-predicate -->
   controller absence, admit matching non-success observations: FAILED, CANCELLED,
   TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, BOOT_FAIL, DEADLINE. Check
   job/unit/attempt identities and submit bounds. Note/ignore malformed records
   and times, and COMPLETED. Compare valid observation/exit end times: later wins,
-  exit wins ties; otherwise use either alone. <!-- declaration: isolation.done-predicate -->
+  exit wins ties; otherwise use either alone.
 
 Accounting queries have a 20-second timeout. One unsuccessful query disables
 accounting for the remaining coordinator pass, including checker subprocesses
