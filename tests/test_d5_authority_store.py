@@ -1,4 +1,5 @@
 """Real temporary grant stores: schema, terminal history and durable transitions."""
+import copy
 import errno
 import fcntl
 import hashlib
@@ -80,6 +81,9 @@ class TestD5AuthorityStore(unittest.TestCase):
         self.create()
         for now in (True, 1.0, "101", None, 0, -1, 2**63, 1 << 16384):
             self.refuses("now", A.check, self.d, now, MANDATE)
+            self.refuses("now", A.revoke, self.d, now, "stop")
+        for reason in (None, "", 1, b"stop"):
+            self.refuses("invalidation.reason", A.revoke, self.d, 101, reason)
         for content in ("text", None, bytearray(MANDATE)):
             self.refuses("mandate_bytes", A.check, self.d, 101, content)
         self.stored(grant())
@@ -98,7 +102,8 @@ class TestD5AuthorityStore(unittest.TestCase):
     def test_interrupted_write(self):
         self.create()
         old_raw = self.path.read_bytes()
-        for op in (lambda: A.check(self.d, 101, b"changed"),):
+        for op in (lambda: A.check(self.d, 101, b"changed"),
+                   lambda: A.revoke(self.d, 101, "stop")):
             with mock.patch.object(A.os, "replace", side_effect=OSError("injected before replace")):
                 with self.assertRaisesRegex(OSError, "injected"), self.filesystem_refusal():
                     op()
@@ -116,6 +121,8 @@ class TestD5AuthorityStore(unittest.TestCase):
                     json.dumps(r).encode(), duplicate.encode()):
             self.path.write_bytes(raw)
             for op in (lambda: A.read(self.d),
+                            lambda: A.revoke(self.d, 101, "stop"),
+                            lambda: A.replace(self.d, self.successor()),
                             lambda: A.check(self.d, 101, MANDATE)):
                 with self.assertRaises(A.AuthorityError):
                     op()
@@ -124,6 +131,8 @@ class TestD5AuthorityStore(unittest.TestCase):
     def test_target_directory_is_input(self):
         missing = self.d / "not-created"
         for op in (lambda: A.create(missing, grant()), lambda: A.read(missing),
+                        lambda: A.revoke(missing, 101, "stop"),
+                        lambda: A.replace(missing, self.successor()),
                         lambda: A.check(missing, 101, MANDATE)):
             with self.assertRaises(FileNotFoundError), self.filesystem_refusal():
                 op()
@@ -149,7 +158,9 @@ class TestD5AuthorityStore(unittest.TestCase):
                 mock.patch.object(A.os, "replace", side_effect=install):
             self.create()
             A.check(self.d, 101, b"changed")
-        self.eq(events.count("replace"), 2)
+            A.replace(self.d, self.successor(fresh=True))
+            A.revoke(self.d, 102, "stop")
+        self.eq(events.count("replace"), 5)
         for index, event in enumerate(events):
             if event == "replace":
                 self.eq(events[index - 1:index + 2], ["file", "replace", "directory"])
@@ -237,16 +248,17 @@ class TestD5AuthorityStore(unittest.TestCase):
         steps = ("lock_open", "flock", "mkstemp", "fdopen", "write", "flush",
                  "file_fsync", "file_close", "replace", "replace_after",
                  "directory_open", "directory_fsync", "directory_close", "lock_close")
-        for operation in ("create", "check"):
+        for operation in ("create", "check", "revoke"):
             for step in steps:
                 with self.subTest(operation=operation, step=step), tempfile.TemporaryDirectory() as d:
                     current = Path(d) / A.RECORD_NAME
                     old = None
                     new = grant()
-                    if operation == "check":
+                    if operation != "create":
                         A.create(d, grant())
                         old = current.read_bytes()
-                        new["invalidation"] = records.evaluate(new, 101, b"changed")[1]
+                        new = (records.revoked(new, 101, "stop") if operation == "revoke"
+                               else dict(new, invalidation=records.evaluate(new, 101, b"changed")[1]))
                     fault = OSError(errno.EIO, "durability")
                     calls = []
                     real_open, real_close = os.open, os.close
@@ -321,6 +333,8 @@ class TestD5AuthorityStore(unittest.TestCase):
                         with self.assertRaisesRegex(A.AuthorityError, "record") as caught:
                             if operation == "create":
                                 A.create(d, grant())
+                            elif operation == "revoke":
+                                A.revoke(d, 101, "stop")
                             else:
                                 A.check(d, 101, b"changed")
                     self.assertIs(caught.exception.__cause__, fault)
@@ -339,9 +353,11 @@ class TestD5AuthorityStore(unittest.TestCase):
 
     def test_nonregular_reads_refuse_promptly(self):
         script = (
-            "import sys; from tests.test_d5_authority_store import A, MANDATE\n"
+            "import sys; from tests.test_d5_authority_store import A, MANDATE, grant\n"
             "try:\n"
             " (A.read(sys.argv[1]) if sys.argv[2] == 'read' "
+            "else A.revoke(sys.argv[1], 101, 'stop') if sys.argv[2] == 'revoke' "
+            "else A.replace(sys.argv[1], grant()) if sys.argv[2] == 'replace' "
             "else A.check(sys.argv[1], 101, MANDATE))\n"
             "except A.AuthorityError as exc:\n"
             " assert 'record' in str(exc), str(exc)\n"
@@ -360,7 +376,7 @@ class TestD5AuthorityStore(unittest.TestCase):
                     if kind == "symlink":
                         target.write_bytes(records.encode(grant()))
                     path.symlink_to(target)
-                for operation in ("read", "check"):
+                for operation in ("read", "check", "revoke", "replace"):
                     with self.subTest(operation=operation):
                         result = subprocess.run([sys.executable, "-c", script, d, operation],
                                                 cwd=str(ROOT), capture_output=True,
@@ -434,6 +450,421 @@ class TestD5AuthorityStore(unittest.TestCase):
                     error = primary
                 attached = error.cleanup_errors[0]
                 self.assertIs(attached.__cause__ if cleanup == "lookup" else attached, secondary)
+
+
+    def successor(self, old=None, fresh=False):
+        new = copy.deepcopy(old if old is not None else grant())
+        new["grant_id"] = "b" * 32
+        if fresh:
+            new["confirmation"]["owner_response"] += " fresh"
+            new["invalidation"] = None
+        return new
+
+    def test_revoke_and_expired_mismatch(self):
+        self.create()
+        old = A.revoke(self.d, 102, "  owner said stop\n")
+        self.eq(old["invalidation"],
+                        {"at": 102, "kind": "revoked", "reason": "  owner said stop\n"})
+        self.eq(A.revoke(self.d, 103, "again"), old)
+        self.eq(A.check(self.d, 86501, b"changed"), "invalidated")
+        with tempfile.TemporaryDirectory() as d:
+            A.create(d, grant())
+            self.eq(A.check(d, 86501, b"changed"), "mandate_changed")
+
+    def test_expansion_needs_consent(self):
+        self.create()
+        new = self.successor()
+        new["issued_at"] += 1
+        new["expires_at"] += 1
+        self.refuses("expires_at", A.replace, self.d, new)
+        for key in grant()["scope"]:
+            new = self.successor()
+            new["scope"][key].append("additional")
+            self.refuses("scope." + key, A.replace, self.d, new)
+        self.stored(grant())
+        new = self.successor(fresh=True)
+        new["issued_at"] += 1
+        new["expires_at"] += 1
+        for values in new["scope"].values():
+            values.append("additional")
+        self.eq(A.replace(self.d, new), new)
+
+    def test_same_id_refused(self):
+        self.create()
+        self.refuses("grant_id", A.replace, self.d, grant())
+        A.revoke(self.d, 101, "stop")
+        new = grant()
+        new["confirmation"]["owner_response"] += " new"
+        self.refuses("grant_id", A.replace, self.d, new)
+        self.assertIsNotNone(A.read(self.d)["invalidation"])
+
+    def test_terminal_archive(self):
+        self.create()
+        A.check(self.d, 101, b"changed")
+        old = A.read(self.d)
+
+        raw = json.dumps(old, indent=4).encode() + b" \n"
+        self.path.write_bytes(raw)
+        self.refuses("confirmation", A.replace, self.d, self.successor(old))
+        new = self.successor(old, fresh=True)
+        self.eq(A.replace(self.d, new), new)
+        archive = self.d / "superseded" / (old["grant_id"] + ".json")
+        self.eq(archive.read_bytes(), raw)
+        self.eq(json.loads(archive.read_bytes())["invalidation"], old["invalidation"])
+        self.eq(A.check(self.d, 102, MANDATE), "valid")
+        recycled = grant()
+        recycled["confirmation"]["owner_response"] += " new again"
+        self.refuses("grant_id", A.replace, self.d, recycled)
+        self.path.unlink()
+        self.refuses("grant_id", A.create, self.d, recycled)
+        self.eq(archive.read_bytes(), raw)
+
+    def test_fresh_consent_clear(self):
+        self.create()
+        new = self.successor(fresh=True)
+        new["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
+        self.refuses("invalidation", A.replace, self.d, new)
+
+    def test_archive_conflict(self):
+        self.create()
+        archive = self.d / "superseded"
+        archive.mkdir()
+        prior = archive / ("a" * 32 + ".json")
+        prior.write_bytes(b"different")
+        self.refuses("superseded", A.replace, self.d, self.successor())
+        self.stored(grant())
+        self.eq(prior.read_bytes(), b"different")
+
+    def test_replacement_retry(self):
+        self.create()
+        old_raw = self.path.read_bytes()
+        replace = os.replace
+        def fail_head(src, dst):
+            if Path(dst) == self.path:
+                raise OSError("head interrupted")
+            return replace(src, dst)
+        with mock.patch.object(A.os, "replace", side_effect=OSError("archive interrupted")):
+            with self.assertRaisesRegex(OSError, "archive interrupted"), self.filesystem_refusal():
+                A.replace(self.d, self.successor())
+        self.stored(grant())
+        with mock.patch.object(A.os, "replace", side_effect=fail_head):
+            with self.assertRaisesRegex(OSError, "head interrupted"), self.filesystem_refusal():
+                A.replace(self.d, self.successor())
+        self.stored(grant())
+        archive = self.d / "superseded" / ("a" * 32 + ".json")
+        self.eq(archive.read_bytes(), old_raw)
+        self.eq(A.replace(self.d, self.successor()), self.successor())
+        self.eq(archive.read_bytes(), old_raw)
+
+    def test_archive_fsync_retry(self):
+        self.create()
+        sync = A._sync_directory
+        def fail_archive(path):
+            if path.name == "superseded":
+                raise OSError("archive fsync failed")
+            return sync(path)
+        with mock.patch.object(A, "_sync_directory", side_effect=fail_archive):
+            with self.assertRaisesRegex(OSError, "archive fsync failed"), self.filesystem_refusal():
+                A.replace(self.d, self.successor())
+        self.stored(grant())
+        with mock.patch.object(A.os, "replace", wraps=A.os.replace) as install:
+            A.replace(self.d, self.successor())
+        self.eq([Path(call.args[1]).parent for call in install.call_args_list],
+                        [self.d / "superseded", self.d])
+
+    def test_reused_consent_invalidated(self):
+        self.create()
+        new = self.successor()
+        new["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
+        self.eq(A.replace(self.d, new), new)
+        self.eq(A.check(self.d, 102, MANDATE), "invalidated")
+        self.stored(new)
+
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses search permissions")
+    def test_retired_id_unsearchable_archive(self):
+        self.create()
+        old = A.revoke(self.d, 101, "stop")
+        A.replace(self.d, self.successor(fresh=True))
+        self.path.unlink()
+        archive = self.d / "superseded"
+        archive.chmod(0o200)
+        try:
+            with self.assertRaises(PermissionError), self.filesystem_refusal("grant_id"):
+                A.create(self.d, grant())
+            self.assertFalse(self.path.exists())
+        finally:
+            archive.chmod(0o700)
+        self.eq(json.loads((archive / ("a" * 32 + ".json")).read_bytes()), old)
+
+
+    def test_stale_archive_after_invalidation(self):
+        for invalidate in ("revoke", "mandate_changed"):
+            with self.subTest(invalidate=invalidate), tempfile.TemporaryDirectory() as d:
+                directory = Path(d)
+                A.create(d, grant())
+                old_raw = (directory / A.RECORD_NAME).read_bytes()
+                install = os.replace
+                def fail_head(src, dst):
+                    if Path(dst) == directory / A.RECORD_NAME:
+                        raise OSError(errno.EIO, "interrupted replacement")
+                    return install(src, dst)
+                with mock.patch.object(A.os, "replace", side_effect=fail_head):
+                    with self.assertRaisesRegex(A.AuthorityError, "durability is unconfirmed"):
+                        A.replace(d, self.successor())
+                self.eq(A.read(d), grant())
+                archive = directory / "superseded" / ("a" * 32 + ".json")
+                self.eq(archive.read_bytes(), old_raw)
+                if invalidate == "revoke":
+                    A.revoke(d, 102, "owner stopped")
+                else:
+                    self.eq(A.check(d, 102, b"changed"), "mandate_changed")
+                invalidated = A.read(d)
+                new = self.successor(fresh=True)
+                new["grant_id"] = "c" * 32
+                self.assertTrue(records.replacement_allowed(invalidated, new))
+                self.eq(A.replace(d, new), new)
+                self.eq(records.decode(archive.read_bytes()), invalidated)
+                self.eq(A.read(d), new)
+
+
+    def test_archive_field_difference_refused(self):
+        self.create()
+        archived = grant()
+        current = A.revoke(self.d, 102, "stop")
+        archive = self.d / "superseded"
+        archive.mkdir()
+        path = archive / ("a" * 32 + ".json")
+        variants = {"grant_id": "f" * 32, "confirmed_at": 105,
+                    "issued_at": 101, "expires_at": archived["expires_at"] - 1,
+                    "mandate_sha256": "f" * 64,
+                    "scope": dict(archived["scope"], plans=["other"]),
+                    "confirmation": dict(archived["confirmation"], owner_response="other")}
+        for field, value in variants.items():
+            with self.subTest(field=field):
+                different = dict(archived, **{field: value})
+                raw = records.encode(different)
+                path.write_bytes(raw)
+                self.refuses("superseded", A.replace, self.d, self.successor(fresh=True))
+                self.stored(current)
+                self.eq(path.read_bytes(), raw)
+
+    def test_archive_invalidation_removed_or_changed(self):
+        self.create()
+        archive = self.d / "superseded"
+        archive.mkdir()
+        path = archive / ("a" * 32 + ".json")
+        raw = records.encode(records.revoked(grant(), 102, "first stop"))
+        path.write_bytes(raw)
+        # The incoming current record has no invalidation, then a different one.
+        for changed in (False, True):
+            with self.subTest(changed=changed):
+                if changed:
+                    A.revoke(self.d, 103, "second stop")
+                current = A.read(self.d)
+                self.refuses("superseded", A.replace, self.d, self.successor(fresh=True))
+                self.stored(current)
+                self.eq(path.read_bytes(), raw)
+
+    def test_archive_only_format_difference_refused(self):
+        self.create()
+        archive = self.d / "superseded"
+        archive.mkdir()
+        path = archive / ("a" * 32 + ".json")
+        for record in (grant(), A.revoke(self.d, 102, "stop")):
+            raw = json.dumps(record, indent=2).encode()
+            self.path.write_bytes(records.encode(record))
+            path.write_bytes(raw)
+            self.refuses("superseded", A.replace, self.d, self.successor(fresh=True))
+            self.stored(record)
+            self.eq(path.read_bytes(), raw)
+
+    def test_retired_id_unsearchable_archive_injected(self):
+        self.create()
+        old = A.revoke(self.d, 101, "stop")
+        A.replace(self.d, self.successor(fresh=True))
+        self.path.unlink()
+        archive = self.d / "superseded"
+        lookup = os.lstat
+        def denied(path, *args, **kwargs):
+            if Path(path).parent == archive:
+                raise PermissionError(errno.EACCES, "unsearchable archive")
+            return lookup(path, *args, **kwargs)
+        with mock.patch.object(A.os, "lstat", side_effect=denied):
+            with self.assertRaises(PermissionError), self.filesystem_refusal("grant_id"):
+                A.create(self.d, grant())
+        self.assertFalse(self.path.exists())
+        self.eq(records.decode((archive / ("a" * 32 + ".json")).read_bytes()), old)
+
+    def test_mkdir_only_tolerates_eexist(self):
+        self.create()
+        archive = self.d / "superseded"
+        archive.mkdir()
+        for number in (errno.EIO, errno.EACCES, errno.ENOSPC):
+            fault = OSError(number, "mkdir failed with existing directory")
+            with self.subTest(errno=number), mock.patch.object(A.os, "mkdir", side_effect=fault):
+                with self.assertRaisesRegex(A.AuthorityError, "durability is unconfirmed") as caught:
+                    A.replace(self.d, self.successor())
+                self.assertIs(caught.exception.__cause__, fault)
+            self.stored(grant())
+            self.eq(list(archive.iterdir()), [])
+        self.eq(A.replace(self.d, self.successor()), self.successor())
+
+    def test_predecessor_lookup_error_refuses(self):
+        self.create()
+        predecessor = self.d / "superseded" / ("a" * 32 + ".json")
+        lookup = os.lstat
+        def denied(path, *args, **kwargs):
+            if Path(path) == predecessor:
+                raise PermissionError(errno.EACCES, "predecessor lookup")
+            return lookup(path, *args, **kwargs)
+        with mock.patch.object(A.os, "lstat", side_effect=denied):
+            with self.assertRaises(PermissionError), self.filesystem_refusal("superseded"):
+                A.replace(self.d, self.successor())
+        self.stored(grant())
+        self.assertFalse(predecessor.exists())
+
+    def test_archive_directory_type_and_lookup_refuse(self):
+        for kind in ("file", "fifo", "symlink", "dangling", "missing", "denied"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as d:
+                directory = Path(d)
+                archive = directory / "superseded"
+                A.create(d, grant())
+                if kind == "file":
+                    archive.write_bytes(b"keep")
+                elif kind == "fifo":
+                    os.mkfifo(archive)
+                elif kind in ("symlink", "dangling"):
+                    target = directory / "target"
+                    if kind == "symlink":
+                        target.mkdir()
+                    archive.symlink_to(target)
+                lookup = os.lstat
+                def checking(path, *args, **kwargs):
+                    if Path(path) == archive:
+                        if kind == "missing":
+                            raise FileNotFoundError(errno.ENOENT, "missing")
+                        if kind == "denied":
+                            raise PermissionError(errno.EACCES, "denied")
+                    return lookup(path, *args, **kwargs)
+                with mock.patch.object(A.os, "lstat", side_effect=checking):
+                    self.refuses("superseded|grant_id", A.replace, d, self.successor())
+                self.eq(A.read(d), grant())
+
+    def test_nonregular_archive_reads_refuse_promptly(self):
+        script = (
+            "import sys; from tests.test_d5_authority_store import A, grant\n"
+            "new = grant(); new['grant_id'] = 'b' * 32\n"
+            "try:\n"
+            " A.replace(sys.argv[1], new)\n"
+            "except A.AuthorityError as exc:\n"
+            " assert 'record' in str(exc), str(exc)\n"
+            "else:\n"
+            " raise AssertionError('accepted non-regular archive')\n"
+        )
+        for kind in ("fifo", "directory", "symlink", "dangling"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as d:
+                directory = Path(d)
+                A.create(d, grant())
+                archive = directory / "superseded"
+                archive.mkdir()
+                path = archive / ("a" * 32 + ".json")
+                if kind == "fifo":
+                    os.mkfifo(path)
+                elif kind == "directory":
+                    path.mkdir()
+                else:
+                    target = directory / "target"
+                    if kind == "symlink":
+                        target.write_bytes(records.encode(grant()))
+                    path.symlink_to(target)
+                result = subprocess.run([sys.executable, "-c", script, d], cwd=str(ROOT),
+                                        capture_output=True, text=True, timeout=2)
+                self.eq(result.returncode, 0, result.stdout + result.stderr)
+                self.eq(A.read(d), grant())
+
+    def test_replace_durability_faults(self):
+        steps = ("mkdir", "parent_fsync", "archive_write", "archive_file_fsync",
+                 "archive_replace", "archive_directory_fsync", "main_file_fsync",
+                 "main_replace", "main_replace_after", "main_directory_fsync")
+        for step in steps:
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as d:
+                directory = Path(d)
+                A.create(d, grant())
+                old = A.revoke(d, 102, "stop")
+                old_raw = (directory / A.RECORD_NAME).read_bytes()
+                new = self.successor(fresh=True)
+                fault = OSError(errno.EIO, step)
+                calls = []
+                mkdir, fdopen, fsync, install = os.mkdir, os.fdopen, os.fsync, os.replace
+                stage = ["archive"]
+                def fail(name):
+                    if name == step:
+                        calls.append(name)
+                        raise fault
+                def making(*args, **kwargs):
+                    fail("mkdir")
+                    return mkdir(*args, **kwargs)
+                def opening(fd, mode, **kwargs):
+                    handle = fdopen(fd, mode, **kwargs)
+                    if mode == "wb" and stage[0] == "archive":
+                        proxy = mock.Mock(wraps=handle)
+                        def write(raw):
+                            fail("archive_write")
+                            return handle.write(raw)
+                        proxy.write.side_effect = write
+                        return proxy
+                    return handle
+                def syncing(fd):
+                    info = os.fstat(fd)
+                    if stat.S_ISDIR(info.st_mode):
+                        root = directory.stat()
+                        if (info.st_dev, info.st_ino) == (root.st_dev, root.st_ino):
+                            fail("parent_fsync" if stage[0] == "archive" else "main_directory_fsync")
+                        else:
+                            fail("archive_directory_fsync")
+                            fsync(fd)
+                            stage[0] = "main"
+                            return
+                    else:
+                        fail(stage[0] + "_file_fsync")
+                    return fsync(fd)
+                def replacing(src, dst):
+                    name = "main" if Path(dst) == directory / A.RECORD_NAME else "archive"
+                    fail(name + "_replace")
+                    install(src, dst)
+                    fail(name + "_replace_after")
+                with mock.patch.object(A.os, "mkdir", side_effect=making), \
+                        mock.patch.object(A.os, "fdopen", side_effect=opening), \
+                        mock.patch.object(A.os, "fsync", side_effect=syncing), \
+                        mock.patch.object(A.os, "replace", side_effect=replacing):
+                    with self.assertRaisesRegex(A.AuthorityError, "durability is unconfirmed") as caught:
+                        A.replace(d, new)
+                self.assertIs(caught.exception.__cause__, fault)
+                self.eq(calls, [step])
+                if step in ("main_replace", "main_replace_after", "main_directory_fsync"):
+                    self.assertIn(A.read(d), [old, new])
+                    archive = directory / "superseded" / ("a" * 32 + ".json")
+                    self.eq(archive.read_bytes(), old_raw)
+                    self.eq(records.decode(archive.read_bytes())["invalidation"], old["invalidation"])
+                else:
+                    self.eq((directory / A.RECORD_NAME).read_bytes(), old_raw)
+                    self.eq(A.read(d), old)
+                self.eq(list(directory.rglob(".authority-*")), [])
+
+
+    def test_revoke_retry_confirms_durability(self):
+        self.create()
+        with mock.patch.object(A, "_sync_directory", side_effect=OSError(errno.EIO, "sync")):
+            self.refuses("durability is unconfirmed", A.revoke, self.d, 102, "stop")
+            self.refuses("durability is unconfirmed", A.revoke, self.d, 103, "retry")
+        old = records.revoked(grant(), 102, "stop")
+        raw = self.path.read_bytes() + b" \n"
+        self.path.write_bytes(raw)
+        with mock.patch.object(A, "_sync_directory", wraps=A._sync_directory) as sync:
+            self.eq(A.revoke(self.d, 104, "retry"), old)
+        sync.assert_called_once_with(self.d)
+        self.stored(old)
+        self.eq(self.path.read_bytes(), raw)
 
 
 if __name__ == "__main__":

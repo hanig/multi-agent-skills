@@ -5,7 +5,7 @@ durability failure refuses. At or after os.replace, durability is unconfirmed
 on failure: the complete old or new record may be visible (create may leave
 no record). Never roll back. A visible mandate_changed invalidation is fail-safe.
 
-Replacement belongs to U1a-2b. A visible replacement has already passed
+A visible replacement has already passed
 replacement_allowed. It carries either fresh owner consent, or re-used consent
 that extends neither expiry nor scope.
 """
@@ -16,7 +16,8 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from d5_authority import AuthorityError, validate, encode, decode, evaluate
+from d5_authority import (AuthorityError, validate, encode, decode, evaluate,
+                          revoked, replacement_allowed)
 
 RECORD_NAME = "authority.json"
 LOCK_NAME = "authority.lock"
@@ -132,3 +133,44 @@ def check(directory, now, mandate_bytes):
             record["invalidation"] = invalidation
             _write(directory / RECORD_NAME, encode(record))
         return state
+
+
+def revoke(directory, now, reason):
+    with _locked(directory) as directory:
+        record, raw = _load(directory / RECORD_NAME)
+        updated = revoked(record, now, reason)
+        _write(directory / RECORD_NAME, encode(updated) if updated != record else raw)
+        return updated
+
+
+def replace(directory, new):
+    raw = encode(new)
+    new = decode(raw)
+    with _locked(directory) as directory:
+        old, old_raw = _load(directory / RECORD_NAME)
+        replacement_allowed(old, new)
+        _unused_id(directory, new)
+        archive = directory / "superseded"
+        try:
+            os.mkdir(archive, 0o700)
+        except FileExistsError:
+            pass
+        info = _present(archive, "superseded")
+        _require(info and stat.S_ISDIR(info.st_mode),
+                 "superseded", "expected directory")
+        _sync_directory(directory)
+        predecessor = archive / (old["grant_id"] + ".json")
+        if _present(predecessor, "superseded"):
+            try:
+                archived, archived_raw = _load(predecessor)
+            except AuthorityError as exc:
+                raise AuthorityError("record: superseded: invalid predecessor archive") from exc
+            if archived_raw != old_raw:
+                # Only add the current grant's first terminal invalidation.
+                monotone = archived["invalidation"] is None and old["invalidation"] is not None
+                archived["invalidation"] = old["invalidation"]
+                _require(monotone and archived == old, "superseded",
+                         "predecessor archive differs beyond first invalidation")
+        _write(predecessor, old_raw)
+        _write(directory / RECORD_NAME, raw)
+    return new
