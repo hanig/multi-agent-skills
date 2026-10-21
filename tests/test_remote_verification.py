@@ -124,6 +124,18 @@ if state in ('PENDING', 'RUNNING', 'COMPLETING'):
 '''
 
 
+SCONTROL = r'''
+import json, pathlib, sys
+state = json.loads(pathlib.Path(STATE).read_text())
+with pathlib.Path(LOG).open('a') as log:
+    log.write(json.dumps(['scontrol'] + sys.argv[1:]) + '\n')
+assert sys.argv[1:4] == ['show', 'job', '-o']
+print(state.get('controller_output', 'JobId=321 JobName=verify JobState=COMPLETED ExitCode=0:0'))
+print(state.get('controller_error', ''), file=sys.stderr)
+raise SystemExit(state.get('controller_rc', 0))
+'''
+
+
 class TestRemoteVerification(unittest.TestCase):
     def setUp(self):
         self.shared = fixtures.TestSharedGuard()
@@ -172,6 +184,31 @@ class TestRemoteVerification(unittest.TestCase):
         self.policy['verification_host'].update(executor='slurm', slurm={
             'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
         self.save_policy()
+
+    def test_controller_outage_evidence_reaches_coordinator_ledger(self):
+        self.slurm_policy()
+        self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
+        controller = self.f.bin / 'scontrol'
+        config = self.f.directory / 'controller.json'
+        config.write_text('{}')
+        controller.write_text(PYTHON + SCONTROL.replace('STATE', repr(str(config))).replace(
+            'LOG', repr(str(self.f.directory / 'controller.log'))))
+        controller.chmod(0o755)
+        (self.f.bin / 'sacct').write_text(PYTHON +
+            'import sys\nprint("Connection timed out", file=sys.stderr)\nraise SystemExit(1)\n')
+        (self.f.bin / 'squeue').write_text(PYTHON + 'raise SystemExit(0)\n')
+        self.assert_ok(self.verify())
+        for row in self.rows():
+            execution = row['execution']
+            self.assertEqual(execution['scheduler_evidence_source'], 'slurmctld')
+            self.assertEqual((execution['sacct_state'], execution['sacct_exit_code']), ('COMPLETED', '0:0'))
+            self.assertIsNone(RV.execution_problem(row))
+            for state, code in (('FAILED', '0:0'), ('COMPLETED', '1:0'), ('COMPLETED', '0:1')):
+                invalid = dict(row, execution=dict(execution, sacct_state=state, sacct_exit_code=code))
+                self.assertIn('terminal success', RV.execution_problem(invalid))
+        ledger = read_json(next((self.f.state_dir / 'remote-verifications').glob('*.json')))
+        self.assertEqual(ledger['runs'][-1]['execution']['scheduler_evidence_source'], 'slurmctld')
+        self.assert_clean()
 
     def generic_verify(self, target):
         return subprocess.run([
@@ -2147,7 +2184,9 @@ state_path, log_path = pathlib.Path(STATE), pathlib.Path(LOG)
 state = json.loads(state_path.read_text())
 command = pathlib.Path(sys.argv[0]).name
 with log_path.open('a') as log: log.write(json.dumps([command] + sys.argv[1:]) + '\n')
-if state.get('unavailable') == command: raise SystemExit(1)
+if state.get('unavailable') == command:
+    print('Connection timed out', file=sys.stderr)
+    raise SystemExit(1)
 if command == 'scancel':
     if state.get('cancel_exit', 1): raise SystemExit(state['cancel_exit'])
     if state.get('cancel_terminal'):
@@ -2201,6 +2240,141 @@ else:
 
     def ack(self):
         return RV.evidence_digest(RV.collect(self.stage))
+
+    def install_controller(self):
+        path = self.bin / 'scontrol'
+        path.write_text(PYTHON + SCONTROL.replace('STATE', repr(str(self.state))).replace(
+            'LOG', repr(str(self.log))))
+        path.chmod(0o755)
+
+    def supervisor_fixture(self):
+        self.request.update(timeout=20, checks=[{}])
+        self.request['verification_host'].update(python=sys.executable, ssh_alias='fixture-host',
+            slurm={'partition': 'fixture-cpu', 'mem': '2G', 'time': '00:05:00'})
+        RV.publish(self.stage / 'request.json', self.request)
+        RV.publish(self.stage / 'result.json', {'execution': {}, 'outcomes': [{'exit_code': 0}]})
+        (self.bin / 'sbatch').write_text(PYTHON + 'print("321")\n')
+        self.install_controller()
+
+    def controller_marker(self):
+        (self.stage / 'job-id').write_text('321')
+        RV.publish(self.stage / 'supervision-finished', dict(launch_id=self.launch,
+            job_id='321', sacct_state='COMPLETED', sacct_exit_code='0:0',
+            scheduler_evidence_source='slurmctld'))
+
+    def test_controller_completes_supervision_during_accounting_outage(self):
+        self.supervisor_fixture()
+        self.configure({'321': 'COMPLETED'}, unavailable='sacct')
+        # Deterministic deadline: a sacct-only mutation reaches it immediately;
+        # controller success must finish on its first query, without sleeping.
+        RV.time.monotonic.side_effect = [0, 20]
+        result = RV.supervise(self.stage)
+        self.assertNotIn('error', result)
+        execution = result['execution']
+        self.assertEqual((execution['sacct_state'], execution['sacct_exit_code']), ('COMPLETED', '0:0'))
+        self.assertEqual(execution['scheduler_evidence_source'], 'slurmctld')
+        self.assertEqual((self.stage / 'job-id').read_text(), '321')
+        self.assertEqual(RV.time.monotonic.call_count, 1)
+        self.sleep.assert_not_called()
+        self.assertEqual(self.scheduler_calls(), [['scontrol', 'show', 'job', '-o', '321']])
+
+    def test_controller_absence_falls_back_to_accounting(self):
+        self.install_controller()
+        self.configure({'321': 'COMPLETED'}, controller_rc=1,
+                       controller_error='slurm_load_jobs error: Invalid job id specified')
+        state = RV.scheduler_state('321')
+        self.assertEqual(state, ('COMPLETED', '0:0'))
+        self.assertEqual(state.source, 'sacct')
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['scontrol', 'sacct'])
+
+    def test_missing_controller_keeps_accounting_only_behavior(self):
+        self.configure({'321': 'COMPLETED'})
+        state = RV.scheduler_state('321')
+        self.assertEqual(state, ('COMPLETED', '0:0'))
+        self.assertEqual(state.source, 'sacct')
+
+    def test_controller_error_waits_until_supervision_deadline(self):
+        self.supervisor_fixture()
+        self.configure({'321': 'COMPLETED'}, unavailable='sacct', controller_rc=1,
+                       controller_error='Connection timed out')
+        self.assertIsNone(RV.scheduler_state('321'))
+        RV.time.monotonic.side_effect = [0, 0, 0, 20]
+        result = RV.supervise(self.stage)
+        self.assertEqual(result['error'], 'Slurm verification did not reach terminal success')
+        self.assertIsNone(result['execution']['sacct_state'])
+        self.assertIsNone(result['execution']['scheduler_evidence_source'])
+        self.sleep.assert_called_once_with(2)
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['scontrol'] * 3)
+
+    def test_controller_requires_exact_unambiguous_terminal_job(self):
+        self.install_controller()
+        for output in ('JobId=322 JobState=COMPLETED ExitCode=0:0',
+                       'JobId=321 JobState=COMPLETING ExitCode=0:0',
+                       'JobId=321 JobState=RUNNING ExitCode=0:0',
+                       'JobId=321 JobState=COMPLETED',
+                       'JobId=321 JobState=COMPLETED ExitCode=0:0 JobId=322',
+                       'JobId=321 JobState=COMPLETED ExitCode=0:0 JobState=RUNNING',
+                       '', 'No jobs in the system'):
+            with self.subTest(output=output):
+                self.configure({'321': 'COMPLETED'}, controller_output=output)
+                self.assertIsNone(RV.scheduler_state('321'))
+        self.assertTrue(all(c[0] == 'scontrol' for c in self.scheduler_calls()))
+        for terminal in RV.TERMINAL:
+            with self.subTest(terminal=terminal):
+                self.configure({}, controller_output='JobId=321 JobState=' + terminal + ' ExitCode=1:0')
+                state = RV.scheduler_state('321')
+                self.assertEqual(state, (terminal, '1:0'))
+                self.assertEqual(state.source, 'slurmctld')
+
+    def test_discovery_without_accounting_requires_complete_controller_launch(self):
+        self.controller_marker()
+        self.configure({'321': 'COMPLETED'}, unavailable='sacct')
+        marker = (self.stage / 'supervision-finished').read_text()
+        def discover(known=()):
+            return RV.discover_slurm_jobs(self.request, known, self.stage)['scheduler_confirmed']
+        self.assertTrue(discover())
+        (self.stage / 'supervision-finished').unlink()
+        self.assertFalse(discover())
+        (self.stage / 'supervision-finished').write_text(marker)
+        for raw in (None, '', '321\n322', '322'):
+            with self.subTest(job_id=raw):
+                path = self.stage / 'job-id'
+                if raw is None:
+                    path.unlink()
+                else:
+                    path.write_text(raw)
+                self.assertFalse(discover())
+        (self.stage / 'job-id').write_text('321')
+        for field, value in (('scheduler_evidence_source', None), ('scheduler_evidence_source', 'sacct'),
+                             ('sacct_state', 'RUNNING'), ('launch_id', 'other'), ('job_id', '322')):
+            with self.subTest(field=field, value=value):
+                RV.publish(self.stage / 'supervision-finished', dict(json.loads(marker), **{field: value}))
+                self.assertFalse(discover())
+        (self.stage / 'supervision-finished').write_text(marker)
+        self.assertFalse(discover(['322']))
+        self.configure({'321': 'RUNNING'}, unavailable='sacct')
+        self.assertFalse(discover())
+        self.configure({'321': 'COMPLETED'}, unavailable='sacct')
+        (self.bin / 'squeue').write_text(PYTHON + 'raise SystemExit(1)\n')
+        self.assertFalse(discover())
+
+    def test_accounting_free_cleanup_and_lifted_success_probe(self):
+        self.install_controller()
+        self.controller_marker()
+        self.configure({'321': 'COMPLETED'}, unavailable='sacct')
+        shutil.copyfile(Path(RV.__file__).with_name('child_environment.py'),
+                        self.stage / 'child_environment.py')
+        run = dict(launch_id=self.launch, stage=str(self.stage), execution={}, request=self.request)
+        result = subprocess.run([sys.executable, '-c', RV.slurm_success_probe(run)],
+                                capture_output=True, text=True, check=True, timeout=30)
+        observation = json.loads(result.stdout)
+        self.assertTrue(RV.slurm_quiescent(observation, self.request))
+        self.assertEqual(observation['scheduler_evidence_source'], 'slurmctld')
+        self.assertEqual(observation['cleanup_sacct_states'], {'321': ['COMPLETED', '0:0']})
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertEqual(result['scheduler_evidence_source'], 'slurmctld')
+        self.assertNotIn('scancel', [c[0] for c in self.scheduler_calls()])
 
     def test_subprocess_wait_does_not_count_as_repoll_sleep(self):
         # Exercise subprocess's real timeout/poll loop, which uses time.sleep.
