@@ -59,6 +59,20 @@ def _inside(path, directory):
         return False
 
 
+def _common(checkout, check=True):
+    """Read one Git path without stripping path bytes."""
+    result = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "--path-format=absolute",
+         "--git-common-dir"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL, env=CE.child_env(), timeout=30, check=check)
+    if result.returncode:
+        return None
+    _require(result.stdout.endswith(b"\n"), "invalid git common directory")
+    common = Path(os.fsdecode(result.stdout[:-1]))
+    _require(common.is_absolute(), "git common directory must be absolute")
+    return common
+
+
 @contextmanager
 def _identity(checkout, plan_id, state_dir):
     _plan_id(plan_id)
@@ -69,15 +83,15 @@ def _identity(checkout, plan_id, state_dir):
         root = (CP._external_base(worktrees) / "hanig-authority" / "v1").resolve()
         _require(not any(_inside(root, wt) for wt in worktrees),
                  "authority root resolves inside an operated worktree")
-        result = subprocess.run(
-            ["git", "-C", str(checkout), "rev-parse", "--path-format=absolute",
-             "--git-common-dir"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL, env=CE.child_env(), timeout=30, check=True)
-        _require(result.stdout.endswith(b"\n"), "invalid git common directory")
-        common = Path(os.fsdecode(result.stdout[:-1]))
-        _require(common.is_absolute(), "git common directory must be absolute")
+        common = _common(checkout)
         _require(not _inside(root, common.resolve()),
                  "authority root resolves inside the Git common directory")
+        for path in (root, state, (root / "plans").resolve()):
+            for parent in (path, *path.parents):
+                if parent.is_dir():
+                    other = _common(parent, check=False)
+                    _require(other is None or not other.samefile(common),
+                             "authority/state path is inside operated Git storage")
         repo_fd = os.open(str(common), os.O_RDONLY | os.O_DIRECTORY)
         with store.cleanup(os.close, repo_fd):
             state_fd = os.open(str(state), os.O_RDONLY | os.O_DIRECTORY)
@@ -159,8 +173,7 @@ def _find(entries, identity, state_fd):
 
 def _mkdir(path):
     """Persist each new directory link before publishing any entry using it."""
-    if store.present(path, "directory"):
-        _require(path.is_dir(), "expected directory: " + str(path))
+    if path == path.parent:
         return
     _mkdir(path.parent)
     try:

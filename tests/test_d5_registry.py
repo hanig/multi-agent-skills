@@ -186,6 +186,44 @@ class TestD5Registry(unittest.TestCase):
         second = self.register(plan="p", state=other)
         self.assertNotEqual(first["registration_id"], second["registration_id"])
 
+    def test_whitespace_checkout_cannot_hold_authority(self):
+        checkout = self.d / "repo "
+        self.repo.rename(checkout)
+        state = checkout / "state"
+        state.mkdir()
+        self.patch.stop()
+        before = self.tree()
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state)}):
+            with self.assertRaisesRegex(R.AuthorityError, "operated"):
+                self.register(repo=checkout, state=state)
+        self.assertEqual(self.tree(), before)
+
+    def test_retry_syncs_root_link_before_publication(self):
+        sync, write = store.sync_directory, store.write_bytes
+        def interrupted(path):
+            if path == self.root.parent:
+                raise OSError(errno.EIO, "synthetic")
+            sync(path)
+        with mock.patch.object(store, "sync_directory", side_effect=interrupted):
+            with self.assertRaisesRegex(R.AuthorityError, "durability is unconfirmed"):
+                self.register()
+        with mock.patch.object(store, "sync_directory", wraps=sync) as synced:
+            def checked(path, raw):
+                self.assertIn(mock.call(self.root.parent), synced.call_args_list)
+                write(path, raw)
+            with mock.patch.object(store, "write_bytes", side_effect=checked):
+                self.register()
+
+    def test_plans_cannot_be_git_common_directory(self):
+        self.root.mkdir(parents=True)
+        common = self.root / "plans"
+        checkout = self.d / "separate"
+        self.git("init", "--separate-git-dir=" + str(common), str(checkout))
+        before = self.tree()
+        with self.assertRaisesRegex(R.AuthorityError, "operated|Git common"):
+            self.register(repo=checkout)
+        self.assertEqual(self.tree(), before)
+
     def test_registry_strict_schema_and_duplicate_keys(self):
         self.register()
         path = self.root / "registry.json"
