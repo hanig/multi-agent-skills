@@ -856,8 +856,15 @@ def _authority_result_sink():
 
 
 def _check(unit_dir, launch_facts=None, artifact_basis=None,
-           isolation_facts=None, isolation_required=False):
+           isolation_facts=None, isolation_required=False, state_dir=None):
     argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
+    if state_dir is not None:
+        candidate = Path(state_dir) / ("slurm-terminal-observation-" + Path(unit_dir).name + ".json")
+        observation, problem = U.controller_observation_path(candidate, unit_dir)
+        if problem:
+            print(problem, file=sys.stderr)
+        elif observation.is_file():
+            argv += ["--controller-observation", str(observation)]
     if U.SACCT_UNAVAILABLE:
         argv.append("--skip-sacct")
     # The separate judge receives the complete authority snapshot directly
