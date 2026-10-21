@@ -532,8 +532,8 @@ class TestD5Registry(unittest.TestCase):
             self.assertEqual(self.register()["plan_id"], "p")
 
 
-    def test_separate_git_directory_from_linked_worktree_is_unsupported(self):
-        # A .git basename alone is insufficient: Git lists C as the main WT.
+    def test_separate_git_directory_layout_and_named_git_non_claim(self):
+        # OD1: Git cannot identify the original checkout through the linked WT.
         for name in ("common", ".git"):
             home = self.d / ("separate-" + name)
             home.mkdir()
@@ -543,6 +543,16 @@ class TestD5Registry(unittest.TestCase):
                      "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial")
             self.git("-C", str(checkout), "worktree", "add", "--detach", str(linked))
             before = self.tree()
+            for op in (lambda: self.register(repo=checkout),
+                       lambda: R.lookup(checkout, "p", self.state)):
+                with self.subTest(common=name, original_checkout=True), \
+                     self.assertRaisesRegex(R.AuthorityError, "unsupported repository layout"):
+                    op()
+            self.assertEqual(self.tree(), before)
+            if name == ".git":
+                entry = self.register(repo=linked)
+                self.assertEqual(R.lookup(linked, "p", self.state), entry)
+                continue  # Separate .git directory: explicit OD1 non-claim.
             for op in (lambda: self.register(repo=linked),
                        lambda: R.lookup(linked, "p", self.state)):
                 with self.subTest(common=name, operation=op), \
@@ -551,13 +561,48 @@ class TestD5Registry(unittest.TestCase):
             self.assertEqual(self.tree(), before)
 
     def test_bare_repository_is_unsupported(self):
-        bare = self.d / "bare" / ".git"
-        self.git("init", "--bare", str(bare))
-        before = self.tree()
-        for op in (lambda: self.register(repo=bare), lambda: R.lookup(bare, "p", self.state)):
-            with self.assertRaisesRegex(R.AuthorityError, "unsupported repository layout"):
-                op()
-        self.assertEqual(self.tree(), before)
+        for name in ("common", ".git"):
+            bare = self.d / ("bare-" + name) / name
+            self.git("clone", "--bare", str(self.repo), str(bare))
+            linked = bare.parent / "linked"
+            self.git("-C", str(bare), "worktree", "add", "--detach", str(linked))
+            before = self.tree()
+            for checkout in (bare, linked):
+                for op in (lambda: self.register(repo=checkout),
+                           lambda: R.lookup(checkout, "p", self.state)):
+                    with self.subTest(name=name, checkout=checkout, operation=op), \
+                         self.assertRaisesRegex(R.AuthorityError, "unsupported repository layout"):
+                        op()
+            self.assertEqual(self.tree(), before)
+
+    def test_unlisted_git_file_checkout_refuses_before_storage_access(self):
+        alias = self.d / "unlisted"
+        alias.mkdir()
+        (alias / ".git").write_text("gitdir: " + str(self.repo / ".git") + "\n")
+        with mock.patch.object(R, "_directory", side_effect=AssertionError("R/P")), \
+             mock.patch.object(R, "_entries", side_effect=AssertionError("registry")), \
+             mock.patch.object(R.CP, "resolve_paths", side_effect=AssertionError("state")):
+            for op in (lambda: self.register(repo=alias),
+                       lambda: R.lookup(alias, "p", self.state)):
+                with self.assertRaisesRegex(R.AuthorityError, "unsupported repository layout"):
+                    op()
+
+    def test_listed_checkout_matches_inode_and_allows_missing_other_worktree(self):
+        missing, linked = self.d / "missing", self.d / "linked"
+        for path in (missing, linked):
+            self.git("-C", str(self.repo), "worktree", "add", "--detach", str(path))
+        missing.rename(self.d / "moved")  # Prunable list entry before our checkout.
+        alias = self.d / "alias"
+        alias.symlink_to(self.d, target_is_directory=True)
+        real_git = R._git
+        def git(checkout, *args):
+            raw = real_git(checkout, *args)
+            if args == ("worktree", "list", "--porcelain", "-z"):
+                raw = raw.replace(os.fsencode(linked), os.fsencode(alias / "linked"))
+            return raw
+        with mock.patch.object(R, "_git", side_effect=git):
+            entry = self.register(repo=linked)
+            self.assertEqual(R.lookup(linked, "p", self.state), entry)
 
     def test_common_directory_uses_tristate_lstat(self):
         parent = self.d / "layout"
@@ -650,7 +695,7 @@ class TestD5Registry(unittest.TestCase):
                 self.register()
 
     def test_newline_worktree_containment(self):
-        linked = self.d / "linked\nworktree"
+        linked = self.d / "linked\nworktree \n"
         self.git("-C", str(self.repo), "worktree", "add", "--detach", str(linked))
         # CP's legacy line parser cannot supply this containment check.
         self.external_base.return_value = linked / "authority-base"

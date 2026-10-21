@@ -17,6 +17,8 @@ replacement; TOCTOU against a writer outside the lock.
 - **Recreated directories whose `(st_dev, st_ino)` the filesystem reuses.**
 - **A race against a concurrent same-UID writer.**
 - Containment created after registration. That is U1b-1b's lookup-time check.
+- **A separate Git directory named `.git`.** Git reports its parent as the main worktree and records the original checkout nowhere, so it is indistinguishable from a standard repository.
+- **An unlisted alias.** Containment does not cover any checkout that reaches the common directory through a `.git` file but is absent from Git's worktree list.
 
 Non-claim: if an earlier failed call created B itself, a later retry does not re-confirm B's link in its parent. The external base is coordinator infrastructure (`~/.local/state`) that normally pre-exists.
 """
@@ -88,6 +90,8 @@ def _key(info):
 
 def _worktrees(checkout):
     raw = _git(checkout, "worktree", "list", "--porcelain", "-z")
+    first_record = raw.split(b"\0\0", 1)[0].split(b"\0")
+    _require(b"bare" not in first_record, "unsupported repository layout")
     fields = raw.split(b"\0")
     paths = [Path(os.fsdecode(field[9:])) for field in fields
              if field.startswith(b"worktree ")]
@@ -112,6 +116,10 @@ def _envelope(checkout):
                  "unsupported repository layout")
         worktrees = _worktrees(checkout)
         _require(_key(worktrees[0].stat()) == _key(common.parent.stat()),
+                 "unsupported repository layout")
+        checkout_key = _key(_git_path(checkout, "--show-toplevel").stat())
+        _require(any(_key(path.stat()) == checkout_key for path in worktrees
+                     if store.present(path, "unsupported repository layout")),
                  "unsupported repository layout")
         return common, worktrees
     except (OSError, subprocess.SubprocessError) as exc:
