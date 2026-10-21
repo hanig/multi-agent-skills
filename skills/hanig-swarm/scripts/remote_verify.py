@@ -602,9 +602,8 @@ class SchedulerState(tuple):
         return result
 
 
-def scheduler_state(job):
-    # The controller only improves on accounting: errors, nonterminal states
-    # and lossy field-like path text all retain the legacy sacct fallback.
+def controller_state(job):
+    """Use only unambiguous terminal evidence; all controller errors fall back."""
     try:
         if shutil.which("scontrol"):
             rc, out, err = _command(["scontrol", "show", "job", "-o", job])
@@ -614,8 +613,15 @@ def scheduler_state(job):
                     and len(pairs) == 3 and set(fields) == {"JobId", "JobState", "ExitCode"}
                     and fields["JobId"] == job and fields["JobState"] in TERMINAL):
                 return SchedulerState(fields["JobState"], fields["ExitCode"], "slurmctld")
-    except (OSError, subprocess.SubprocessError):
+    except Exception:
         pass
+    return None
+
+
+def scheduler_state(job):
+    state = controller_state(job)
+    if state is not None:
+        return state
     try:
         rc, out, err = _command(["sacct", "-n", "-P", "-j", job,
                                   "--format=JobIDRaw,State%40,ExitCode"])
@@ -847,7 +853,7 @@ def slurm_success_probe(run):
     code = ("import hashlib, json, re, shutil, subprocess, sys, time\nfrom pathlib import Path\n"
             "sys.path.insert(0, %r)\nimport child_environment as CE\n"
             "TERMINAL = %r\n") % (run["stage"], TERMINAL)
-    for function in (_command, SchedulerState, scheduler_state, slurm_job_name, discover_slurm_jobs,
+    for function in (_command, SchedulerState, controller_state, scheduler_state, slurm_job_name, discover_slurm_jobs,
                      slurm_quiescent, observe_slurm_success):
         code += inspect.getsource(function) + "\n"
     return code + "print(json.dumps(observe_slurm_success(%r, %r, Path(%r))))\n" % (
