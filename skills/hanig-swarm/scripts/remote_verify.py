@@ -604,6 +604,8 @@ class SchedulerState(tuple):
 
 def scheduler_state(job):
     try:
+        if not shutil.which("scontrol"):
+            raise FileNotFoundError("scontrol is not installed")
         rc, out, err = _command(["scontrol", "show", "job", "-o", job])
     except FileNotFoundError:
         pass  # Accounting-only installations retain their existing behavior.
@@ -849,7 +851,7 @@ def slurm_success_probe(run):
         known.append(run["execution"]["job_id"])
     if any(not isinstance(j, str) or not re.fullmatch(r"[0-9]+", j) for j in known):
         raise ValueError("invalid saved Slurm job identity")
-    code = ("import hashlib, json, re, subprocess, sys, time\nfrom pathlib import Path\n"
+    code = ("import hashlib, json, re, shutil, subprocess, sys, time\nfrom pathlib import Path\n"
             "sys.path.insert(0, %r)\nimport child_environment as CE\n"
             "TERMINAL = %r\n") % (run["stage"], TERMINAL)
     for function in (_command, SchedulerState, scheduler_state, slurm_job_name, discover_slurm_jobs,
