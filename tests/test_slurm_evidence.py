@@ -130,7 +130,7 @@ class SlurmEvidence(unittest.TestCase):
 
     def observation(self, **changes):
         record = dict(schema_version=1, unit_id="unit", attempt_id=self.attempt.name,
-                      job_id="42", job_state="COMPLETED", exit_code="0:0",
+                      job_id="42", job_state="FAILED", exit_code="1:0",
                       submit_time=self.submitted, end_time=U.now_iso(),
                       observed_at=U.now_iso(), source="slurmctld")
         record.update(changes)
@@ -149,10 +149,10 @@ class SlurmEvidence(unittest.TestCase):
     def test_observation_precedence(self):
         self.real_tools()
         self.stub("sacct", "import sys; sys.exit('accounting down')")
-        for state, result in (("COMPLETED", "DONE"), ("FAILED", "FAILED"), ("PREEMPTED", "PREEMPTED")):
+        for state, result in (("FAILED", "FAILED"), ("PREEMPTED", "PREEMPTED")):
             self.observation(job_state=state)
             self.obs_check(result, "slurmctld-observed")
-        self.assertFalse(U.SACCT_UNAVAILABLE)
+        self.assertTrue(U.SACCT_UNAVAILABLE)
         for live, recorded, result in (("RUNNING", "FAILED", "RUNNING"),
                                        ("FAILED", "COMPLETED", "FAILED"), ("COMPLETED", "FAILED", "DONE")):
             self.stub("scontrol", "print(%r)" % self.controller(live)[1])
@@ -160,27 +160,44 @@ class SlurmEvidence(unittest.TestCase):
             self.obs_check(result, "slurmctld")
         self.stub("scontrol", "import sys; sys.exit('controller down')")
         self.obs_check("INCOMPLETE", None)
+        self.stub("scontrol", "import sys; sys.exit('Invalid job id specified')")
+        U.SACCT_UNAVAILABLE = False  # Next coordinator pass retries accounting.
+        self.stub("sacct", "print(%r)" % self.accounting())
+        for state in ("FAILED", "PREEMPTED"):
+            self.observation(job_state=state)
+            self.obs_check("DONE", "sacct")
+
+    def test_observation_recency(self):
+        self.real_tools()
+        for delta, expected, source in ((-1, "DONE", "exit-record"),
+                (0, "DONE", "exit-record"), (1, "FAILED", "slurmctld-observed")):
+            self.exit_record(end_time=self.submitted)
+            ended = time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                  time.localtime(U.parse_iso_ts(self.submitted) + delta))
+            self.observation(end_time=ended)
+            self.obs_check(expected, source)
 
     def test_observation_rejections(self):
         self.real_tools()
-        self.stub("sacct", "print(%r)" % self.accounting())
+        self.exit_record()
         for change in ({"job_id": "43"}, {"unit_id": "other"}, {"attempt_id": "other"},
                        {"submit_time": "2000-01-01T00:00:00Z"}, {"submit_time": "2099-01-01T00:00:00Z"},
-                       {"job_state": "RUNNING"}, {"job_state": []}, {"schema_version": True},
+                       {"job_state": "RUNNING"}, {"job_state": "COMPLETED"}, {"job_state": []},
+                       {"submit_time": "not-a-date"}, {"submit_time": []},
+                       {"end_time": "not-a-date"}, {"end_time": []}, {"schema_version": True},
                        {"source": "exit-record"}, {"exit_code": ""}, {"extra": 1}):
             with self.subTest(change=change):
                 self.observation(**dict({"job_state": "FAILED"}, **change))
-                receipt = self.obs_check("DONE", "sacct")
+                receipt = self.obs_check("DONE", "exit-record")
                 self.assertIn("controller observation ignored:", " ".join(receipt["notes"]))
         path = self.observation()
         for malformed in ('{', '[]', '{}', '[' * 10000 + ']' * 10000):
             path.write_text(malformed)
-            receipt = self.obs_check("DONE", "sacct")
+            receipt = self.obs_check("DONE", "exit-record")
             self.assertIn("controller observation ignored:", " ".join(receipt["notes"]))
-        self.stub("sacct", "pass")
-        self.exit_record()
         self.obs_check("DONE", "exit-record")
         (self.attempt / U.SLURM_EXIT_RECORD).unlink()
+        self.observation(job_state="COMPLETED", exit_code="0:0")
         self.obs_check("INCOMPLETE", None)
 
     def test_observation_path_and_absence(self):
@@ -190,7 +207,7 @@ class SlurmEvidence(unittest.TestCase):
         path = self.observation()
         real_run = U.run
         with mock.patch.object(U, "run", wraps=real_run) as run:
-            self.obs_check("DONE", "slurmctld-observed")
+            self.obs_check("DONE", "sacct")
         argv = run.call_args.args[0]
         self.assertEqual(argv[argv.index("--controller-observation") + 1], str(path.resolve()))
         path.rename(self.attempt / path.name)
@@ -887,7 +904,6 @@ class SlurmEvidence(unittest.TestCase):
         self.assertEqual([call.args[0][0] for call in runner.call_args_list], ["squeue"])
         accounting.assert_not_called()
         self.assertEqual(runner.call_args.kwargs["timeout"], 60)
-        self.assertFalse(U.SACCT_UNAVAILABLE)
 
     def test_generated_batch_script_records_exit_and_clears_requeue_record(self):
         self.real_tools()
