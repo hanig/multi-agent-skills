@@ -322,5 +322,46 @@ class TestD5Registry(unittest.TestCase):
         finally:
             self.d.chmod(original)
 
+
+    # Preserved final-round counterexamples; repair needs owner adjudication.
+    def test_final_missing_base_cannot_return_unconfirmed_registration(self):
+        self.assertFalse(self.base.exists())
+        parent = self.base.parent.stat()
+        parent_key = (parent.st_dev, parent.st_ino)
+        synced, real_sync = set(), os.fsync
+        def sync(fd):
+            info = os.fstat(fd)
+            synced.add((info.st_dev, info.st_ino))
+            real_sync(fd)
+        with mock.patch.object(os, "fsync", side_effect=sync):
+            try:
+                self.register()
+            except R.AuthorityError:
+                return  # Refusal is safe; success needs a durable base link.
+        self.assertIn(parent_key, synced,
+                      "success leaves the newly created external-base link unconfirmed")
+
+    def test_final_symlinked_plans_cannot_sync_outside_base(self):
+        self.root.mkdir(parents=True)
+        records = self.d / "records"
+        records.mkdir()
+        (self.root / "plans").symlink_to(records, target_is_directory=True)
+        self.assertNotIn(self.base, records.parents)
+        target = records.stat()
+        target_key = (target.st_dev, target.st_ino)
+        synced, real_sync = set(), os.fsync
+        def sync(fd):
+            info = os.fstat(fd)
+            synced.add((info.st_dev, info.st_ino))
+            real_sync(fd)
+        with mock.patch.object(os, "fsync", side_effect=sync):
+            try:
+                self.register()
+            except R.AuthorityError:
+                pass  # Even a refusal must retain the fsync boundary.
+        self.assertNotIn(target_key, synced,
+                         "plans symlink redirected fsync outside the external base")
+
+
 if __name__ == "__main__":
     unittest.main()
