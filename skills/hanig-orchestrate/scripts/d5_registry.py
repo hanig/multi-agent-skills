@@ -15,6 +15,8 @@ Bind mounts or other aliases of an operated worktree's descendants. The
 supported host is macOS, without bind mounts.
 Recreated directories whose (st_dev, st_ino) the filesystem reuses.
 A race against a concurrent same-UID writer.
+
+Non-claim: if an earlier failed call created B itself, a later retry does not re-confirm B's link in its parent. The external base is coordinator infrastructure (`~/.local/state`) that normally pre-exists.
 """
 import fcntl
 import json
@@ -24,7 +26,6 @@ import re
 import stat
 import subprocess
 import sys
-import tempfile
 import uuid
 from contextlib import contextmanager
 
@@ -87,8 +88,7 @@ def _identity(checkout, plan_id, state_dir):
         checkout = Path(checkout).absolute()
         state, _, worktrees = CP.resolve_paths(state_dir=state_dir, cwd=checkout)
         root = CP._external_base(worktrees) / "hanig-authority" / "v1"
-        for path in (root.parent, root):
-            _directory(path)
+        _directory(root)
         if _directory(root / "plans"):
             for path in (root / "plans").iterdir():
                 _directory(path)
@@ -178,26 +178,16 @@ def _directory(path):
     return info
 
 
-def _mkdir(path, base, synced):
-    info = _directory(path)
-    marker = ".hanig-authority-created"
-    created = store.present(path / marker, str(path))
-    if path != base or not info or created:
-        _mkdir(path.parent, base if path != base else path.parent, synced)
-    if not info:
-        with tempfile.TemporaryDirectory(dir=path.parent) as tmp:
-            temporary = Path(tmp)
-            (temporary / marker).mkdir()
-            store.sync_directory(temporary)
-            try:
-                temporary.rename(path)
-            except OSError:
-                if not _directory(path):
-                    raise
-        created = True
-    if (path != base or created) and path.parent not in synced:
-        store.sync_directory(path.parent)
-        synced.add(path.parent)
+def _mkdir_base(path):
+    """Confirm parents only for external infrastructure created by this call."""
+    if store.present(path, str(path)):
+        return
+    _mkdir_base(path.parent)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        return  # Another trusted coordinator created it; this call did not.
+    store.sync_directory(path.parent)
 
 
 @contextmanager
@@ -213,26 +203,28 @@ def register(checkout, plan_id, state_dir):
     _active()
     with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd):
         base = root.parent.parent
-        synced = set()
-        _mkdir(root, base, synced)
+        _mkdir_base(base)
+        root.parent.mkdir(mode=0o700, exist_ok=True)
+        root.mkdir(mode=0o700, exist_ok=True)
         with _locked(root):
             entries = _entries(root)
             existing = _find(entries, identity, state_fd)
+            plans = root / "plans"
+            if existing is None:
+                rid = uuid.uuid4().hex
+                plans.mkdir(mode=0o700, exist_ok=True)
+                directory = plans / rid
+                directory.mkdir(mode=0o700)  # Never reuse a record root.
+            # OD4: confirm the fixed chain on every call. R is synced once below:
+            # by the atomic registry write, or explicitly on idempotent retry.
+            for path in (base, root.parent, plans):
+                store.sync_directory(path)
             if existing is not None:
-                # A visible entry may follow a failed publication fsync. Confirm
-                # its bytes and every directory link without rewriting anything.
                 fd = os.open(str(root / "registry.json"), os.O_RDONLY | os.O_NOFOLLOW)
                 with store.cleanup(os.close, fd):
                     os.fsync(fd)
-                directory = Path(existing["record_dir"])
-                for path in (directory, root / "plans", root, root.parent, base):
-                    store.sync_directory(path)
+                store.sync_directory(root)
                 return existing
-            rid = uuid.uuid4().hex
-            directory = root / "plans" / rid
-            _mkdir(directory.parent, base, synced)
-            directory.mkdir(mode=0o700)  # Never reuse a pre-existing record root.
-            store.sync_directory(directory.parent)
             entry = dict(identity, registration_id=rid, record_dir=str(directory))
             raw = (json.dumps({"schema_version": 1, "entries": entries + [entry]},
                               sort_keys=True, allow_nan=False) + "\n").encode("utf-8")

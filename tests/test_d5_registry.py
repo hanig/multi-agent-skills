@@ -1,5 +1,6 @@
 """D5 registration against real local repositories and directory objects."""
 import copy
+from contextlib import contextmanager
 import errno
 import fcntl
 import json
@@ -50,6 +51,29 @@ class TestD5Registry(unittest.TestCase):
             result[str(path)] = (st.st_ino, st.st_mode, st.st_mtime_ns,
                                  path.read_bytes() if path.is_file() else None)
         return result
+
+    @contextmanager
+    def record_fsyncs(self, failed=None):
+        """Record real fd identities; fault injection also works as root."""
+        calls, real_sync = [], os.fsync
+        def sync(fd):
+            info = os.fstat(fd)
+            key = (info.st_dev, info.st_ino)
+            calls.append(key)
+            if failed is not None and failed.exists():
+                target = failed.stat()
+                if key == (target.st_dev, target.st_ino):
+                    raise OSError(errno.EIO, "synthetic fsync failure")
+            real_sync(fd)
+        with mock.patch.object(os, "fsync", side_effect=sync):
+            yield calls
+
+    def assert_syncs(self, calls, paths):
+        self.assertCountEqual(calls, [(p.stat().st_dev, p.stat().st_ino) for p in paths])
+
+    def chain(self):
+        return [self.base, self.root.parent, self.root, self.root / "plans",
+                self.root / "registry.json"]
 
     def test_alias_and_spelling_share_registration(self):
         first = self.register()
@@ -219,33 +243,72 @@ class TestD5Registry(unittest.TestCase):
 
     def test_idempotent_retry_syncs_file_and_all_directory_links(self):
         entry = self.register()
-        directory = Path(entry["record_dir"])
-        paths = [self.root / "registry.json", directory, directory.parent,
-                 self.root, self.root.parent, self.base, self.base.parent]
-        keys = {(p.stat().st_dev, p.stat().st_ino) for p in paths}
-        synced, real_sync = set(), os.fsync
-        def sync(fd):
-            info = os.fstat(fd)
-            synced.add((info.st_dev, info.st_ino))
-            real_sync(fd)
         before = self.tree(self.root)
-        with mock.patch.object(os, "fsync", side_effect=sync):
+        with self.record_fsyncs() as calls:
             self.assertEqual(self.register(), entry)
-        self.assertEqual(keys, synced, "sync owned links and the created base's parent")
-        for failed in keys:
-            def fail(fd):
-                info = os.fstat(fd)
-                if (info.st_dev, info.st_ino) == failed:
-                    raise OSError(errno.EIO, "synthetic retry sync failure")
-                real_sync(fd)
-            with self.subTest(key=failed), mock.patch.object(os, "fsync", side_effect=fail):
+        self.assert_syncs(calls, self.chain())
+        for failed in self.chain():
+            with self.subTest(path=failed), self.record_fsyncs(failed):
                 with self.assertRaisesRegex(R.AuthorityError, "durability is unconfirmed"):
                     self.register()
-            synced.clear()
-            with mock.patch.object(os, "fsync", side_effect=sync):
+            with self.record_fsyncs() as calls:
                 self.assertEqual(self.register(), entry)
-            self.assertEqual(keys, synced, "retry must re-confirm each failed fsync")
+            self.assert_syncs(calls, self.chain())
         self.assertEqual(self.tree(self.root), before)
+
+    def test_initial_fsyncs_exact_chain_and_created_ancestor_parents(self):
+        for case in ("existing", "missing", "nested", "intermediate"):
+            with self.subTest(case=case):
+                self.base = self.d / case / "base" if case == "nested" else self.d / case
+                self.root = self.base / "hanig-authority/v1"
+                self.external_base.return_value = self.base
+                if case == "existing":
+                    self.base.mkdir()
+                elif case == "intermediate":
+                    self.root.parent.mkdir(parents=True)
+                parents = [] if case in ("existing", "intermediate") else [self.base.parent]
+                if case == "nested":
+                    parents.append(self.base.parent.parent)
+                with self.record_fsyncs() as calls:
+                    self.assertEqual(self.register()["plan_id"], "p")
+                self.assert_syncs(calls, self.chain() + parents)
+
+    def test_retry_after_each_initial_directory_fsync_failure(self):
+        for name in ("ancestor", "base", "intermediate", "root", "plans"):
+            with self.subTest(failed=name):
+                self.base = self.d / name
+                self.root = self.base / "hanig-authority/v1"
+                self.external_base.return_value = self.base
+                failed = {"ancestor": self.base.parent, "base": self.base,
+                          "intermediate": self.root.parent, "root": self.root,
+                          "plans": self.root / "plans"}[name]
+                with self.record_fsyncs(failed) as calls:
+                    with self.assertRaisesRegex(R.AuthorityError, "durability is unconfirmed"):
+                        self.register()
+                self.assertIn((failed.stat().st_dev, failed.stat().st_ino), calls)
+                with self.record_fsyncs() as calls:
+                    entry = self.register()
+                # OD4 explicitly does not reconfirm an earlier call's B link.
+                self.assert_syncs(calls, self.chain())
+                self.assertEqual(self.register(), entry)
+
+    def test_symlinked_external_base_and_parent_are_allowed(self):
+        for name in ("base", "parent", "intermediate"):
+            with self.subTest(name=name):
+                self.base = self.d / name / "external"
+                self.root = self.base / "hanig-authority/v1"
+                self.external_base.return_value = self.base
+                path = {"base": self.base, "parent": self.base.parent,
+                        "intermediate": self.root.parent}[name]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                target = self.d / (name + "-target")
+                target.mkdir()
+                path.symlink_to(target, target_is_directory=True)
+                with self.record_fsyncs() as calls:
+                    entry = self.register()
+                extra = [self.base.parent] if name == "parent" else []
+                self.assert_syncs(calls, self.chain() + extra)
+                self.assertEqual(self.register(), entry)
 
     def test_registry_strict_schema_and_duplicate_keys(self):
         self.register()
@@ -374,30 +437,16 @@ class TestD5Registry(unittest.TestCase):
 
     def test_final_preexisting_intermediate_bounds_fsync(self):
         self.root.parent.mkdir(parents=True)
-        base = self.base.stat()
-        base_key = (base.st_dev, base.st_ino)
-        synced, real_sync = set(), os.fsync
-        def sync(fd):
-            info = os.fstat(fd)
-            synced.add((info.st_dev, info.st_ino))
-            real_sync(fd)
         for phase in ("initial", "idempotent"):
-            with self.subTest(phase=phase):
-                synced.clear()
-                with mock.patch.object(os, "fsync", side_effect=sync):
-                    self.register()
-                self.assertNotIn(base_key, synced,
-                                 "pre-existing base is above the created-link boundary")
+            with self.subTest(phase=phase), self.record_fsyncs() as calls:
+                self.register()
+            self.assert_syncs(calls, self.chain())
 
     def test_final_unneeded_ancestor_sync_must_not_abort(self):
         self.root.parent.mkdir(parents=True)
-        real_sync = store.sync_directory
-        def sync(path):
-            if path == self.base:
-                raise OSError(errno.EIO, "synthetic unnecessary base sync")
-            real_sync(path)
-        with mock.patch.object(store, "sync_directory", side_effect=sync):
+        with self.record_fsyncs(self.base.parent) as calls:
             self.assertEqual(self.register()["plan_id"], "p")
+        self.assert_syncs(calls, self.chain())
 
 
 if __name__ == "__main__":
