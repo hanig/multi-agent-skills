@@ -432,7 +432,8 @@ def recovery_success(run):
             or any(tuple(state) != ("COMPLETED", "0:0")
                    for state in observation["cleanup_sacct_states"].values())):
         raise ValueError("coordinator terminal-success observation is invalid or superseded")
-    return dict(job_id=observation["job_ids"][0], sacct_state="COMPLETED", sacct_exit_code="0:0")
+    return dict(job_id=observation["job_ids"][0], sacct_state="COMPLETED", sacct_exit_code="0:0",
+                scheduler_evidence_source=observation.get("scheduler_evidence_source"))
 
 
 def recovery_complete(run):
@@ -448,7 +449,7 @@ def recovery_complete(run):
         # An attestation supplies lifecycle authority, never Slurm success.
         if receipt["outcome"]["exit_code"] == 0:
             execution = dict(receipt["execution"])
-            for key in ("job_id", "sacct_state", "sacct_exit_code"):
+            for key in ("job_id", "sacct_state", "sacct_exit_code", "scheduler_evidence_source"):
                 if key in run["execution"]:
                     execution[key] = run["execution"][key]
             execution.update(success)
@@ -593,7 +594,31 @@ def worker(stage):
     return 0
 
 
+class SchedulerState(tuple):
+    """Keep the legacy (state, exit code) pair, with its observation source."""
+    def __new__(cls, state, code, source):
+        result = super().__new__(cls, (state, code))
+        result.source = source
+        return result
+
+
 def scheduler_state(job):
+    try:
+        rc, out, err = _command(["scontrol", "show", "job", "-o", job])
+    except FileNotFoundError:
+        pass  # Accounting-only installations retain their existing behavior.
+    except (OSError, subprocess.SubprocessError):
+        return None
+    else:
+        if rc == 0:
+            pairs = re.findall(r"(?:^|\s)(JobId|JobState|ExitCode)=(\S*)", out)
+            fields = dict(pairs)
+            if (len(pairs) != 3 or set(fields) != {"JobId", "JobState", "ExitCode"}
+                    or fields["JobId"] != job or fields["JobState"] not in TERMINAL):
+                return None
+            return SchedulerState(fields["JobState"], fields["ExitCode"], "slurmctld")
+        if "Invalid job id specified" not in (err or out):
+            return None
     try:
         rc, out, err = _command(["sacct", "-n", "-P", "-j", job,
                                   "--format=JobIDRaw,State%40,ExitCode"])
@@ -608,7 +633,7 @@ def scheduler_state(job):
     _, state, code = matches[0][:3]
     # Slurm CANCELLED can carry ' by uid'; this is state parsing, never identity.
     state = state.split(" ", 1)[0].rstrip("+")
-    return (state, code) if state in TERMINAL else None
+    return SchedulerState(state, code, "sacct") if state in TERMINAL else None
 
 
 def output_tail(path, limit):
@@ -661,7 +686,8 @@ def supervise(stage):
             scheduler_stdout_tail=output_tail(stage / "job.out", 4000),
             scheduler_stderr_tail=output_tail(stage / "job.err", 2000),
             job_id=job, sacct_state=state[0] if state else None,
-                                   sacct_exit_code=state[1] if state else None)
+            sacct_exit_code=state[1] if state else None,
+            scheduler_evidence_source=getattr(state, "source", None))
         if state != ("COMPLETED", "0:0"):
             result["error"] = "Slurm verification did not reach terminal success"
         # Scheduler status is transport/lifecycle evidence, never a verifier
@@ -728,16 +754,19 @@ def slurm_job_name(request):
     return "verify-" + hashlib.sha256(request["launch_id"].encode("utf-8")).hexdigest()
 
 
-def discover_slurm_jobs(request, known=()):
+def discover_slurm_jobs(request, known=(), stage=None):
     """Union live and historical launch identities; failed queries never mean empty.
 
     Accounting starts at the epoch rather than sacct's implicit midnight. Names
     are returned wide enough for an exact comparison; no rendered identity is
     used for a decision. The live query also guards against requeued jobs whose
     older accounting row is terminal. No jobs is unresolved after a launch.
+    Without accounting, only a finished, controller-observed single submission
+    and an empty live queue establish the launch's complete job set.
     """
     name = slurm_job_name(request)
     jobs, queued, errors = set(known), set(), []
+    accounting_unavailable, queue_confirmed = False, False
     # Widthless -o fields use the full value without padding (squeue(1));
     # adding display widths or normalizing returned identities would lose this.
     # sacct -P is parsable2 (no trailing delimiter), unlike lowercase -p.
@@ -749,6 +778,7 @@ def discover_slurm_jobs(request, known=()):
         try:
             rc, out, err = _command(argv)
             if rc:
+                accounting_unavailable = source == "sacct"
                 raise ValueError(source + " launch discovery unavailable")
             for line in out.splitlines():
                 fields = line.split("|")
@@ -757,8 +787,29 @@ def discover_slurm_jobs(request, known=()):
                 jobs.add(fields[0])
                 if source == "squeue":
                     queued.add(fields[0])
+            if source == "squeue":
+                queue_confirmed = True
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            if source == "sacct" and not isinstance(exc, ValueError):
+                accounting_unavailable = True
             errors.append(source + ": " + str(exc))
+    if accounting_unavailable and queue_confirmed and not queued and stage is not None:
+        try:
+            # supervise submits once and saves that ID before polling. Its
+            # bound terminal marker plus an empty live queue closes this set;
+            # neither a lost submission response nor partial accounting does.
+            job = (stage / "job-id").read_text()
+            finished = json.loads((stage / "supervision-finished").read_text())
+            if (re.fullmatch(r"[0-9]+", job) and isinstance(finished, dict)
+                    and finished.get("launch_id") == request["launch_id"]
+                    and finished.get("job_id") == job
+                    and finished.get("scheduler_evidence_source") == "slurmctld"
+                    and finished.get("sacct_state") in TERMINAL
+                    and jobs.issubset({job})):
+                jobs.add(job)
+                errors = []
+        except (OSError, ValueError, UnicodeError):
+            pass
     return {"job_name": name, "job_ids": sorted(jobs), "queued_job_ids": sorted(queued),
             "scheduler_confirmed": not errors, "discovery_error": "; ".join(errors),
             "scheduler_observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
@@ -777,15 +828,16 @@ def slurm_quiescent(evidence, request):
                 and state[0] in TERMINAL for state in states.values()))
 
 
-def observe_slurm_success(request, known=()):
+def observe_slurm_success(request, known=(), stage=None):
     """Read-only execution evidence; never grants launch quiescence."""
-    evidence = discover_slurm_jobs(request, known)
+    evidence = discover_slurm_jobs(request, known, stage)
     states = {j: scheduler_state(j) for j in evidence["job_ids"]} if evidence["scheduler_confirmed"] else {}
-    evidence.update(discover_slurm_jobs(request, evidence["job_ids"]))
+    evidence.update(discover_slurm_jobs(request, evidence["job_ids"], stage))
     evidence.update(launch_id=request["launch_id"], cleanup_sacct_states=states)
     if (slurm_quiescent(evidence, request)
             and all(tuple(state) == ("COMPLETED", "0:0") for state in states.values())):
-        evidence.update(job_id=evidence["job_ids"][0], sacct_state="COMPLETED", sacct_exit_code="0:0")
+        evidence.update(job_id=evidence["job_ids"][0], sacct_state="COMPLETED", sacct_exit_code="0:0",
+            scheduler_evidence_source=getattr(states[evidence["job_ids"][0]], "source", None))
     return evidence
 
 
@@ -797,13 +849,14 @@ def slurm_success_probe(run):
         known.append(run["execution"]["job_id"])
     if any(not isinstance(j, str) or not re.fullmatch(r"[0-9]+", j) for j in known):
         raise ValueError("invalid saved Slurm job identity")
-    code = ("import hashlib, json, re, subprocess, sys, time\n"
+    code = ("import hashlib, json, re, subprocess, sys, time\nfrom pathlib import Path\n"
             "sys.path.insert(0, %r)\nimport child_environment as CE\n"
             "TERMINAL = %r\n") % (run["stage"], TERMINAL)
-    for function in (_command, scheduler_state, slurm_job_name, discover_slurm_jobs,
+    for function in (_command, SchedulerState, scheduler_state, slurm_job_name, discover_slurm_jobs,
                      slurm_quiescent, observe_slurm_success):
         code += inspect.getsource(function) + "\n"
-    return code + "print(json.dumps(observe_slurm_success(%r, %r)))\n" % ({"launch_id": run["launch_id"]}, known)
+    return code + "print(json.dumps(observe_slurm_success(%r, %r, Path(%r))))\n" % (
+        {"launch_id": run["launch_id"]}, known, run["stage"])
 
 
 def cleanup_slurm(stage, request, reconciled):
@@ -825,7 +878,7 @@ def cleanup_slurm(stage, request, reconciled):
     observed = {"job_ids": evidence["job_ids"]}
     try:
         time.sleep(2)
-        observed = discover_slurm_jobs(request, evidence["job_ids"])
+        observed = discover_slurm_jobs(request, evidence["job_ids"], stage)
         if observed["scheduler_confirmed"]:
             settled = all(scheduler_state(job) is not None
                           for job in observed["job_ids"])
@@ -901,7 +954,7 @@ def cleanup_slurm_locked(stage, request, reconciled, repoll=None, observed=None)
         if observed and not observed["scheduler_confirmed"]:
             evidence.update(observed, job_ids=sorted(known))
             raise ValueError(observed["discovery_error"])
-        evidence.update(discover_slurm_jobs(request, known))
+        evidence.update(discover_slurm_jobs(request, known, stage))
         jobs = evidence["job_ids"]
         evidence["job_id"] = job or (jobs[0] if jobs else None)
         if not evidence["scheduler_confirmed"]:
@@ -910,7 +963,7 @@ def cleanup_slurm_locked(stage, request, reconciled, repoll=None, observed=None)
             raise ValueError("supervision may still submit or publish a job ID; stage retained")
         if not jobs:
             raise ValueError("Slurm job identity unresolved; stage retained")
-        states = {}
+        states, sources = {}, {}
         for job in jobs:
             state = scheduler_state(job)
             # A still-live row overrides terminal accounting (e.g. requeue).
@@ -939,12 +992,13 @@ def cleanup_slurm_locked(stage, request, reconciled, repoll=None, observed=None)
                 state = scheduler_state(job)
             if state is not None:
                 states[job] = list(state)
+                sources[job] = getattr(state, "source", None)
         # Finite observation contract: accounting by name, then the live queue,
         # always after all individual accounting/cancellation calls. New IDs
         # retain the stage for the next retrieval; do not query them after this
         # snapshot. A privileged requeue after it remains possible: --no-requeue
         # and worker-started protect receipts, not an atomic scheduler fence.
-        evidence.update(discover_slurm_jobs(request, evidence["job_ids"]))
+        evidence.update(discover_slurm_jobs(request, evidence["job_ids"], stage))
         evidence["cleanup_sacct_states"] = states
         evidence["quiescent"] = slurm_quiescent(evidence, request)
         if not evidence["quiescent"]:
@@ -952,12 +1006,13 @@ def cleanup_slurm_locked(stage, request, reconciled, repoll=None, observed=None)
         evidence.setdefault("cancellation", "not-required")
         # All jobs must succeed to supply passing execution evidence. Completed
         # verifier FAIL remains FAIL independently of this lifecycle summary.
-        state = next((states[j] for j in jobs if states[j] != ["COMPLETED", "0:0"]),
-                     states[evidence["job_id"]])
+        state_job = next((j for j in jobs if states[j] != ["COMPLETED", "0:0"]), evidence["job_id"])
+        state = states[state_job]
         evidence["cleanup_sacct_state"] = state[0]
         collected = collect(stage)
         if collected.get("final"):
             evidence["sacct_state"], evidence["sacct_exit_code"] = state
+            evidence["scheduler_evidence_source"] = sources[state_job]
         if (not reconciled or reconciled != evidence_digest(collected)
                 or not collected.get("final") or not collected.get("supervision")):
             raise ValueError("remote evidence is not quiescent and reconciled; stage retained")
@@ -1259,7 +1314,7 @@ def ingest(run, response):
                                  and slurm_quiescent(lifecycle, request))
     if isinstance(supervision, dict):
         observe_recovery_evidence(run, supervision, "supervision")
-        for key in ("job_id", "sacct_state", "sacct_exit_code"):
+        for key in ("job_id", "sacct_state", "sacct_exit_code", "scheduler_evidence_source"):
             if key in supervision:
                 run["execution"][key] = supervision[key]
     lifecycle = response.get("lifecycle")
@@ -1576,7 +1631,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                 observe_recovery_evidence(run, observed, "probe", fresh=True)
                 if record_recovery_success(run, observed):
                     execution.update(job_id=observed["job_ids"][0], sacct_state="COMPLETED",
-                        sacct_exit_code="0:0", recovery_success_observed_at=observed["scheduler_observed_at"])
+                        sacct_exit_code="0:0", scheduler_evidence_source=observed.get("scheduler_evidence_source"),
+                        recovery_success_observed_at=observed["scheduler_observed_at"])
                     publish(path, ledger)
             except (OSError, ValueError, TypeError, AttributeError, KeyError, subprocess.SubprocessError) as exc:
                 execution["recovery_observation_error"] = str(exc)[-2000:]
@@ -1745,7 +1801,7 @@ def main():
         result = {"error": str(exc)}
     execution = result.get("execution", {})
     publish(stage / "supervision-finished", dict(
-        {key: execution.get(key) for key in ("job_id", "sacct_state", "sacct_exit_code")},
+        {key: execution.get(key) for key in ("job_id", "sacct_state", "sacct_exit_code", "scheduler_evidence_source")},
         launch_id=request["launch_id"]), once=True)
     if request["verification_host"]["executor"] == "slurm":
         # No acknowledgment is available yet: cancellation cannot remove evidence.
