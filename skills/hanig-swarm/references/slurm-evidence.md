@@ -18,15 +18,19 @@ process attribution nor scientific correctness.
   without converting carriage returns inside opaque metadata into new lines.
   Duplicated groups or failed refinement stay unknown and never enable <!-- declaration: isolation.done-predicate -->
   accounting, even if the job disappears between the two queries.
-2. Only positive controller absence unlocks a recorded coordinator observation; its identities, submission bounds and terminal state must match. <!-- declaration: isolation.done-predicate -->
-  Live readings win; malformed/mismatching observations are noted and ignored.
-3. Controller absence or unavailable `scontrol` permits `sacct` after no accepted
-  observation. Missing `scontrol` alone does not authorize observations; ownership is never widened. <!-- declaration: isolation.done-predicate -->
-  Query failures, malformed live rows and ownership mismatches are not purges.
-  Requeues whose reset SubmitTime falls outside the anchored interval stay incomplete.
-4. If accounting selects no owned row, an authorized exit record may supply
+2. Only controller absence, or an unavailable `scontrol` executable, permits <!-- declaration: isolation.done-predicate -->
+  `sacct`. A query failure, malformed row or ownership mismatch is not a <!-- declaration: isolation.done-predicate -->
+  purge. In particular, a requeue whose reset SubmitTime falls outside the
+  anchored interval stays incomplete; ownership is never widened. <!-- declaration: isolation.done-predicate -->
+3. If accounting selects no owned row, an authorized exit record may supply
   the last fallback. An owned row, even one with a missing state, blocks this
   weaker evidence. Unowned historical rows neither certify nor veto it.
+  Before this fallback, without usable accounting and only after positive
+  controller absence, admit matching non-success observations: FAILED, CANCELLED,
+  TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, BOOT_FAIL, DEADLINE. Check
+  job/unit/attempt identities and submit bounds. Note/ignore malformed records
+  and times, and COMPLETED. Compare valid observation/exit end times: later wins,
+  exit wins ties; otherwise use either alone. <!-- declaration: isolation.done-predicate -->
 
 Accounting queries have a 20-second timeout. One unsuccessful query disables
 accounting for the remaining coordinator pass, including checker subprocesses
@@ -121,7 +125,7 @@ file inside a separate payload directory is not reserved.
 
 `_check(state_dir=...)` passes existing `slurm-terminal-observation-{attempt_id}.json`
 via `--controller-observation`; attempt-directory paths are refused. <!-- declaration: isolation.done-predicate -->
-ARC-2797 supplies the writer and caller wiring; absent files/arguments preserve behavior.
+ARC-2797 wires/writes observations; absence preserves behavior.
 
 Receipts identify `slurmctld`, `slurmctld-observed`, `sacct` or `exit-record` in
 `basis.exit_status_attested_by`. Exit records are explicitly job-wrapper

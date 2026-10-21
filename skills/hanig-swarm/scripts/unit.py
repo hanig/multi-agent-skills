@@ -753,7 +753,7 @@ def scontrol_state(job_id, declared_at, bound_at, newest, notes):
     return (state, fields.get("ExitCode"), submit, None), False
 
 
-def slurm_exit_state(unit_dir, job_id, declared_at, notes):
+def slurm_exit_state(unit_dir, job_id, declared_at, notes, end_out=None):
     """A wrapper attestation is admissible only after positive queue absence.
 
     This is weaker than scheduler evidence: trusted writers can alter it,
@@ -783,6 +783,8 @@ def slurm_exit_state(unit_dir, job_id, declared_at, notes):
         return empty
     notes.append("exit-record: job wrapper attestation, not scheduler evidence; "
                  "a later unobserved requeue may be missed")
+    if end_out is not None:
+        end_out.append(ended)
     return ("COMPLETED" if status == 0 else "FAILED",
             str(status) + ":0", None, None)
 
@@ -819,10 +821,11 @@ def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
             and record["unit_id"] == spec.get("task_id")
             and record["attempt_id"] == spec.get("attempt_id") == Path(unit_dir).name
             and sacct_row_is_ours(parse_iso_ts(record["submit_time"]), declared_at, bound_at)[0]
-            and record["job_state"] in SLURM_TERMINAL_IN_QUEUE | {"PREEMPTED"}):
-        return record["job_state"], record["exit_code"], record["submit_time"], None
-    notes.append("controller observation ignored: " + (err or "invalid record"))
-    return empty
+            and parse_iso_ts(record["end_time"]) is not None
+            and record["job_state"] in (SLURM_FAILED - {"REVOKED", "SPECIAL_EXIT"}) | {"PREEMPTED"}):
+        return (record["job_state"], record["exit_code"], record["submit_time"], None), parse_iso_ts(record["end_time"])
+    notes.append("controller observation ignored: " + (err or "invalid record or non-failure state"))
+    return empty, None
 
 
 def slurm_state(unit_dir, spec, notes, record_enabled=False, observation=None):
@@ -841,20 +844,20 @@ def slurm_state(unit_dir, spec, notes, record_enabled=False, observation=None):
         return evidence
     if not absent:
         return evidence
-    if observation is not None and shutil.which("scontrol"):
-        evidence = observed_slurm_state(
-            observation, unit_dir, spec, declared_at, bound_at, notes)
-        if evidence[0] is not None:
-            spec["slurm_evidence_source"] = "slurmctld-observed"
-            return evidence
     owned = []
     evidence = sacct_state(job_id, declared_at, bound_at, newest, notes, owned)
     if evidence[0] is not None:
         spec["slurm_evidence_source"] = "sacct"
         return evidence
-    if owned[0] or not record_enabled:
-        return evidence
-    fallback = slurm_exit_state(unit_dir, job_id, declared_at, notes)
+    observed, ended = (None, None, None, None), None
+    if observation is not None and shutil.which("scontrol"):
+        observed, ended = observed_slurm_state(observation, unit_dir, spec, declared_at, bound_at, notes)
+    exit_end = []
+    fallback = (slurm_exit_state(unit_dir, job_id, declared_at, notes, exit_end)
+                if record_enabled and not owned[0] else (None, None, None, None))
+    if observed[0] is not None and (not exit_end or ended > exit_end[0]):
+        spec["slurm_evidence_source"] = "slurmctld-observed"
+        return observed
     if fallback[0] is not None:
         spec["slurm_evidence_source"] = "exit-record"
         return fallback
