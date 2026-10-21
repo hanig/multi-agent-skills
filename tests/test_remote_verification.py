@@ -2980,6 +2980,23 @@ class TestSlurmReconciliation(unittest.TestCase):
                 self.assertEqual(execution['cleanup'], 'unconfirmed')
                 self.assertTrue(self.f.stage.exists())
 
+    def test_malformed_terminal_state_does_not_abort_cleanup(self):
+        for name in ([], {}):
+            with self.subTest(state_name=name):
+                response = self.completing_response(
+                    cleanup_sacct_states={'321': [name, '0:0']})
+                (_, execution), waits, events = self.cleanup_sequence([response])
+                self.assertEqual(waits, [])
+                self.assertEqual(events, ['cleanup-enter', 'cleanup-exit'])
+                self.assertEqual(execution['cleanup'], 'unconfirmed')
+                self.assertTrue(self.f.stage.exists())
+                self.assertEqual(read_json(self.path)['runs'][0]['cleanup_receipt'], response)
+        # A subsequent retrieval can resolve the retained stage and saved ledger.
+        self.f.sleep.side_effect = None
+        _, recovered = self.retrieve()
+        self.assertEqual(recovered['cleanup'], 'removed')
+        self.assertFalse(self.f.stage.exists())
+
     def test_completing_window_rechecks_reason_after_each_retry(self):
         for changes in ({'cleanup_sacct_states': {'321': None}},
                         {'cleanup_error': 'squeue launch discovery unavailable'},

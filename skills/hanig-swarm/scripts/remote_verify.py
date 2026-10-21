@@ -1406,7 +1406,8 @@ def cleanup_completing_window(cleaned):
         and isinstance(states, dict) and set(states) == set(jobs)
         and set(queued).issubset(states)
         and all(isinstance(state, (list, tuple)) and len(state) == 2
-                and state[0] in TERMINAL for state in states.values()))
+                and isinstance(state[0], str) and state[0] in TERMINAL
+                for state in states.values()))
 
 
 def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit,
