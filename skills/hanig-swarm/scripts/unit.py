@@ -804,7 +804,10 @@ def controller_observation_path(path, unit_dir):
 def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
     empty = (None, None, None, None)
     path, error = controller_observation_path(path, unit_dir)
-    record, err = read_json(path) if path is not None else (None, error)
+    try:
+        record, err = read_json(path) if path is not None else (None, error)
+    except RecursionError:
+        record, err = None, "JSON nesting limit"
     fields = {"schema_version", "unit_id", "attempt_id", "job_id", "job_state",
               "exit_code", "submit_time", "end_time", "observed_at", "source"}
     if (not err and isinstance(record, dict) and set(record) == fields
