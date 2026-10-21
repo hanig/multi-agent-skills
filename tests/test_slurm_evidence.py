@@ -166,6 +166,8 @@ class SlurmEvidence(unittest.TestCase):
         for state in ("FAILED", "PREEMPTED"):
             self.observation(job_state=state)
             self.obs_check("DONE", "sacct")
+        self.stub("sacct", "print(%r)" % self.accounting(state=""))
+        self.obs_check("INCOMPLETE", None)
 
     def test_observation_recency(self):
         self.real_tools()
@@ -176,6 +178,14 @@ class SlurmEvidence(unittest.TestCase):
                                   time.localtime(U.parse_iso_ts(self.submitted) + delta))
             self.observation(end_time=ended)
             self.obs_check(expected, source)
+        base = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(U.parse_iso_ts(self.submitted) + 2))
+        for exited, observed, wins in ((".100Z", ".900Z", True), ("Z", ".900Z", True),
+                (".900Z", ".100Z", False), (".10Z", ".1+0000", False),
+                (".100000000000000001Z", ".100000000000000009Z", True),
+                (".2Z", ".9+00:00:00.8", False)):
+            self.exit_record(end_time=base + exited)
+            self.observation(end_time=base + observed)
+            self.obs_check("FAILED" if wins else "DONE", "slurmctld-observed" if wins else "exit-record")
 
     def test_observation_rejections(self):
         self.real_tools()
@@ -904,6 +914,7 @@ class SlurmEvidence(unittest.TestCase):
         self.assertEqual([call.args[0][0] for call in runner.call_args_list], ["squeue"])
         accounting.assert_not_called()
         self.assertEqual(runner.call_args.kwargs["timeout"], 60)
+        self.assertFalse(U.SACCT_UNAVAILABLE)
 
     def test_generated_batch_script_records_exit_and_clears_requeue_record(self):
         self.real_tools()
