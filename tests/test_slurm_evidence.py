@@ -173,7 +173,7 @@ class SlurmEvidence(unittest.TestCase):
                 receipt = self.obs_check("DONE", "sacct")
                 self.assertIn("controller observation ignored:", " ".join(receipt["notes"]))
         path = self.observation()
-        for malformed in ('{', '[]', '{}'):
+        for malformed in ('{', '[]', '{}', '[' * 10000 + ']' * 10000):
             path.write_text(malformed)
             receipt = self.obs_check("DONE", "sacct")
             self.assertIn("controller observation ignored:", " ".join(receipt["notes"]))
