@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,8 +21,49 @@ import d5_registry as R
 import d5_authority_store as store
 
 
+class TestD5VersionGate(unittest.TestCase):
+    """Fake version probes run even on hosts outside the real-Git envelope."""
+
+    def test_old_or_unparseable_version_before_any_storage_access(self):
+        for version in (b"git version 2.35.9\n", b"git version 1.99\n",
+                        b"unexpected\n", b"git version 2.x\n", b""):
+            with self.subTest(version=version), \
+                 mock.patch.object(R, "_git", return_value=version), \
+                 mock.patch.object(R, "d5_active", return_value=True), \
+                 mock.patch.object(R.CP, "resolve_paths", side_effect=AssertionError("state")), \
+                 mock.patch.object(R, "_directory", side_effect=AssertionError("R/P")), \
+                 mock.patch.object(R, "_entries", side_effect=AssertionError("registry")), \
+                 mock.patch.object(store, "present", side_effect=AssertionError("lstat")):
+                for call in (R.register, R.lookup):
+                    with self.subTest(operation=call.__name__), \
+                         self.assertRaisesRegex(R.AuthorityError, "unsupported Git version"):
+                        call("/unused", "p", "/unused-state")
+
+    def test_activation_and_plan_validation_precede_envelope(self):
+        with mock.patch.object(R, "_git", side_effect=AssertionError("Git")):
+            with self.assertRaisesRegex(R.AuthorityError, "D5 is not active"):
+                R.register("/unused", "p", "/unused-state")
+            with mock.patch.object(R, "d5_active", return_value=True):
+                for call in (R.register, R.lookup):
+                    with self.assertRaisesRegex(R.AuthorityError, "invalid plan_id"):
+                        call("/unused", "../p", "/unused-state")
+
+    def test_supported_leading_versions_reach_layout(self):
+        for version in (b"git version 2.36.0\n", b"git version 2.50.1 (Apple Git-155)\n",
+                        b"git version 3.0\n"):
+            with self.subTest(version=version), \
+                 mock.patch.object(R, "_git", return_value=version), \
+                 mock.patch.object(R, "_git_path", side_effect=RuntimeError("layout reached")):
+                with self.assertRaisesRegex(RuntimeError, "layout reached"):
+                    R.lookup("/unused", "p", "/unused-state")
+
+
 class TestD5Registry(unittest.TestCase):
     def setUp(self):
+        version = self.git("--version").decode("ascii", "replace").strip()
+        parsed = re.match(r"git version ([0-9]+)\.([0-9]+)", version)
+        if not parsed or tuple(map(int, parsed.groups())) < (2, 36):
+            self.skipTest("requires Git >= 2.36; host reports " + version)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.d = Path(temporary.name).resolve()
@@ -488,6 +530,167 @@ class TestD5Registry(unittest.TestCase):
             self.assertEqual(self.tree(), before)
         with self.subTest(operation="register"):
             self.assertEqual(self.register()["plan_id"], "p")
+
+
+    def test_separate_git_directory_from_linked_worktree_is_unsupported(self):
+        # A .git basename alone is insufficient: Git lists C as the main WT.
+        for name in ("common", ".git"):
+            home = self.d / ("separate-" + name)
+            home.mkdir()
+            checkout, common, linked = home / "main", home / name, home / "linked"
+            self.git("init", "--separate-git-dir=" + str(common), str(checkout))
+            self.git("-C", str(checkout), "-c", "user.name=Test", "-c",
+                     "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial")
+            self.git("-C", str(checkout), "worktree", "add", "--detach", str(linked))
+            before = self.tree()
+            for op in (lambda: self.register(repo=linked),
+                       lambda: R.lookup(linked, "p", self.state)):
+                with self.subTest(common=name, operation=op), \
+                     self.assertRaisesRegex(R.AuthorityError, "unsupported repository layout"):
+                    op()
+            self.assertEqual(self.tree(), before)
+
+    def test_bare_repository_is_unsupported(self):
+        bare = self.d / "bare" / ".git"
+        self.git("init", "--bare", str(bare))
+        before = self.tree()
+        for op in (lambda: self.register(repo=bare), lambda: R.lookup(bare, "p", self.state)):
+            with self.assertRaisesRegex(R.AuthorityError, "unsupported repository layout"):
+                op()
+        self.assertEqual(self.tree(), before)
+
+    def test_common_directory_uses_tristate_lstat(self):
+        parent = self.d / "layout"
+        parent.mkdir()
+        common = parent / ".git"
+        for kind in ("missing", "file", "symlink", "unknown"):
+            if kind == "file":
+                common.write_text("not a directory")
+            elif kind == "symlink":
+                common.unlink()
+                common.symlink_to(self.repo / ".git", target_is_directory=True)
+            present = store.present
+            def probe(path, field):
+                if path == common and kind == "unknown":
+                    raise R.AuthorityError(field + ": lookup failed")
+                return present(path, field)
+            with self.subTest(kind=kind), \
+                 mock.patch.object(R, "_git_path", return_value=common), \
+                 mock.patch.object(store, "present", side_effect=probe):
+                for op in (self.register, lambda: R.lookup(self.repo, "p", self.state)):
+                    with self.assertRaisesRegex(R.AuthorityError, "unsupported repository layout"):
+                        op()
+
+    def test_envelope_precedes_all_authority_and_state_access(self):
+        self.register()
+        real_git = R._git
+        for failure in ("version", "layout"):
+            events = []
+            def git(checkout, *args):
+                events.append(args)
+                if args == ("--version",) and failure == "version":
+                    return b"git version 2.35.0\n"
+                if args == ("worktree", "list", "--porcelain", "-z"):
+                    return b"worktree /wrong\0\0"
+                return real_git(checkout, *args)
+            present = store.present
+            def check(path, field):
+                self.assertEqual(Path(path), self.repo / ".git")
+                return present(path, field)
+            with mock.patch.object(R, "_git", side_effect=git), \
+                 mock.patch.object(store, "present", side_effect=check), \
+                 mock.patch.object(R.CP, "resolve_paths", side_effect=AssertionError("state")), \
+                 mock.patch.object(store, "read_bytes", side_effect=AssertionError("registry")), \
+                 mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops:
+                ops.open = mock.Mock(side_effect=AssertionError("open"))
+                for op in (self.register, lambda: R.lookup(self.repo, "p", self.state)):
+                    events.clear()
+                    with self.subTest(failure=failure, operation=op), \
+                         self.assertRaisesRegex(R.AuthorityError, "unsupported"):
+                        op()
+                    self.assertEqual(events[0], ("--version",))
+
+    def test_plans_worktree_refuses_before_first_mkdir(self):
+        plans = self.root / "plans"
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(plans))
+        before = self.tree()
+        with mock.patch.object(Path, "mkdir", side_effect=AssertionError("mkdir")):
+            with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
+                self.register()
+        self.assertEqual(self.tree(), before)
+
+    def test_root_and_state_containment_in_main_common_and_linked(self):
+        linked = self.d / "linked"
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(linked))
+        for protected in (self.repo, self.repo / ".git", linked):
+            with self.subTest(protected=protected):
+                for base in (protected, protected / "missing" / "external"):
+                    self.external_base.return_value = base
+                    with mock.patch.object(Path, "mkdir", side_effect=AssertionError("mkdir")):
+                        with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
+                            self.register()
+                self.external_base.return_value = self.base
+                with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
+                    self.register(state=protected)
+        self.assertFalse(self.base.exists())
+
+    def test_protected_worktree_spelled_through_symlinked_ancestor(self):
+        alias = self.d / "alias"
+        alias.symlink_to(self.d, target_is_directory=True)
+        linked = self.root / "plans"
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(linked))
+        real_git = R._git
+        def git(checkout, *args):
+            raw = real_git(checkout, *args)
+            if args == ("worktree", "list", "--porcelain", "-z"):
+                raw = raw.replace(os.fsencode(linked), os.fsencode(alias / linked.relative_to(self.d)))
+            return raw
+        with mock.patch.object(R, "_git", side_effect=git):
+            with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
+                self.register()
+
+    def test_newline_worktree_containment(self):
+        linked = self.d / "linked\nworktree"
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(linked))
+        # CP's legacy line parser cannot supply this containment check.
+        self.external_base.return_value = linked / "authority-base"
+        with mock.patch.object(Path, "mkdir", side_effect=AssertionError("mkdir")):
+            with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
+                self.register()
+        self.external_base.return_value = self.base
+        first = self.register(repo=linked)
+        self.assertEqual(R.lookup(linked, "p", self.state), first)
+
+    def test_record_worktree_refuses_before_first_mkdir_but_lookup_is_unchanged(self):
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
+        before = self.tree()
+        with mock.patch.object(Path, "mkdir", side_effect=AssertionError("mkdir")):
+            with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
+                self.register()
+        self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+        self.assertEqual(self.tree(), before)
+
+    def test_candidate_record_worktree_refuses_before_first_mkdir(self):
+        directory = self.root / "plans" / ("a" * 32)
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
+        with mock.patch.object(R.uuid, "uuid4", return_value=SimpleNamespace(hex=directory.name)), \
+             mock.patch.object(Path, "mkdir", side_effect=AssertionError("mkdir")):
+            with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
+                self.register()
+
+    def test_containment_follows_symlinked_infrastructure_ancestor(self):
+        self.base.mkdir()
+        (self.base / "hanig-authority").symlink_to(self.repo, target_is_directory=True)
+        with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
+            self.register()
+        self.assertFalse((self.repo / "v1").exists())
+
+    def test_unrelated_repository_above_authority_is_allowed(self):
+        self.git("init", str(self.d))
+        entry = self.register()
+        self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
 
 
 if __name__ == "__main__":
