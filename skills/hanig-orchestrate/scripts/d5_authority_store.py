@@ -24,13 +24,12 @@ def _require(condition, field, description):
 
 
 def _present(path, field):
-    """Only ENOENT means absent; symlinks and non-regular files are present."""
     try:
         return os.lstat(path)
     except FileNotFoundError:
         return False
     except OSError as exc:
-        raise AuthorityError("record: {}: lookup failed".format(field)) from exc
+        raise AuthorityError("record: {}: lookup failed; durability is unconfirmed".format(field)) from exc
 
 
 @contextmanager
@@ -62,7 +61,6 @@ def _sync_directory(directory):
 
 
 def _write(path, raw):
-    """Caller holds the store lock, including while writing an archive."""
     fd, name = tempfile.mkstemp(prefix=".authority-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as handle:

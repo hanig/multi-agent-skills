@@ -342,6 +342,7 @@ class TestD5AuthorityStore(unittest.TestCase):
                             with self.assertRaisesRegex(A.AuthorityError, field) as caught:
                                 operation(d, expected)
                             self.assertIs(caught.exception.__cause__, fault)
+                            self.assertIn("durability is unconfirmed", str(caught.exception))
                         elif site == "archive_directory":
                             self.refuses(field, operation, d, expected)
                         else:
