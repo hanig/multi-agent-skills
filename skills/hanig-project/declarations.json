@@ -282,7 +282,7 @@
     },
     {
       "id": "judgment.by-kind",
-      "normative_text": "Require outputs and the coordinator-pinned pre-dispatch artifact basis. Slurm: live controller, accounting, then non-success observation after positive absence versus authorized exit (later end wins; exit wins ties; note/ignore malformed or COMPLETED observations). Pipeline: launcher exit. Code: lifecycle and produced commit. Closure is separate."
+      "normative_text": "Require outputs and the coordinator-pinned pre-dispatch artifact basis. Slurm: live controller, accounting, then non-success observation after positive absence versus authorized exit (later end wins; exit wins ties; note/ignore malformed or COMPLETED observations). Pipeline: launcher exit; code: lifecycle and produced commit; separate closure."
     },
     {
       "id": "slurm.command-boundary",

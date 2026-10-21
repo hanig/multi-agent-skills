@@ -21,16 +21,14 @@ process attribution nor scientific correctness.
 2. Only controller absence, or an unavailable `scontrol` executable, permits <!-- declaration: isolation.done-predicate -->
   `sacct`. A query failure, malformed row or ownership mismatch is not a <!-- declaration: isolation.done-predicate -->
   purge. In particular, a requeue whose reset SubmitTime falls outside the
-  anchored interval stays incomplete; ownership is never widened. <!-- declaration: isolation.done-predicate -->
+  anchored interval stays incomplete; ownership is never widened. Without usable accounting, only positive <!-- declaration: isolation.done-predicate -->
+  controller absence admits FAILED, CANCELLED,
+  TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, BOOT_FAIL, DEADLINE observations
+  with matching job/unit/attempt and submit bounds. Note/ignore malformed
+  records/times and COMPLETED. Later valid observation/exit end wins; exit wins ties.
 3. If accounting selects no owned row, an authorized exit record may supply
   the last fallback. An owned row, even one with a missing state, blocks this
   weaker evidence. Unowned historical rows neither certify nor veto it.
-  Before this fallback, without usable accounting and only after positive <!-- declaration: isolation.done-predicate -->
-  controller absence, admit matching non-success observations: FAILED, CANCELLED,
-  TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, BOOT_FAIL, DEADLINE. Check
-  job/unit/attempt identities and submit bounds. Note/ignore malformed records
-  and times, and COMPLETED. Compare valid observation/exit end times: later wins,
-  exit wins ties; otherwise use either alone.
 
 Accounting queries have a 20-second timeout. One unsuccessful query disables
 accounting for the remaining coordinator pass, including checker subprocesses
@@ -122,10 +120,6 @@ The record and its temporary-file namespace are not payload outputs. Capable
 attempts cannot declare the entire root or an alias of this metadata; otherwise <!-- declaration: usage.outputs -->
 the wrapper could manufacture its own production evidence. A similarly named
 file inside a separate payload directory is not reserved.
-
-`_check(state_dir=...)` passes existing `slurm-terminal-observation-{attempt_id}.json`
-via `--controller-observation`; attempt-directory paths are refused. <!-- declaration: isolation.done-predicate -->
-ARC-2797 wires/writes observations; absence preserves behavior.
 
 Receipts identify `slurmctld`, `slurmctld-observed`, `sacct` or `exit-record` in
 `basis.exit_status_attested_by`. Exit records are explicitly job-wrapper

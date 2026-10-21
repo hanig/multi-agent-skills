@@ -807,24 +807,24 @@ def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
     empty = (None, None, None, None)
     path, error = controller_observation_path(path, unit_dir)
     try:
-        record, err = read_json(path) if path is not None else (None, error)
+        row, err = read_json(path) if path is not None else (None, error)
     except RecursionError:
-        record, err = None, "JSON nesting limit"
+        row, err = None, "JSON nesting limit"
     fields = {"schema_version", "unit_id", "attempt_id", "job_id", "job_state",
               "exit_code", "submit_time", "end_time", "observed_at", "source"}
-    if (not err and isinstance(record, dict) and set(record) == fields
-            and type(record["schema_version"]) is int and record["schema_version"] == 1
-            and all(isinstance(record[k], str) and record[k] for k in fields - {"schema_version"})
-            and record["source"] == "slurmctld"
-            and re.fullmatch(r"[0-9]+:[0-9]+", record["exit_code"])
-            and record["job_id"] == str(spec["job_id"])
-            and record["unit_id"] == spec.get("task_id")
-            and record["attempt_id"] == spec.get("attempt_id") == Path(unit_dir).name
-            and sacct_row_is_ours(parse_iso_ts(record["submit_time"]), declared_at, bound_at)[0]
-            and parse_iso_ts(record["end_time"]) is not None
-            and record["job_state"] in (SLURM_FAILED - {"REVOKED", "SPECIAL_EXIT"}) | {"PREEMPTED"}):
-        return (record["job_state"], record["exit_code"], record["submit_time"], None), parse_iso_ts(record["end_time"])
-    notes.append("controller observation ignored: " + (err or "invalid record or non-failure state"))
+    if (not err and isinstance(row, dict) and set(row) == fields
+            and type(row["schema_version"]) is int and row["schema_version"] == 1
+            and all(isinstance(row[k], str) and row[k] for k in fields - {"schema_version"})
+            and row["source"] == "slurmctld"
+            and re.fullmatch(r"[0-9]+:[0-9]+", row["exit_code"])
+            and row["job_id"] == str(spec["job_id"])
+            and row["unit_id"] == spec.get("task_id")
+            and row["attempt_id"] == spec.get("attempt_id") == Path(unit_dir).name
+            and sacct_row_is_ours(parse_iso_ts(row["submit_time"]), declared_at, bound_at)[0]
+            and parse_iso_ts(row["end_time"]) is not None
+            and row["job_state"] in (SLURM_FAILED - {"REVOKED", "SPECIAL_EXIT"}) | {"PREEMPTED"}):
+        return (row["job_state"], row["exit_code"], row["submit_time"], None), parse_iso_ts(row["end_time"])
+    notes.append("controller observation ignored: " + (err or "invalid row or non-failure state"))
     return empty, None
 
 
