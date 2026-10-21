@@ -21,14 +21,13 @@ process attribution nor scientific correctness.
 2. Only controller absence, or an unavailable `scontrol` executable, permits <!-- declaration: isolation.done-predicate -->
   `sacct`. A query failure, malformed row or ownership mismatch is not a <!-- declaration: isolation.done-predicate -->
   purge. In particular, a requeue whose reset SubmitTime falls outside the
-  anchored interval stays incomplete; ownership is never widened. Without any owned accounting row, only positive <!-- declaration: isolation.done-predicate -->
+  anchored interval stays incomplete; ownership is never widened. Observations apply only where scontrol answers; errors or missing executables cannot establish absence. Without any owned accounting row, only positive <!-- declaration: isolation.done-predicate -->
   controller absence admits FAILED, CANCELLED,
   TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, BOOT_FAIL, DEADLINE observations
   with matching job/unit/attempt and submit bounds. Note/ignore malformed
   records/times and COMPLETED. A valid observation conflicting with authorized exit success
   means INCOMPLETE with a note, regardless of end times.
-  Otherwise observation decides. This tier applies only where scontrol answers;
-  Errors or missing executables cannot establish absence.
+  Otherwise observation decides.
   Conflict INCOMPLETE is transient: sacct decides once slurmdbd returns.
   An unobserved later incarnation without an exit record is not detected.
 3. If accounting selects no owned row, an authorized exit record may supply

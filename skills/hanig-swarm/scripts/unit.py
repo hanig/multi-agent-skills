@@ -859,10 +859,10 @@ def slurm_state(unit_dir, spec, notes, record_enabled=False, observation=None):
     if observation is not None and shutil.which("scontrol"):
         observed = observed_slurm_state(observation, unit_dir, spec, declared_at, bound_at, notes)
     fallback = (slurm_exit_state(unit_dir, job_id, declared_at, notes)
-                if record_enabled else (None, None, None, None))
+                if record_enabled and not owned[0] else (None, None, None, None))
     if observed[0] is not None:
         if fallback[0] == "COMPLETED":
-            notes.append("conflict: controller observation versus successful exit record")
+            notes.append("conflict: observation versus exit success")
             return None, None, None, None
         spec["slurm_evidence_source"] = "slurmctld-observed"
         return observed
