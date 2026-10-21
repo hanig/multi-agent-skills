@@ -4,6 +4,9 @@ Registration owns placement and identity; the record store owns write locking
 and replacement rules. Status reads atomic snapshots without creating locks
 or persisting invalidation. Its evaluation is diagnostic only.
 """
+from contextlib import contextmanager
+import fcntl
+import os
 from pathlib import Path
 import uuid
 
@@ -24,6 +27,29 @@ def _registered(checkout, plan_id, state_dir):
     return entry
 
 
+@contextmanager
+def _grant_locked(directory):
+    """Refuse overlapping grant mutations; keep grant.lock permanent.
+
+    This outer lock spans record publication through store-lock release.
+    The store still owns the record lock and all replacement decisions.
+    """
+    try:
+        fd = os.open(str(directory / "grant.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise d5_registry.AuthorityError(
+                    "grant: concurrent operation already exists") from exc
+            yield
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise d5_registry.AuthorityError(
+            "grant: filesystem operation failed; durability is unconfirmed: {}".format(exc)) from exc
+
+
 def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
           mandate_bytes, scope, owner_response, displayed_bounds):
     """Create or replace a validated grant with exact owner confirmation."""
@@ -40,7 +66,8 @@ def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
     directory = Path(entry["record_dir"])
     operation = (store.replace if store.present(directory / store.RECORD_NAME, "record")
                  else store.create)
-    return operation(directory, record)
+    with _grant_locked(directory):
+        return operation(directory, record)
 
 
 def revoke(checkout, plan_id, state_dir, now, reason):

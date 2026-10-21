@@ -175,6 +175,46 @@ class TestD5Lease(unittest.TestCase):
         self.assertEqual(authority.decode((Path(entry["record_dir"]) / store.RECORD_NAME).read_bytes()), result)
         self.assertEqual(self.status()["record_state"], "invalidated")
 
+    def test_overlapping_grant_after_publication_refuses(self):
+        entry = self.register()
+        path = Path(entry["record_dir"]) / store.RECORD_NAME
+        published, release = threading.Event(), threading.Event()
+        write = store._write
+
+        def paused_write(candidate, raw):
+            write(candidate, raw)
+            if candidate == path and not published.is_set():
+                published.set()
+                if not release.wait(20):
+                    raise AssertionError("publication release deadline")
+
+        with mock.patch.object(registry, "d5_active", return_value=True), \
+                mock.patch.object(store, "_write", side_effect=paused_write), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.grant)
+            try:
+                self.assertTrue(published.wait(10), "publication deadline")
+                second = pool.submit(self.grant)
+                with self.assertRaisesRegex(registry.AuthorityError, "grant.*already exists"):
+                    second.result(timeout=10)
+            finally:
+                release.set()
+            record = first.result(timeout=10)
+            self.assertEqual(authority.decode(path.read_bytes()), record)
+            self.assertFalse((path.parent / "superseded").exists())
+            # The permanent lock must be released: sequential replacement
+            # remains allowed by the store's consent rules.
+            replacement = self.grant()
+            self.assertNotEqual(replacement["grant_id"], record["grant_id"])
+
+    def test_revoke_without_record_returns_store_domain_error(self):
+        entry = self.register()
+        with mock.patch.object(registry, "d5_active", return_value=True):
+            with self.assertRaisesRegex(registry.AuthorityError, "filesystem operation failed") as caught:
+                lease.revoke(self.repo, "p", self.state, 150, "cleanup")
+        self.assertIsInstance(caught.exception.__cause__, FileNotFoundError)
+        self.assertFalse((Path(entry["record_dir"]) / store.RECORD_NAME).exists())
+
     def test_status_absent_creates_nothing(self):
         for base_exists in (False, True):
             with self.subTest(base_exists=base_exists):

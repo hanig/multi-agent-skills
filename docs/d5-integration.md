@@ -68,7 +68,10 @@ fresh grant ID and session cap 1, digests exact mandate bytes, and stores
 owner response and displayed bounds without summarizing or trimming them.
 Custody and invalidation start null. Creation and replacement use the store's
 locking, consent rules and predecessor archive. Two initial grants that both
-observe no record race through `store.create`; one refuses the existing record.
+observe no record select `store.create`; one refuses. Grant mutations also
+hold a permanent `grant.lock` with a nonblocking exclusive lock, so a caller
+seeing a newly published record while its writer still holds the store lock
+refuses instead of waiting to replace it. Sequential replacement stays allowed.
 Revocation requires registration and uses the store's terminal transition.
 
 `register`, `grant` and `revoke` refuse with "D5 is not active" until U8 changes
