@@ -14,7 +14,7 @@ import re
 import subprocess
 import sys
 import uuid
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager
 
 import skill_paths
 import d5_authority as authority
@@ -28,7 +28,7 @@ import child_environment as CE
 
 AuthorityError = authority.AuthorityError
 _ENTRY_FIELDS = {"registration_id", "repo_key", "plan_id", "state_key",
-                 "checkout", "git_common_dir", "state_dir", "record_dir", "record_key"}
+                 "checkout", "git_common_dir", "state_dir", "record_dir"}
 
 
 def d5_active():
@@ -55,14 +55,12 @@ def _key(info):
     return (info.st_dev, info.st_ino)
 
 
-def _common(checkout, check=True):
+def _common(checkout):
     """Read one Git path without stripping path bytes."""
     result = subprocess.run(
         ["git", "-C", str(checkout), "rev-parse", "--path-format=absolute",
          "--git-common-dir"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL, env=CE.child_env(), timeout=30, check=check)
-    if result.returncode:
-        return None
+        stdin=subprocess.DEVNULL, env=CE.child_env(), timeout=30, check=True)
     _require(result.stdout.endswith(b"\n"), "invalid git common directory")
     common = Path(os.fsdecode(result.stdout[:-1]))
     _require(common.is_absolute(), "git common directory must be absolute")
@@ -147,7 +145,7 @@ def _entries(root):
         _require(type(rid) is str and re.fullmatch(r"[0-9a-f]{32}", rid) is not None,
                  "invalid registration_id")
         _plan_id(entry["plan_id"])
-        for field in ("repo_key", "state_key", "record_key"):
+        for field in ("repo_key", "state_key"):
             key = entry[field]
             _require(type(key) is list and len(key) == 2 and
                      all(type(n) is int and n >= 0 for n in key), "invalid " + field)
@@ -177,30 +175,6 @@ def _find(entries, identity, state_fd):
     _require(not any(e["state_key"] == identity["state_key"] for e in entries),
              "state_key already registered to another plan")
     return None
-
-
-def _record_key(root, registration_id):
-    """Walk owned directories without following substituted links."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    with ExitStack() as stack:
-        fd = os.open(str(root), flags)
-        stack.callback(os.close, fd)
-        for child in (None, "plans", registration_id):
-            if child is not None:
-                fd = os.open(child, flags, dir_fd=fd)
-                stack.callback(os.close, fd)
-            try:
-                os.stat(".git", dir_fd=fd, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                raise AuthorityError("authority storage became a Git worktree")
-        return list(_key(os.fstat(fd)))
-
-
-def _check_record(root, entry):
-    _require(_record_key(root, entry["registration_id"]) == entry["record_key"],
-             "record_key mismatch: record directory replaced")
 
 
 def _mkdir(path, base, protected):
@@ -235,7 +209,6 @@ def register(checkout, plan_id, state_dir):
             entries = _entries(root)
             existing = _find(entries, identity, state_fd)
             if existing is not None:
-                _check_record(root, existing)
                 # A visible entry may follow a failed publication fsync. Confirm
                 # its bytes and every directory link without rewriting anything.
                 fd = os.open(str(root / "registry.json"), os.O_RDONLY | os.O_NOFOLLOW)
@@ -251,8 +224,7 @@ def register(checkout, plan_id, state_dir):
             _outside(directory, protected)
             directory.mkdir(mode=0o700)  # Never reuse a pre-existing record root.
             store.sync_directory(directory.parent)
-            entry = dict(identity, registration_id=rid, record_dir=str(directory),
-                         record_key=_record_key(root, rid))
+            entry = dict(identity, registration_id=rid, record_dir=str(directory))
             raw = (json.dumps({"schema_version": 1, "entries": entries + [entry]},
                               sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
             store.write_bytes(root / "registry.json", raw)
@@ -262,7 +234,4 @@ def register(checkout, plan_id, state_dir):
 def lookup(checkout, plan_id, state_dir):
     """Read an atomic registry snapshot; absent registration returns None."""
     with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd, _):
-        entry = _find(_entries(root), identity, state_fd)
-        if entry is not None:
-            _check_record(root, entry)
-        return entry
+        return _find(_entries(root), identity, state_fd)
