@@ -16,7 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
 import d5_registry as R
 import d5_authority_store as store
-from tests.test_d5_authority import MANDATE, grant
 
 
 class TestD5Registry(unittest.TestCase):
@@ -43,16 +42,6 @@ class TestD5Registry(unittest.TestCase):
     def register(self, repo=None, plan="p", state=None):
         with mock.patch.object(R, "d5_active", return_value=True):
             return R.register(repo or self.repo, plan, state or self.state)
-
-    def options(self):
-        record = grant()
-        return dict(issued_at=record["issued_at"], confirmed_at=record["confirmed_at"],
-                    expires_at=record["expires_at"], mandate_bytes=MANDATE,
-                    scope=record["scope"], **record["confirmation"])
-
-    def status(self, **options):
-        return R.status(self.repo, "p", self.state,
-                        **dict(dict(now=101, mandate_bytes=MANDATE), **options))
 
     def tree(self, root=None):
         result = {}
@@ -120,7 +109,7 @@ class TestD5Registry(unittest.TestCase):
             self.assertEqual(self.register(), first)
         self.assertEqual(self.tree(self.root), before)
 
-    def test_recreated_state_refuses_lookup_and_management(self):
+    def test_recreated_state_refuses_lookup_and_registration(self):
         first = self.register()
         fd = os.open(str(self.state), os.O_RDONLY | os.O_DIRECTORY)
         self.addCleanup(os.close, fd)  # Hold old inode to prevent immediate reuse.
@@ -130,9 +119,7 @@ class TestD5Registry(unittest.TestCase):
         before = self.tree(self.root)
         with mock.patch.object(R, "d5_active", return_value=True):
             for op in (lambda: R.lookup(self.repo, "p", self.state),
-                       self.status, lambda: self.register(),
-                       lambda: R.grant(self.repo, "p", self.state, **self.options()),
-                       lambda: R.revoke(self.repo, "p", self.state, 102, "stop")):
+                       lambda: self.register()):
                 with self.subTest(op=op), self.assertRaisesRegex(R.AuthorityError, "state_key mismatch"):
                     op()
         self.assertEqual(self.tree(self.root), before)
@@ -171,21 +158,16 @@ class TestD5Registry(unittest.TestCase):
                 R.register(self.repo, "p", None)
         self.assertFalse(self.base.exists())
 
-    def test_missing_status_and_lookup_create_nothing(self):
+    def test_missing_lookup_creates_nothing(self):
         before = self.tree()
-        self.assertEqual(self.status(), {"state": "inactive", "registration": None,
-                                        "record": None, "record_state": "absent"})
         self.assertIsNone(R.lookup(self.repo, "p", self.state))
         self.assertEqual(self.tree(), before)
 
-    def test_inactive_mutations_refuse_before_any_write(self):
+    def test_register_refuses_before_activation(self):
         before = self.tree()
         self.assertFalse(R.d5_active())
-        for op in (lambda: R.register(self.repo, "p", self.state),
-                   lambda: R.grant(self.repo, "p", self.state, **self.options()),
-                   lambda: R.revoke(self.repo, "p", self.state, 102, "stop")):
-            with self.subTest(op=op), self.assertRaisesRegex(R.AuthorityError, "D5 is not active"):
-                op()
+        with self.assertRaisesRegex(R.AuthorityError, "D5 is not active"):
+            R.register(self.repo, "p", self.state)
         self.assertEqual(self.tree(), before)
 
     def test_invalid_plan_ids(self):
@@ -203,66 +185,6 @@ class TestD5Registry(unittest.TestCase):
         other.mkdir()
         second = self.register(plan="p", state=other)
         self.assertNotEqual(first["registration_id"], second["registration_id"])
-
-    def test_management_roundtrip_and_read_only_status(self):
-        entry = self.register()
-        directory = Path(entry["record_dir"])
-        before = self.tree()
-        self.assertEqual(self.status()["record_state"], "absent")
-        self.assertEqual(self.tree(), before)
-        with mock.patch.object(R, "d5_active", return_value=True):
-            first = R.grant(self.repo, "p", self.state, **self.options())
-        self.assertEqual(first["confirmation"], grant()["confirmation"])
-        self.assertEqual(first["mandate_sha256"], grant()["mandate_sha256"])
-        # Status must not create the store lock even if it is absent.
-        (directory / store.LOCK_NAME).unlink()
-        before = self.tree()
-        for options, expected in (({}, "valid"), ({"now": 86500}, "expired"),
-                                  ({"mandate_bytes": b"changed"}, "mandate_changed")):
-            result = self.status(**options)
-            self.assertEqual(result["state"], "inactive")
-            self.assertEqual(result["registration"], entry)
-            self.assertEqual(result["record"], first)
-            self.assertEqual(result["record_state"], expected)
-        self.assertEqual(self.tree(), before)
-        with mock.patch.object(R, "d5_active", return_value=True):
-            second = R.grant(self.repo, "p", self.state, **self.options())
-            self.assertNotEqual(first["grant_id"], second["grant_id"])
-            self.assertEqual(store.read(directory), second)
-            archived = directory / "superseded" / (first["grant_id"] + ".json")
-            self.assertEqual(R.authority.decode(archived.read_bytes()), first)
-            revoked = R.revoke(self.repo, "p", self.state, 102, "stop")
-        self.assertEqual(revoked["invalidation"], {"at": 102, "kind": "revoked", "reason": "stop"})
-        self.assertEqual(self.status()["record_state"], "invalidated")
-
-    def test_replacement_cannot_silently_extend_or_widen(self):
-        self.register()
-        options = self.options()
-        options["expires_at"] = 200
-        with mock.patch.object(R, "d5_active", return_value=True):
-            R.grant(self.repo, "p", self.state, **options)
-            for field in ("expires_at", "scope"):
-                changed = copy.deepcopy(options)
-                if field == "expires_at":
-                    changed[field] += 1
-                else:
-                    changed[field]["actions"].append("new")
-                before = self.tree(self.root)
-                with self.assertRaisesRegex(R.AuthorityError, "fresh confirmation"):
-                    R.grant(self.repo, "p", self.state, **changed)
-                self.assertEqual(self.tree(self.root), before)
-                changed["owner_response"] += " newly confirmed"
-                self.assertEqual(R.grant(self.repo, "p", self.state, **changed)[field], changed[field])
-                options = changed
-
-    def test_unregistered_management_refuses_without_creation(self):
-        before = self.tree()
-        with mock.patch.object(R, "d5_active", return_value=True):
-            with self.assertRaisesRegex(R.AuthorityError, "not registered"):
-                R.grant(self.repo, "p", self.state, **self.options())
-            with self.assertRaisesRegex(R.AuthorityError, "not registered"):
-                R.revoke(self.repo, "p", self.state, 102, "stop")
-        self.assertEqual(self.tree(), before)
 
     def test_registry_strict_schema_and_duplicate_keys(self):
         self.register()
@@ -286,10 +208,10 @@ class TestD5Registry(unittest.TestCase):
         for raw in invalid:
             path.write_bytes(raw)
             with self.subTest(raw=raw), self.assertRaises(R.AuthorityError):
-                self.status()
+                R.lookup(self.repo, "p", self.state)
             self.assertEqual(path.read_bytes(), raw)
         path.write_bytes(original)
-        self.assertEqual(self.status()["record_state"], "absent")
+        self.assertEqual(R.lookup(self.repo, "p", self.state), valid["entries"][0])
 
     def test_registry_rejects_nonregular_files(self):
         self.register()
@@ -305,7 +227,7 @@ class TestD5Registry(unittest.TestCase):
             else:
                 path.mkdir()
             with self.subTest(kind=kind), self.assertRaises(R.AuthorityError):
-                self.status()
+                R.lookup(self.repo, "p", self.state)
             path.rmdir() if kind == "directory" else path.unlink()
 
     def test_durable_write_holds_registry_lock(self):
