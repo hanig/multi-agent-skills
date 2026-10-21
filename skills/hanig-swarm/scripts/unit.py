@@ -788,7 +788,6 @@ def slurm_exit_state(unit_dir, job_id, declared_at, notes):
 
 
 def controller_observation_path(path, unit_dir):
-    """Accept only an external coordinator file for this exact attempt."""
     try:
         path, attempt = Path(path), Path(unit_dir).resolve()
         state, _, _ = CP.resolve_paths(state_dir=path.parent)
@@ -796,20 +795,19 @@ def controller_observation_path(path, unit_dir):
         if (path.name != "slurm-terminal-observation-" + attempt.name + ".json"
                 or resolved.parent != state
                 or state == attempt or attempt in state.parents):
-            return None, "controller observation path is not external coordinator state"
+            return None, "controller observation path is not coordinator state"
         return resolved, None
     except (OSError, ValueError, RuntimeError, CP.PathPolicyError) as exc:
-        return None, "invalid controller observation path: " + str(exc)
+        return None, "invalid observation path: " + str(exc)
 
 
 def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
-    """Read v1 evidence only after live absence; invalid records fall through."""
     empty = (None, None, None, None)
     path, error = controller_observation_path(path, unit_dir)
-    record, read_error = read_json(path) if path is not None else (None, error)
+    record, err = read_json(path) if path is not None else (None, error)
     fields = {"schema_version", "unit_id", "attempt_id", "job_id", "job_state",
               "exit_code", "submit_time", "end_time", "observed_at", "source"}
-    if (not read_error and isinstance(record, dict) and set(record) == fields
+    if (not err and isinstance(record, dict) and set(record) == fields
             and type(record["schema_version"]) is int and record["schema_version"] == 1
             and all(isinstance(record[k], str) and record[k] for k in fields - {"schema_version"})
             and record["source"] == "slurmctld"
@@ -820,11 +818,11 @@ def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
             and sacct_row_is_ours(parse_iso_ts(record["submit_time"]), declared_at, bound_at)[0]
             and record["job_state"] in SLURM_TERMINAL_IN_QUEUE | {"PREEMPTED"}):
         return record["job_state"], record["exit_code"], record["submit_time"], None
-    notes.append("controller observation ignored: " + (read_error or "malformed, foreign or non-terminal record"))
+    notes.append("controller observation ignored: " + (err or "invalid record"))
     return empty
 
 
-def slurm_state(unit_dir, spec, notes, record_enabled=False, controller_observation=None):
+def slurm_state(unit_dir, spec, notes, record_enabled=False, observation=None):
     """Prefer live controller evidence; never replace a known job's state."""
     spec["slurm_evidence_source"] = None
     job_id = str(spec["job_id"])
@@ -840,9 +838,9 @@ def slurm_state(unit_dir, spec, notes, record_enabled=False, controller_observat
         return evidence
     if not absent:
         return evidence
-    if controller_observation is not None and shutil.which("scontrol"):
+    if observation is not None and shutil.which("scontrol"):
         evidence = observed_slurm_state(
-            controller_observation, unit_dir, spec, declared_at, bound_at, notes)
+            observation, unit_dir, spec, declared_at, bound_at, notes)
         if evidence[0] is not None:
             spec["slurm_evidence_source"] = "slurmctld-observed"
             return evidence
@@ -1435,8 +1433,7 @@ REASON_NO_OUTPUTS = "outputs-absent"       # declared output(s) are missing
 REASON_NO_PRODUCED_CHANGE = "no-produced-change"  # outputs present, no admitted change
 
 
-def check_unit(unit_dir, spec, notes, launch_facts=None, artifact_basis=None,
-               controller_observation=None):
+def check_unit(unit_dir, spec, notes, launch_facts=None, artifact_basis=None, observation=None):
     """The done predicate. Returns a state name.
 
     Conclusive ONLY because the write root is exclusive AND the artifact was
@@ -1477,8 +1474,7 @@ def check_unit(unit_dir, spec, notes, launch_facts=None, artifact_basis=None,
                      "shows it ran. Submit it and record the id with `bind`.")
         return "INCOMPLETE"
 
-    sstate, scode, ssubmit, why_not = slurm_state(
-        unit_dir, spec, notes, record_enabled, controller_observation)
+    sstate, scode, ssubmit, why_not = slurm_state(unit_dir, spec, notes, record_enabled, observation)
 
     if sstate is None:
         if why_not:
@@ -1552,8 +1548,7 @@ def cmd_check(args):
     isolation_fields, isolation_err = ISO.receipt_fields(
         isolation_payload, unit_dir, spec)
     if isolation_err: notes.append(isolation_err)
-    state = check_unit(unit_dir, spec, notes, launch_facts, basis,
-                       getattr(args, "controller_observation", None))
+    state = check_unit(unit_dir, spec, notes, launch_facts, basis, getattr(args, "controller_observation", None))
     state = ISO.require_application(
         getattr(args, "isolation_required", False)
         or isolation_payload is not None,
@@ -1656,13 +1651,11 @@ def main():
     c.add_argument("--json", action="store_true")
     # Complete authority snapshot, serialized directly from per-attempt
     # coordinator state. The launch record is only an audit copy.
-    c.add_argument("--launch-facts", default=None)
     # The pre-dispatch digest of every declared artifact, serialized from
     # per-attempt coordinator state. Absent means DONE is unreachable, on
     # purpose: there is no re-observation fallback.
-    c.add_argument("--artifact-basis", default=None)
-    c.add_argument("--controller-observation", default=None,
-                   help="terminal controller observation in coordinator state")
+    for flag in ("--launch-facts", "--artifact-basis", "--controller-observation"):
+        c.add_argument(flag)
     # Applied wrapper facts serialized from per-attempt coordinator state.
     # The attempt's own script/spec cannot set the receipt's isolation bit.
     c.add_argument("--isolation-facts", default=None)
