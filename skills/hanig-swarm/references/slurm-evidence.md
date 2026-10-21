@@ -18,14 +18,12 @@ process attribution nor scientific correctness.
   without converting carriage returns inside opaque metadata into new lines.
   Duplicated groups or failed refinement stay unknown and never enable <!-- declaration: isolation.done-predicate -->
   accounting, even if the job disappears between the two queries.
-2. Only positive controller absence unlocks a recorded coordinator observation.
-  Live readings win. Observation identities, submission bounds and terminal state
-  must match; malformed/mismatching observations are noted and ignored. <!-- declaration: isolation.done-predicate -->
-3. If no observation is accepted, controller absence or an unavailable `scontrol`
-  executable permits `sacct`. Missing `scontrol` alone does not authorize an
-  observation. A query failure, malformed row or ownership mismatch is not a <!-- declaration: isolation.done-predicate -->
-  purge. In particular, a requeue whose reset SubmitTime falls outside the
-  anchored interval stays incomplete; ownership is never widened. <!-- declaration: isolation.done-predicate -->
+2. Only positive controller absence unlocks a recorded coordinator observation; its identities, submission bounds and terminal state must match. <!-- declaration: isolation.done-predicate -->
+  Live readings win; malformed/mismatching observations are noted and ignored.
+3. Controller absence or unavailable `scontrol` permits `sacct` after no accepted
+  observation. Missing `scontrol` alone does not authorize observations; ownership is never widened. <!-- declaration: isolation.done-predicate -->
+  Query failures, malformed live rows and ownership mismatches are not purges.
+  Requeues whose reset SubmitTime falls outside the anchored interval stay incomplete.
 4. If accounting selects no owned row, an authorized exit record may supply
   the last fallback. An owned row, even one with a missing state, blocks this
   weaker evidence. Unowned historical rows neither certify nor veto it.
@@ -121,10 +119,9 @@ attempts cannot declare the entire root or an alias of this metadata; otherwise 
 the wrapper could manufacture its own production evidence. A similarly named
 file inside a separate payload directory is not reserved.
 
-`_check(..., state_dir=...)` passes an existing external coordinator file,
-`slurm-terminal-observation-<attempt_id>.json`, via `--controller-observation`.
-ARC-2797 supplies the writer and wires `state_dir` into `advance`. Absent
-files/arguments preserve behavior; attempt-directory paths are refused. <!-- declaration: isolation.done-predicate -->
+`_check(state_dir=...)` passes existing `slurm-terminal-observation-{attempt_id}.json`
+via `--controller-observation`; attempt-directory paths are refused. <!-- declaration: isolation.done-predicate -->
+ARC-2797 supplies the writer and caller wiring; absent files/arguments preserve behavior.
 
 Receipts identify `slurmctld`, `slurmctld-observed`, `sacct` or `exit-record` in
 `basis.exit_status_attested_by`. Exit records are explicitly job-wrapper
