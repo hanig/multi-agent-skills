@@ -588,10 +588,12 @@ class TestD5Registry(unittest.TestCase):
                     op()
 
     def test_listed_checkout_matches_inode_and_allows_missing_other_worktree(self):
-        missing, linked = self.d / "missing", self.d / "linked"
+        missing, linked = self.d / "a-missing", self.d / "linked"
         for path in (missing, linked):
             self.git("-C", str(self.repo), "worktree", "add", "--detach", str(path))
         missing.rename(self.d / "moved")  # Prunable list entry before our checkout.
+        listed = R._worktrees(self.repo)
+        self.assertLess(listed.index(missing), listed.index(linked))
         alias = self.d / "alias"
         alias.symlink_to(self.d, target_is_directory=True)
         real_git = R._git
@@ -603,6 +605,37 @@ class TestD5Registry(unittest.TestCase):
         with mock.patch.object(R, "_git", side_effect=git):
             entry = self.register(repo=linked)
             self.assertEqual(R.lookup(linked, "p", self.state), entry)
+
+    def test_stale_dangling_worktree_is_ignored(self):
+        stale, live = self.d / "a-stale", self.d / "z-live"
+        for path in (stale, live):
+            self.git("-C", str(self.repo), "worktree", "add", "--detach", str(path))
+        stale.rename(self.d / "moved-stale")
+        stale.symlink_to(self.d / "never-created", target_is_directory=True)
+        for checkout in (live, self.repo):
+            with self.subTest(checkout=checkout):
+                entry = self.register(repo=checkout)
+                self.assertEqual(R.lookup(checkout, "p", self.state), entry)
+        # An existing symlink target must still contribute its identity.
+        stale.unlink()
+        stale.symlink_to(self.state, target_is_directory=True)
+        with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
+            self.register(repo=live)
+
+    def test_unknown_worktree_target_is_not_treated_as_absent(self):
+        stale, live = self.d / "a-stale", self.d / "z-live"
+        for path in (stale, live):
+            self.git("-C", str(self.repo), "worktree", "add", "--detach", str(path))
+        real_stat = Path.stat
+        def denied(path, *args, **kwargs):
+            if path == stale:
+                raise PermissionError(errno.EACCES, "synthetic unknown worktree")
+            return real_stat(path, *args, **kwargs)
+        with mock.patch.object(Path, "stat", denied):
+            for op in (lambda: self.register(repo=live),
+                       lambda: R.lookup(live, "p", self.state)):
+                with self.assertRaisesRegex(R.AuthorityError, "unsupported repository layout"):
+                    op()
 
     def test_common_directory_uses_tristate_lstat(self):
         parent = self.d / "layout"

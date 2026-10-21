@@ -100,6 +100,16 @@ def _worktrees(checkout):
     return paths
 
 
+def _worktree_keys(paths):
+    """Follow listed targets; absent targets have no identity to protect."""
+    for path in paths:
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            continue  # Missing/prunable checkout, including a dangling symlink.
+        yield _key(info)  # Unknown lookup errors propagate, never count as absent.
+
+
 def _envelope(checkout):
     """Refuse unsupported Git/layouts before touching authority or state."""
     try:
@@ -118,8 +128,7 @@ def _envelope(checkout):
         _require(_key(worktrees[0].stat()) == _key(common.parent.stat()),
                  "unsupported repository layout")
         checkout_key = _key(_git_path(checkout, "--show-toplevel").stat())
-        _require(any(_key(path.stat()) == checkout_key for path in worktrees
-                     if store.present(path, "unsupported repository layout")),
+        _require(checkout_key in _worktree_keys(worktrees),
                  "unsupported repository layout")
         return common, worktrees
     except (OSError, subprocess.SubprocessError) as exc:
@@ -148,9 +157,7 @@ def _identity(checkout, plan_id, state_dir, containment=False):
         _directory(root / "plans")
         protected = set()
         if containment:
-            for path in [common] + worktrees:
-                if store.present(path, "containment"):
-                    protected.add(_key(path.stat()))
+            protected = set(_worktree_keys([common] + worktrees))
             for path in (root, root / "plans"):
                 _outside(path, protected)
             _outside(Path(state_dir).expanduser(), protected, "state-dir")
