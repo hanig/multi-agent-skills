@@ -2931,7 +2931,7 @@ class TestSlurmReconciliation(unittest.TestCase):
 
     def test_completing_window_clears_with_coordinator_retries(self):
         (outcomes, execution), waits, events = self.cleanup_sequence([
-            self.completing_response(), self.completing_response(), None])
+            self.completing_response(), self.completing_response(), None, None])
         self.assertEqual(waits, [20, 20])
         self.assertEqual(execution['cleanup'], 'removed')
         self.assertFalse(self.f.stage.exists())
@@ -2940,6 +2940,7 @@ class TestSlurmReconciliation(unittest.TestCase):
         self.assertTrue(saved['reconciled'])
         self.assertEqual(events, ['cleanup-enter', 'cleanup-exit', 'wait',
                                   'cleanup-enter', 'cleanup-exit', 'wait',
+                                  'cleanup-enter', 'cleanup-exit',
                                   'cleanup-enter', 'cleanup-exit'])
 
     def test_completing_window_exhausts_exactly_three_retries(self):
@@ -3045,8 +3046,13 @@ class TestSlurmReconciliation(unittest.TestCase):
             self.assertLessEqual(elapsed[0], timeout)
             self.assertEqual(first['cleanup'], 'unconfirmed')
             self.assertTrue(self.f.stage.exists())
+            # Replay from the same query-clock origin through the coordinator;
+            # the standalone contract check must not consume its queue lag.
+            elapsed[0] = 0.0
             _, execution = self.retrieve(call)
-        self.assertEqual(cleanups, ['unconfirmed', 'removed'])
+        # Negative cleanup revokes the old ack; the original observation and
+        # reconciliation pass still precedes the final acknowledged removal.
+        self.assertEqual(cleanups, ['unconfirmed', 'unconfirmed', 'removed'])
         self.assertEqual(local_waits, [20])
         self.assertEqual(execution['cleanup'], 'removed')
         self.assertFalse(self.f.stage.exists())
