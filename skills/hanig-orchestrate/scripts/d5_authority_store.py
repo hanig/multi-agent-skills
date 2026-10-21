@@ -73,11 +73,17 @@ def _file(fd, mode):
             yield handle
 
 
-def _load(path):
+def read_bytes(path):
+    """Strict regular-file read, also shared by the D5 registry."""
     fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     with _file(fd, "rb") as handle:
         _require(stat.S_ISREG(os.fstat(fd).st_mode), "record", "expected regular file")
         raw = handle.read()
+    return raw
+
+
+def _load(path):
+    raw = read_bytes(path)
     return decode(raw), raw
 
 
@@ -107,6 +113,13 @@ def _unused_id(directory, record):
     _require(not _present(directory / "superseded" /
                           (record["grant_id"] + ".json"), "grant_id"),
              "grant_id", "already superseded; use a fresh grant ID")
+
+
+# Public primitives for the registry; the record-store protocol is unchanged.
+cleanup = _cleanup
+present = _present
+sync_directory = _sync_directory
+write_bytes = _write
 
 
 def create(directory, record):
