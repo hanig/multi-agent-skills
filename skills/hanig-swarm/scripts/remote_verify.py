@@ -33,6 +33,7 @@ FILES = ("candidate.bundle", "request.json", "remote_verify.py", "verify.py",
          "child_environment.py")
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
             "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED"}
+CLEANUP_REPOLL_BOUND_SECONDS = 30
 
 
 def absolute(value, label):
@@ -810,7 +811,10 @@ def cleanup_slurm(stage, request, reconciled):
     The mutable cleanup journal is a lifecycle observation, never a replacement
     for the write-once claim or completion receipts. It also retains identities
     discovered on earlier calls, so accounting expiry cannot erase a known job.
-    Queue rows or accounting delays beyond the bounded re-poll retain the stage;
+    Terminal accounting with a queued job gets a 30-second total sleep bound
+    (CLEANUP_REPOLL_BOUND_SECONDS), in waits of 2, 4, 8 and 16 seconds. Running
+    or unknown accounting keeps the two existing 2-second waits. Queue rows
+    or accounting delays beyond the bounded re-poll retain the stage;
     recover with merge_unit.py --verify-integration --retrieve-remote-evidence.
     """
     repoll = []
@@ -818,7 +822,7 @@ def cleanup_slurm(stage, request, reconciled):
     if not repoll or evidence.get("cleanup_error"):
         return evidence
     # The first observation was locked; wait and poll without either lock.
-    # The third observation belongs to a new locked decision, which reloads
+    # The final observation belongs to a new locked decision, which reloads
     # identities, supervision and cancellation history as well as accounting.
     observed = {"job_ids": evidence["job_ids"]}
     try:
@@ -827,8 +831,26 @@ def cleanup_slurm(stage, request, reconciled):
         if observed["scheduler_confirmed"]:
             settled = all(scheduler_state(job) is not None
                           for job in observed["job_ids"])
-            if not settled or observed["queued_job_ids"]:
+            if not settled:
                 time.sleep(2)
+            elif observed["queued_job_ids"]:
+                remaining = CLEANUP_REPOLL_BOUND_SECONDS - 2
+                delay = 4
+                while True:
+                    # Refresh the queue after accounting, as the locked
+                    # decision does. Keep newly discovered IDs in every poll.
+                    observed = discover_slurm_jobs(request, observed["job_ids"])
+                    if not observed["scheduler_confirmed"]:
+                        break
+                    if not observed["queued_job_ids"] or remaining <= 0:
+                        break
+                    if not all(scheduler_state(job) is not None
+                               for job in observed["job_ids"]):
+                        break
+                    wait = min(delay, remaining)
+                    time.sleep(wait)
+                    remaining -= wait
+                    delay *= 2
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         observed = dict(observed, scheduler_confirmed=False, discovery_error=str(exc))
     return cleanup_slurm_locked(stage, request, reconciled, observed=observed)
