@@ -105,8 +105,8 @@ def _worktree_keys(paths):
     for path in paths:
         try:
             info = path.stat()
-        except FileNotFoundError:
-            continue  # Missing/prunable checkout, including a dangling symlink.
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # ENOENT/ENOTDIR: no target; this does not hide access errors.
         yield _key(info)  # Unknown lookup errors propagate, never count as absent.
 
 

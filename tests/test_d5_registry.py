@@ -637,6 +637,20 @@ class TestD5Registry(unittest.TestCase):
                 with self.assertRaisesRegex(R.AuthorityError, "unsupported repository layout"):
                     op()
 
+    def test_stale_target_with_non_directory_ancestor_is_ignored(self):
+        blocked = self.d / "a-blocked"
+        stale, live = blocked / "stale", self.d / "z-live"
+        for path in (stale, live):
+            self.git("-C", str(self.repo), "worktree", "add", "--detach", str(path))
+        blocked.rename(self.d / "moved-blocked")
+        blocked.write_text("regular file\n")
+        with self.subTest(operation="lookup"):
+            self.assertIsNone(R.lookup(live, "p", self.state))
+        for checkout in (live, self.repo):
+            with self.subTest(operation="register", checkout=checkout):
+                entry = self.register(repo=checkout)
+                self.assertEqual(R.lookup(checkout, "p", self.state), entry)
+
     def test_common_directory_uses_tristate_lstat(self):
         parent = self.d / "layout"
         parent.mkdir()
