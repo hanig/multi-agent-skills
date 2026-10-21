@@ -226,15 +226,30 @@ class TestD5Registry(unittest.TestCase):
 
     def test_owned_symlinks_refuse_before_open_or_sync(self):
         entry = self.register()
-        for path in (self.root, self.root / "plans", Path(entry["record_dir"])):
+        directory = Path(entry["record_dir"])
+        for path in (self.root, self.root / "plans", directory):
             target = self.d / "moved"
             path.rename(target)
             path.symlink_to(target, target_is_directory=True)
             try:
+                present = store.present
+                def checked(candidate, field):
+                    if Path(candidate) == directory:
+                        reads.assert_called_once_with(self.root / "registry.json")
+                    return present(candidate, field)
+                def opened(candidate, *args):
+                    candidate = Path(candidate)
+                    self.assertEqual(path, directory)  # R/P still refuse all opens.
+                    self.assertNotEqual(candidate, directory)
+                    self.assertNotIn(directory, candidate.parents)
+                    return os.open(str(candidate), *args)
                 with mock.patch.object(R, "os", wraps=os) as ops, \
+                     mock.patch.object(store, "present", side_effect=checked), \
+                     mock.patch.object(store, "read_bytes", wraps=store.read_bytes) as reads, \
                      mock.patch.object(os, "fsync", side_effect=AssertionError("fsync")):
-                    ops.open.side_effect = AssertionError("open")
+                    ops.open.side_effect = opened
                     for call in (self.register, lambda: R.lookup(self.repo, "p", self.state)):
+                        reads.reset_mock()
                         with self.assertRaisesRegex(R.AuthorityError, str(path)):
                             call()
             finally:

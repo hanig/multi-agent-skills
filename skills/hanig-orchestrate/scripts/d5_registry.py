@@ -89,9 +89,7 @@ def _identity(checkout, plan_id, state_dir):
         state, _, worktrees = CP.resolve_paths(state_dir=state_dir, cwd=checkout)
         root = CP._external_base(worktrees) / "hanig-authority" / "v1"
         _directory(root)
-        if _directory(root / "plans"):
-            for path in (root / "plans").iterdir():
-                _directory(path)
+        _directory(root / "plans")
         common = _git_path(checkout, "--git-common-dir")
         repo_fd = os.open(str(common), os.O_RDONLY | os.O_DIRECTORY)
         with store.cleanup(os.close, repo_fd):
@@ -166,6 +164,7 @@ def _find(entries, identity, state_fd):
             info = os.fstat(state_fd)
             _require(entry["state_key"] == [info.st_dev, info.st_ino],
                      "state_key mismatch: state directory replaced or conflicting")
+            _directory(Path(entry["record_dir"]))
             return entry
     _require(not any(e["state_key"] == identity["state_key"] for e in entries),
              "state_key already registered to another plan")
@@ -214,6 +213,7 @@ def register(checkout, plan_id, state_dir):
                 rid = uuid.uuid4().hex
                 plans.mkdir(mode=0o700, exist_ok=True)
                 directory = plans / rid
+                _require(not _directory(directory), str(directory) + ": already exists")
                 directory.mkdir(mode=0o700)  # Never reuse a record root.
             # OD4: confirm the fixed chain on every call. R is synced once below:
             # by the atomic registry write, or explicitly on idempotent retry.
