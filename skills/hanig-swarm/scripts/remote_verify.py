@@ -33,6 +33,8 @@ FILES = ("candidate.bundle", "request.json", "remote_verify.py", "verify.py",
          "child_environment.py")
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
             "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED"}
+CLEANUP_RETRY_SECONDS = 20
+CLEANUP_MAX_RETRIES = 3
 
 
 def absolute(value, label):
@@ -1390,6 +1392,24 @@ def retrieve_records(run, call, save):
     save()
 
 
+def cleanup_completing_window(cleaned):
+    """Retry only terminal accounting still contradicted by a live queue row."""
+    jobs = cleaned.get("job_ids")
+    queued = cleaned.get("queued_job_ids")
+    states = cleaned.get("cleanup_sacct_states")
+    return bool(cleaned.get("cleanup") == "unconfirmed"
+        and cleaned.get("cleanup_error") in (None, "", "job termination unconfirmed; stage retained")
+        and cleaned.get("scheduler_confirmed") is True
+        and isinstance(jobs, list) and jobs
+        and isinstance(queued, list) and queued
+        and all(isinstance(j, str) for j in jobs + queued)
+        and isinstance(states, dict) and set(states) == set(jobs)
+        and set(queued).issubset(states)
+        and all(isinstance(state, (list, tuple)) and len(state) == 2
+                and isinstance(state[0], str) and state[0] in TERMINAL
+                for state in states.values()))
+
+
 def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit,
                journal_entries, retrieve_only=False, recovery=None):
     """Persist intent before launch and ingest completed receipts monotonically.
@@ -1565,9 +1585,11 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         # Raw evidence is durable before authorizing remote removal. This is
         # reconciliation, not publication under the operator observation fence.
         publish(path, ledger)
-        # One observation can unlock reconciliation; at most one acknowledged
-        # cleanup follows it, all under the existing binding lock.
-        for cleanup_pass in range(2):
+        # Keep the two existing observation/reconciliation passes. Completing
+        # windows may additionally retry a normal pass, each in its own transport
+        # budget. The binding lock remains held across these LOCAL waits.
+        cleanup_pass, cleanup_retries = 0, 0
+        while cleanup_pass < 2:
             if execution.get("cleanup") == "removed" or not prefix:
                 break
             was_reconciled = run["reconciled"]
@@ -1625,11 +1647,19 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                 execution["cleanup_error"] = str(exc)[-2000:]
                 break
             publish(path, ledger)
+            if (remote["executor"] == "slurm" and cleanup_completing_window(cleaned)
+                    and cleanup_retries < CLEANUP_MAX_RETRIES):
+                # Exhaustion keeps today's retained-stage error and recovery:
+                # merge_unit.py --verify-integration --retrieve-remote-evidence.
+                cleanup_retries += 1
+                time.sleep(CLEANUP_RETRY_SECONDS)
+                continue
+            cleanup_pass += 1
             if cleaned.get("cleanup_snapshot_pending") is True:
                 # Lost responses have no saved digest. Persist the bound audit
                 # snapshot, then validate that same snapshot before mutation.
                 continue
-            if (cleanup_pass or was_reconciled or remote["executor"] != "slurm"
+            if (cleanup_pass > 1 or was_reconciled or remote["executor"] != "slurm"
                     or cleaned.get("quiescent") is not True
                     or not slurm_quiescent(cleaned, run["request"])):
                 break
