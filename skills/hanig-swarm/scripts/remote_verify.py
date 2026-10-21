@@ -33,7 +33,8 @@ FILES = ("candidate.bundle", "request.json", "remote_verify.py", "verify.py",
          "child_environment.py")
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
             "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED"}
-CLEANUP_REPOLL_BOUND_SECONDS = 30
+CLEANUP_RETRY_SECONDS = 20
+CLEANUP_MAX_RETRIES = 3
 
 
 def absolute(value, label):
@@ -811,10 +812,7 @@ def cleanup_slurm(stage, request, reconciled):
     The mutable cleanup journal is a lifecycle observation, never a replacement
     for the write-once claim or completion receipts. It also retains identities
     discovered on earlier calls, so accounting expiry cannot erase a known job.
-    Terminal accounting with a queued job gets a 30-second total sleep bound
-    (CLEANUP_REPOLL_BOUND_SECONDS), in waits of 2, 4, 8 and 16 seconds. Running
-    or unknown accounting keeps the two existing 2-second waits. Queue rows
-    or accounting delays beyond the bounded re-poll retain the stage;
+    Queue rows or accounting delays beyond the bounded re-poll retain the stage;
     recover with merge_unit.py --verify-integration --retrieve-remote-evidence.
     """
     repoll = []
@@ -822,7 +820,7 @@ def cleanup_slurm(stage, request, reconciled):
     if not repoll or evidence.get("cleanup_error"):
         return evidence
     # The first observation was locked; wait and poll without either lock.
-    # The final observation belongs to a new locked decision, which reloads
+    # The third observation belongs to a new locked decision, which reloads
     # identities, supervision and cancellation history as well as accounting.
     observed = {"job_ids": evidence["job_ids"]}
     try:
@@ -831,26 +829,8 @@ def cleanup_slurm(stage, request, reconciled):
         if observed["scheduler_confirmed"]:
             settled = all(scheduler_state(job) is not None
                           for job in observed["job_ids"])
-            if not settled:
+            if not settled or observed["queued_job_ids"]:
                 time.sleep(2)
-            elif observed["queued_job_ids"]:
-                remaining = CLEANUP_REPOLL_BOUND_SECONDS - 2
-                delay = 4
-                while True:
-                    # Refresh the queue after accounting, as the locked
-                    # decision does. Keep newly discovered IDs in every poll.
-                    observed = discover_slurm_jobs(request, observed["job_ids"])
-                    if not observed["scheduler_confirmed"]:
-                        break
-                    if not observed["queued_job_ids"] or remaining <= 0:
-                        break
-                    if not all(scheduler_state(job) is not None
-                               for job in observed["job_ids"]):
-                        break
-                    wait = min(delay, remaining)
-                    time.sleep(wait)
-                    remaining -= wait
-                    delay *= 2
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         observed = dict(observed, scheduler_confirmed=False, discovery_error=str(exc))
     return cleanup_slurm_locked(stage, request, reconciled, observed=observed)
@@ -1412,6 +1392,23 @@ def retrieve_records(run, call, save):
     save()
 
 
+def cleanup_completing_window(cleaned):
+    """Retry only terminal accounting still contradicted by a live queue row."""
+    jobs = cleaned.get("job_ids")
+    queued = cleaned.get("queued_job_ids")
+    states = cleaned.get("cleanup_sacct_states")
+    return bool(cleaned.get("cleanup") == "unconfirmed"
+        and cleaned.get("cleanup_error") in (None, "", "job termination unconfirmed; stage retained")
+        and cleaned.get("scheduler_confirmed") is True
+        and isinstance(jobs, list) and jobs
+        and isinstance(queued, list) and queued
+        and all(isinstance(j, str) for j in jobs + queued)
+        and isinstance(states, dict) and set(states) == set(jobs)
+        and set(queued).issubset(states)
+        and all(isinstance(state, (list, tuple)) and len(state) == 2
+                and state[0] in TERMINAL for state in states.values()))
+
+
 def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, unit,
                journal_entries, retrieve_only=False, recovery=None):
     """Persist intent before launch and ingest completed receipts monotonically.
@@ -1587,9 +1584,11 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         # Raw evidence is durable before authorizing remote removal. This is
         # reconciliation, not publication under the operator observation fence.
         publish(path, ledger)
-        # One observation can unlock reconciliation; at most one acknowledged
-        # cleanup follows it, all under the existing binding lock.
-        for cleanup_pass in range(2):
+        # Keep the two existing observation/reconciliation passes. Completing
+        # windows may additionally retry a normal pass, each in its own transport
+        # budget. The binding lock remains held across these LOCAL waits.
+        cleanup_pass, cleanup_retries = 0, 0
+        while cleanup_pass < 2:
             if execution.get("cleanup") == "removed" or not prefix:
                 break
             was_reconciled = run["reconciled"]
@@ -1647,11 +1646,19 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
                 execution["cleanup_error"] = str(exc)[-2000:]
                 break
             publish(path, ledger)
+            if (remote["executor"] == "slurm" and cleanup_completing_window(cleaned)
+                    and cleanup_retries < CLEANUP_MAX_RETRIES):
+                # Exhaustion keeps today's retained-stage error and recovery:
+                # merge_unit.py --verify-integration --retrieve-remote-evidence.
+                cleanup_retries += 1
+                time.sleep(CLEANUP_RETRY_SECONDS)
+                continue
+            cleanup_pass += 1
             if cleaned.get("cleanup_snapshot_pending") is True:
                 # Lost responses have no saved digest. Persist the bound audit
                 # snapshot, then validate that same snapshot before mutation.
                 continue
-            if (cleanup_pass or was_reconciled or remote["executor"] != "slurm"
+            if (cleanup_pass > 1 or was_reconciled or remote["executor"] != "slurm"
                     or cleaned.get("quiescent") is not True
                     or not slurm_quiescent(cleaned, run["request"])):
                 break
