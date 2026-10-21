@@ -372,6 +372,33 @@ class TestD5Registry(unittest.TestCase):
         self.assertNotIn(target_key, synced,
                          "plans symlink redirected fsync outside the external base")
 
+    def test_final_preexisting_intermediate_bounds_fsync(self):
+        self.root.parent.mkdir(parents=True)
+        base = self.base.stat()
+        base_key = (base.st_dev, base.st_ino)
+        synced, real_sync = set(), os.fsync
+        def sync(fd):
+            info = os.fstat(fd)
+            synced.add((info.st_dev, info.st_ino))
+            real_sync(fd)
+        for phase in ("initial", "idempotent"):
+            with self.subTest(phase=phase):
+                synced.clear()
+                with mock.patch.object(os, "fsync", side_effect=sync):
+                    self.register()
+                self.assertNotIn(base_key, synced,
+                                 "pre-existing base is above the created-link boundary")
+
+    def test_final_unneeded_ancestor_sync_must_not_abort(self):
+        self.root.parent.mkdir(parents=True)
+        real_sync = store.sync_directory
+        def sync(path):
+            if path == self.base:
+                raise OSError(errno.EIO, "synthetic unnecessary base sync")
+            real_sync(path)
+        with mock.patch.object(store, "sync_directory", side_effect=sync):
+            self.assertEqual(self.register()["plan_id"], "p")
+
 
 if __name__ == "__main__":
     unittest.main()
