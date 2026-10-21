@@ -70,6 +70,7 @@ Python 3.8+, stdlib only, login-node safe. No network.
 
 import argparse
 import calendar
+import decimal
 import hashlib
 import json
 import os
@@ -784,9 +785,26 @@ def slurm_exit_state(unit_dir, job_id, declared_at, notes, end_out=None):
     notes.append("exit-record: job wrapper attestation, not scheduler evidence; "
                  "a later unobserved requeue may be missed")
     if end_out is not None:
-        end_out.append(ended)
+        end_out.append(slurm_end_time(record["end_time"]))
     return ("COMPLETED" if status == 0 else "FAILED",
             str(status) + ":0", None, None)
+
+
+def slurm_end_time(value):
+    """Order admitted times without dropping seconds or offset fractions."""
+    seconds = parse_iso_ts(value)
+    if seconds is None:
+        return None
+    fraction = re.search(r"[T ]\d{2}:\d{2}:\d{2}\.(\d+)", value)
+    offset = re.search(r"([+-])\d{2}:?\d{2}:?\d{2}\.(\d+)$", value.strip())
+    with decimal.localcontext() as context:
+        context.prec = len(value) + 20
+        result = decimal.Decimal(seconds)
+        if fraction:
+            result += decimal.Decimal("0." + fraction.group(1))
+        if offset:
+            result -= decimal.Decimal(offset.group(1) + "0." + offset.group(2))
+        return result
 
 
 def controller_observation_path(path, unit_dir):
@@ -821,9 +839,9 @@ def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
             and row["unit_id"] == spec.get("task_id")
             and row["attempt_id"] == spec.get("attempt_id") == Path(unit_dir).name
             and sacct_row_is_ours(parse_iso_ts(row["submit_time"]), declared_at, bound_at)[0]
-            and parse_iso_ts(row["end_time"]) is not None
+            and slurm_end_time(row["end_time"]) is not None
             and row["job_state"] in (SLURM_FAILED - {"REVOKED", "SPECIAL_EXIT"}) | {"PREEMPTED"}):
-        return (row["job_state"], row["exit_code"], row["submit_time"], None), parse_iso_ts(row["end_time"])
+        return (row["job_state"], row["exit_code"], row["submit_time"], None), slurm_end_time(row["end_time"])
     notes.append("controller observation ignored: " + (err or "invalid row or non-failure state"))
     return empty, None
 
@@ -849,11 +867,13 @@ def slurm_state(unit_dir, spec, notes, record_enabled=False, observation=None):
     if evidence[0] is not None:
         spec["slurm_evidence_source"] = "sacct"
         return evidence
+    if owned[0]:
+        return evidence
     observed, ended = (None, None, None, None), None
     if observation is not None and shutil.which("scontrol"):
         observed, ended = observed_slurm_state(observation, unit_dir, spec, declared_at, bound_at, notes)
     exit_end = []
-    fallback = (slurm_exit_state(unit_dir, job_id, declared_at, notes, exit_end)
+    fallback = (slurm_exit_state(unit_dir, job_id, declared_at, notes, exit_end if observed[0] else None)
                 if record_enabled and not owned[0] else (None, None, None, None))
     if observed[0] is not None and (not exit_end or ended > exit_end[0]):
         spec["slurm_evidence_source"] = "slurmctld-observed"

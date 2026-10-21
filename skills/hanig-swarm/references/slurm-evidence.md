@@ -21,7 +21,7 @@ process attribution nor scientific correctness.
 2. Only controller absence, or an unavailable `scontrol` executable, permits <!-- declaration: isolation.done-predicate -->
   `sacct`. A query failure, malformed row or ownership mismatch is not a <!-- declaration: isolation.done-predicate -->
   purge. In particular, a requeue whose reset SubmitTime falls outside the
-  anchored interval stays incomplete; ownership is never widened. Without usable accounting, only positive <!-- declaration: isolation.done-predicate -->
+  anchored interval stays incomplete; ownership is never widened. Without any owned accounting row, only positive <!-- declaration: isolation.done-predicate -->
   controller absence admits FAILED, CANCELLED,
   TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, BOOT_FAIL, DEADLINE observations
   with matching job/unit/attempt and submit bounds. Note/ignore malformed

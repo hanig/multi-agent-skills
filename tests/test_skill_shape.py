@@ -901,6 +901,20 @@ class TestAuthoredSkillShape(unittest.TestCase):
         self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
         self.assertEqual(_declaration_completeness_problems(skill), [])
 
+    def test_done_predicate_renders_its_existing_slurm_safety_contract(self):
+        declarations = DECLARATION_REGISTRY.load_registry(SKILLS / "hanig-swarm")
+        rendered = DECLARATION_REGISTRY.render_block([
+            item for item in declarations if item["id"] == "isolation.done-predicate"])
+        for fragment in ("never replace isolation with observed attribution",
+                "bounded grouped-line query", "unresolved refinement never enables accounting",
+                "exact scheduler identities", "absent evidence is not job failure",
+                "20 seconds", "checker children and orphan reconciliation",
+                "wrapper attestations are weaker", "SIGKILL or node loss",
+                "builtin-prologue failure", "restart counts do not establish",
+                "--no-requeue", "ForceRequeueOnFail"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, rendered)
+
     def test_swarm_reference_modals_are_tied_to_registered_declarations(self):
         skill = SKILLS / "hanig-swarm"
         self.assertEqual(DECLARATION_REGISTRY.reference_problems(skill), [])
