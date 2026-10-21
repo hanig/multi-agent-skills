@@ -32,7 +32,7 @@ class TestD5Registry(unittest.TestCase):
         self.base = self.d / "external"
         self.root = self.base / "hanig-authority/v1"
         self.patch = mock.patch.object(R.CP, "_external_base", return_value=self.base)
-        self.patch.start()
+        self.external_base = self.patch.start()
         self.addCleanup(self.patch.stop)
 
     def git(self, *args):
@@ -119,7 +119,7 @@ class TestD5Registry(unittest.TestCase):
         before = self.tree(self.root)
         with mock.patch.object(R, "d5_active", return_value=True):
             for op in (lambda: R.lookup(self.repo, "p", self.state),
-                       lambda: self.register()):
+                       self.register):
                 with self.subTest(op=op), self.assertRaisesRegex(R.AuthorityError, "state_key mismatch"):
                     op()
         self.assertEqual(self.tree(self.root), before)
@@ -191,7 +191,7 @@ class TestD5Registry(unittest.TestCase):
         self.repo.rename(checkout)
         state = checkout / "state"
         state.mkdir()
-        self.patch.stop()
+        self.external_base.return_value = checkout
         before = self.tree()
         with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state)}):
             with self.assertRaisesRegex(R.AuthorityError, "operated"):
@@ -253,7 +253,8 @@ class TestD5Registry(unittest.TestCase):
     def test_idempotent_retry_syncs_file_and_all_directory_links(self):
         entry = self.register()
         directory = Path(entry["record_dir"])
-        paths = [self.root / "registry.json", directory, *directory.parents]
+        paths = [self.root / "registry.json", directory, directory.parent,
+                 self.root, self.root.parent, self.base]
         keys = {(p.stat().st_dev, p.stat().st_ino) for p in paths}
         synced, real_sync = set(), os.fsync
         def sync(fd):
@@ -263,7 +264,7 @@ class TestD5Registry(unittest.TestCase):
         before = self.tree(self.root)
         with mock.patch.object(os, "fsync", side_effect=sync):
             self.assertEqual(self.register(), entry)
-        self.assertTrue(keys <= synced, "retry must sync the file and every directory link")
+        self.assertEqual(keys, synced, "sync every owned link and nothing above the base")
         for failed in keys:
             def fail(fd):
                 info = os.fstat(fd)
@@ -273,7 +274,21 @@ class TestD5Registry(unittest.TestCase):
             with self.subTest(key=failed), mock.patch.object(os, "fsync", side_effect=fail):
                 with self.assertRaisesRegex(R.AuthorityError, "durability is unconfirmed"):
                     self.register()
+            synced.clear()
+            with mock.patch.object(os, "fsync", side_effect=sync):
+                self.assertEqual(self.register(), entry)
+            self.assertEqual(keys, synced, "retry must re-confirm each failed fsync")
         self.assertEqual(self.tree(self.root), before)
+
+    def test_record_inside_operated_worktree_refuses_before_creation(self):
+        record = self.root / "plans" / ("a" * 32)
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(record))
+        (self.root / "registry.lock").touch()
+        before = self.tree()
+        with mock.patch.object(R.uuid, "uuid4", return_value=mock.Mock(hex=record.name)):
+            with self.assertRaisesRegex(R.AuthorityError, "inside operated"):
+                self.register()
+        self.assertEqual(self.tree(), before)
 
     def test_registry_strict_schema_and_duplicate_keys(self):
         self.register()
@@ -372,6 +387,45 @@ class TestD5Registry(unittest.TestCase):
         record.symlink_to(self.repo / ".git", target_is_directory=True)
         with self.assertRaises(R.AuthorityError):
             self.register()
+
+    def test_record_recreated_refuses(self):
+        entry = self.register()
+        record = Path(entry["record_dir"])
+        fd = os.open(str(record), os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        record.rmdir()
+        record.mkdir()
+        for call in (self.register, lambda: R.lookup(self.repo, "p", self.state)):
+            with self.assertRaisesRegex(R.AuthorityError, "record_key mismatch"):
+                call()
+
+    def test_record_walk_git_presence_and_unknown_refuse(self):
+        entry = self.register()
+        for directory in (self.root, self.root / "plans", Path(entry["record_dir"])):
+            marker = directory / ".git"
+            marker.symlink_to(self.d / "absent")
+            with self.assertRaisesRegex(R.AuthorityError, "became a Git worktree"):
+                R.lookup(self.repo, "p", self.state)
+            marker.unlink()
+        real_stat = os.stat
+        def unknown(path, *args, **kwargs):
+            if path == ".git" and "dir_fd" in kwargs:
+                raise OSError(errno.EIO, "synthetic unknown Git entry")
+            return real_stat(path, *args, **kwargs)
+        with mock.patch.object(os, "stat", side_effect=unknown):
+            with self.assertRaisesRegex(R.AuthorityError, "unknown Git entry"):
+                R.lookup(self.repo, "p", self.state)
+
+    def test_record_walk_nofollow_even_if_target_key_matches(self):
+        entry = self.register()
+        record = Path(entry["record_dir"])
+        record.rmdir()
+        target = self.repo / ".git"
+        record.symlink_to(target, target_is_directory=True)
+        # Isolate the no-follow guard from the independent identity guard.
+        entry["record_key"] = list(R._key(target.stat()))
+        with self.assertRaises(OSError):
+            R._check_record(self.root, entry)
 
     def test_traverse_only_preexisting_ancestor(self):
         self.base.mkdir()
