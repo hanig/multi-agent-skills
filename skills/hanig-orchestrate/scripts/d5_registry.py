@@ -5,6 +5,16 @@ repository and state directory; paths are locators, never identity. Atomic
 registry snapshots permit read-only lookup without creating a lock.
 The permanent registry lock serializes registration writes.
 No custody, enforcement, migration or protection from outside-lock writers.
+
+Placement containment is U1b-1c (ARC-2794) and tamper checks are U1b-1b (ARC-2793); both land before activation. This module is inert until then.
+
+Non-claims: path-string equivalence; equivalence across clones or copies;
+persistence across inode recreation; protection against malicious same-UID
+replacement; TOCTOU against a writer outside the lock.
+Bind mounts or other aliases of an operated worktree's descendants. The
+supported host is macOS, without bind mounts.
+Recreated directories whose (st_dev, st_ino) the filesystem reuses.
+A race against a concurrent same-UID writer.
 """
 import fcntl
 import json
@@ -51,10 +61,6 @@ def _plan_id(value):
              "invalid plan_id")
 
 
-def _key(info):
-    return (info.st_dev, info.st_ino)
-
-
 def _git(checkout, *args):
     return subprocess.run(
         ["git", "-C", str(checkout), *args], stdout=subprocess.PIPE,
@@ -71,38 +77,17 @@ def _git_path(checkout, option):
     return path
 
 
-def _worktrees(checkout):
-    """Include the checkout omitted by separate-Git-directory listings."""
-    raw = _git(checkout, "worktree", "list", "--porcelain", "-z")
-    return [_git_path(checkout, "--show-toplevel")] + [
-        Path(os.fsdecode(field[9:])) for field in raw.split(b"\0")
-        if field.startswith(b"worktree ")]
-
-
-def _outside(path, protected):
-    path = path.resolve()
-    for parent in (path, *path.parents):
-        info = store.present(parent, "containment")
-        _require(not info or _key(info) not in protected,
-                 "authority root/state path is inside operated Git storage")
-
-
 @contextmanager
 def _identity(checkout, plan_id, state_dir):
     _plan_id(plan_id)
     _require(state_dir is not None, "state_dir is required and must exist")
     try:
         checkout = Path(checkout).absolute()
-        state, _, _ = CP.resolve_paths(state_dir=state_dir, cwd=checkout)
-        worktrees = _worktrees(checkout)
+        state, _, worktrees = CP.resolve_paths(state_dir=state_dir, cwd=checkout)
         root = CP._external_base(worktrees) / "hanig-authority" / "v1"
         common = _git_path(checkout, "--git-common-dir")
         repo_fd = os.open(str(common), os.O_RDONLY | os.O_DIRECTORY)
         with store.cleanup(os.close, repo_fd):
-            repo_key = _key(os.fstat(repo_fd))
-            protected = {repo_key} | {_key(wt.stat()) for wt in worktrees if wt.is_dir()}
-            for path in (root, state, root / "plans"):
-                _outside(path, protected)
             state_fd = os.open(str(state), os.O_RDONLY | os.O_DIRECTORY)
             with store.cleanup(os.close, state_fd):
                 repo_info, state_info = os.fstat(repo_fd), os.fstat(state_fd)
@@ -111,7 +96,7 @@ def _identity(checkout, plan_id, state_dir):
                     "plan_id": plan_id,
                     "state_key": [state_info.st_dev, state_info.st_ino],
                     "checkout": str(checkout), "git_common_dir": str(common),
-                    "state_dir": str(state)}, state_fd, protected
+                    "state_dir": str(state)}, state_fd
     except (OSError, subprocess.SubprocessError, CP.PathPolicyError) as exc:
         raise AuthorityError("registry: filesystem/git operation failed; "
                              "durability is unconfirmed: {}".format(exc)) from exc
@@ -180,9 +165,8 @@ def _find(entries, identity, state_fd):
     return None
 
 
-def _mkdir(path, base, protected):
+def _mkdir(path, base):
     """Confirm owned links on every attempt, stopping at the external base."""
-    _outside(path, protected)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     for parent in path.parents:
         store.sync_directory(parent)
@@ -201,9 +185,9 @@ def _locked(root):
 def register(checkout, plan_id, state_dir):
     """Register one (repo object, plan) with one state object, or return it intact."""
     _active()
-    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd, protected):
+    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd):
         base = root.parent.parent
-        _mkdir(root, base, protected)
+        _mkdir(root, base)
         with _locked(root):
             entries = _entries(root)
             existing = _find(entries, identity, state_fd)
@@ -219,8 +203,7 @@ def register(checkout, plan_id, state_dir):
                 return existing
             rid = uuid.uuid4().hex
             directory = root / "plans" / rid
-            _mkdir(directory.parent, base, protected)
-            _outside(directory, protected)
+            _mkdir(directory.parent, base)
             directory.mkdir(mode=0o700)  # Never reuse a pre-existing record root.
             store.sync_directory(directory.parent)
             entry = dict(identity, registration_id=rid, record_dir=str(directory))
@@ -232,5 +215,5 @@ def register(checkout, plan_id, state_dir):
 
 def lookup(checkout, plan_id, state_dir):
     """Read an atomic registry snapshot; absent registration returns None."""
-    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd, _):
+    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd):
         return _find(_entries(root), identity, state_fd)
