@@ -137,10 +137,9 @@ def check(directory, now, mandate_bytes):
 
 def revoke(directory, now, reason):
     with _locked(directory) as directory:
-        record, _ = _load(directory / RECORD_NAME)
+        record, raw = _load(directory / RECORD_NAME)
         updated = revoked(record, now, reason)
-        if updated != record:
-            _write(directory / RECORD_NAME, encode(updated))
+        _write(directory / RECORD_NAME, encode(updated) if updated != record else raw)
         return updated
 
 

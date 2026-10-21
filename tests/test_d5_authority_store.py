@@ -852,5 +852,20 @@ class TestD5AuthorityStore(unittest.TestCase):
                 self.eq(list(directory.rglob(".authority-*")), [])
 
 
+    def test_revoke_retry_confirms_durability(self):
+        self.create()
+        with mock.patch.object(A, "_sync_directory", side_effect=OSError(errno.EIO, "sync")):
+            self.refuses("durability is unconfirmed", A.revoke, self.d, 102, "stop")
+            self.refuses("durability is unconfirmed", A.revoke, self.d, 103, "retry")
+        old = records.revoked(grant(), 102, "stop")
+        raw = self.path.read_bytes() + b" \n"
+        self.path.write_bytes(raw)
+        with mock.patch.object(A, "_sync_directory", wraps=A._sync_directory) as sync:
+            self.eq(A.revoke(self.d, 104, "retry"), old)
+        sync.assert_called_once_with(self.d)
+        self.stored(old)
+        self.eq(self.path.read_bytes(), raw)
+
+
 if __name__ == "__main__":
     unittest.main()
