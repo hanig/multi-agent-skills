@@ -377,5 +377,27 @@ class TestD5Registry(unittest.TestCase):
         finally:
             self.d.chmod(original)
 
+    # Final-round counterexamples retained for owner adjudication; no repair authorized.
+    def test_final_linked_separate_checkout_refuses_authority(self):
+        checkout = self.d / "separate-main"
+        common = self.d / "separate-common"
+        linked = self.d / "separate-linked"
+        self.git("init", "--separate-git-dir=" + str(common), str(checkout))
+        self.git("-C", str(checkout), "-c", "user.name=Test", "-c",
+                 "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial")
+        self.git("-C", str(checkout), "worktree", "add", "--detach", str(linked))
+        self.external_base.return_value = checkout
+        with self.assertRaisesRegex(R.AuthorityError, "inside operated"):
+            self.register(repo=linked)
+
+    def test_final_git_231_missing_lookup(self):
+        run = subprocess.run
+        def legacy_git(args, *a, **kw):
+            if args[0] == "git" and args[-4:] == ["worktree", "list", "--porcelain", "-z"]:
+                raise subprocess.CalledProcessError(129, args, stderr=b"error: unknown switch z")
+            return run(args, *a, **kw)
+        with mock.patch.object(subprocess, "run", side_effect=legacy_git):
+            self.assertIsNone(R.lookup(self.repo, "p", self.state))
+
 if __name__ == "__main__":
     unittest.main()
