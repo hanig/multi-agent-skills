@@ -2266,8 +2266,7 @@ else:
     def test_controller_completes_supervision_during_accounting_outage(self):
         self.supervisor_fixture()
         self.configure({'321': 'COMPLETED'}, unavailable='sacct')
-        # Deterministic deadline: a sacct-only mutation reaches it immediately;
-        # controller success must finish on its first query, without sleeping.
+        # Controller success must beat this deterministic deadline.
         RV.time.monotonic.side_effect = [0, 20]
         result = RV.supervise(self.stage)
         self.assertNotIn('error', result)
@@ -2324,6 +2323,7 @@ else:
         command = RV._command
         for error in (None, OSError('controller unavailable'), subprocess.TimeoutExpired('scontrol', 60)):
             with self.subTest(error=error):
+                RV.time.monotonic.side_effect = [0, 20]
                 def query(argv, **kwargs):
                     if argv[0] == 'scontrol' and error is not None:
                         raise error
