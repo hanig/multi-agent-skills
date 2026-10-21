@@ -200,18 +200,28 @@ class TestD5Registry(unittest.TestCase):
         self.assertIn(mock.call(self.root), direct.call_args_list + writer.call_args_list,
                       "successful retry must confirm registry-link durability")
 
-    def test_retry_syncs_registry_with_symlinked_plans(self):
-        self.root.mkdir(parents=True)
-        records = self.d / "records"
-        records.mkdir()
-        (self.root / "plans").symlink_to(records, target_is_directory=True)
-        self.test_retry_after_registry_sync_failure()
+    def test_owned_symlinks_refuse_before_open_or_sync(self):
+        entry = self.register()
+        for path in (self.root, self.root / "plans", Path(entry["record_dir"])):
+            target = self.d / "moved"
+            path.rename(target)
+            path.symlink_to(target, target_is_directory=True)
+            try:
+                with mock.patch.object(R, "os", wraps=os) as ops, \
+                     mock.patch.object(os, "fsync", side_effect=AssertionError("fsync")):
+                    ops.open.side_effect = AssertionError("open")
+                    for call in (self.register, lambda: R.lookup(self.repo, "p", self.state)):
+                        with self.assertRaisesRegex(R.AuthorityError, str(path)):
+                            call()
+            finally:
+                path.unlink()
+                target.rename(path)
 
     def test_idempotent_retry_syncs_file_and_all_directory_links(self):
         entry = self.register()
         directory = Path(entry["record_dir"])
         paths = [self.root / "registry.json", directory, directory.parent,
-                 self.root, self.root.parent, self.base]
+                 self.root, self.root.parent, self.base, self.base.parent]
         keys = {(p.stat().st_dev, p.stat().st_ino) for p in paths}
         synced, real_sync = set(), os.fsync
         def sync(fd):
@@ -221,7 +231,7 @@ class TestD5Registry(unittest.TestCase):
         before = self.tree(self.root)
         with mock.patch.object(os, "fsync", side_effect=sync):
             self.assertEqual(self.register(), entry)
-        self.assertEqual(keys, synced, "sync every owned link and nothing above the base")
+        self.assertEqual(keys, synced, "sync owned links and the created base's parent")
         for failed in keys:
             def fail(fd):
                 info = os.fstat(fd)
@@ -323,7 +333,7 @@ class TestD5Registry(unittest.TestCase):
             self.d.chmod(original)
 
 
-    # Preserved final-round counterexamples; repair needs owner adjudication.
+    # Preserved counterexamples; repaired under OD3.
     def test_final_missing_base_cannot_return_unconfirmed_registration(self):
         self.assertFalse(self.base.exists())
         parent = self.base.parent.stat()
