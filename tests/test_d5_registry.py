@@ -69,6 +69,7 @@ class TestD5Registry(unittest.TestCase):
         self.d = Path(temporary.name).resolve()
         self.repo = self.d / "repo"
         self.git("init", str(self.repo))
+        self.disable_maintenance(self.repo)
         self.git("-C", str(self.repo), "-c", "user.name=Test", "-c",
                  "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial")
         self.state = self.d / "state"
@@ -82,6 +83,10 @@ class TestD5Registry(unittest.TestCase):
     def git(self, *args):
         return subprocess.run(["git"] + list(args), check=True, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, timeout=30).stdout
+
+    def disable_maintenance(self, repo):
+        self.git("-C", str(repo), "config", "gc.auto", "0")
+        self.git("-C", str(repo), "config", "maintenance.auto", "false")
 
     def register(self, repo=None, plan="p", state=None):
         with mock.patch.object(R, "d5_active", return_value=True):
@@ -160,6 +165,7 @@ class TestD5Registry(unittest.TestCase):
         first = self.register()
         clone = self.d / "clone"
         self.git("clone", str(self.repo), str(clone))
+        self.disable_maintenance(clone)
         with self.assertRaisesRegex(R.AuthorityError, "already registered"):
             self.register(repo=clone)
         other = self.d / "clone-state"
@@ -539,6 +545,7 @@ class TestD5Registry(unittest.TestCase):
             home.mkdir()
             checkout, common, linked = home / "main", home / name, home / "linked"
             self.git("init", "--separate-git-dir=" + str(common), str(checkout))
+            self.disable_maintenance(checkout)
             self.git("-C", str(checkout), "-c", "user.name=Test", "-c",
                      "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial")
             self.git("-C", str(checkout), "worktree", "add", "--detach", str(linked))
@@ -564,6 +571,7 @@ class TestD5Registry(unittest.TestCase):
         for name in ("common", ".git"):
             bare = self.d / ("bare-" + name) / name
             self.git("clone", "--bare", str(self.repo), str(bare))
+            self.disable_maintenance(bare)
             linked = bare.parent / "linked"
             self.git("-C", str(bare), "worktree", "add", "--detach", str(linked))
             before = self.tree()
@@ -781,6 +789,7 @@ class TestD5Registry(unittest.TestCase):
 
     def test_unrelated_repository_above_authority_is_allowed(self):
         self.git("init", str(self.d))
+        self.disable_maintenance(self.d)
         entry = self.register()
         self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
 
