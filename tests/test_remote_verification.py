@@ -118,22 +118,27 @@ print('321|PENDING|0:0' if mode in ('slurm-pending', 'slurm-lost-job-id') else
 
 SQUEUE = r'''
 import subprocess, sys
+if '--name' not in sys.argv: raise SystemExit(1)
 state = subprocess.check_output(['sacct', '-j', '321'], text=True).split('|')[1]
 if state in ('PENDING', 'RUNNING', 'COMPLETING'):
     print('321|' + sys.argv[sys.argv.index('--name') + 1])
 '''
 
 
-SCONTROL = r'''
+SQUEUE_STATE = r'''
 import json, pathlib, sys
-state = json.loads(pathlib.Path(STATE).read_text())
-with pathlib.Path(LOG).open('a') as log:
-    log.write(json.dumps(['scontrol'] + sys.argv[1:]) + '\n')
-assert sys.argv[1:3] == ['show', 'job']
-assert sys.argv[3:] == ['-o', '321']
-print(state.get('controller_output', 'JobId=321 JobName=verify JobState=COMPLETED ExitCode=0:0'))
-print(state.get('controller_error', ''), file=sys.stderr)
-raise SystemExit(state.get('controller_rc', 0))
+if '--name' not in sys.argv:
+    state = json.loads(pathlib.Path(STATE).read_text())
+    with pathlib.Path(LOG).open('a') as log:
+        log.write(json.dumps(['squeue'] + sys.argv[1:]) + '\n')
+    if '-j' in sys.argv: raise SystemExit(1)  # Optional arg must be attached.
+    assert '--jobs=321' in sys.argv and sys.argv[-2:] == ['-o', '%T']
+    all_states = ('--states=all' in sys.argv or
+                  any(sys.argv[i:i+2] == ['-t', 'all'] for i in range(len(sys.argv))))
+    if all_states:  # Default squeue omits finished jobs.
+        sys.stdout.write(state.get('controller_output', 'COMPLETED\n'))
+    print(state.get('controller_error', ''), file=sys.stderr)
+    raise SystemExit(state.get('controller_rc', 0))
 '''
 
 
@@ -189,15 +194,14 @@ class TestRemoteVerification(unittest.TestCase):
     def test_controller_outage_evidence_reaches_coordinator_ledger(self):
         self.slurm_policy()
         self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
-        controller = self.f.bin / 'scontrol'
+        controller = self.f.bin / 'squeue'
         config = self.f.directory / 'controller.json'
         config.write_text('{}')
-        controller.write_text(PYTHON + SCONTROL.replace('STATE', repr(str(config))).replace(
+        controller.write_text(PYTHON + SQUEUE_STATE.replace('STATE', repr(str(config))).replace(
             'LOG', repr(str(self.f.directory / 'controller.log'))))
         controller.chmod(0o755)
         (self.f.bin / 'sacct').write_text(PYTHON +
             'import sys\nprint("Connection timed out", file=sys.stderr)\nraise SystemExit(1)\n')
-        (self.f.bin / 'squeue').write_text(PYTHON + 'raise SystemExit(0)\n')
         self.assert_ok(self.verify())
         for row in self.rows():
             execution = row['execution']
@@ -2184,6 +2188,7 @@ import json, pathlib, sys
 state_path, log_path = pathlib.Path(STATE), pathlib.Path(LOG)
 state = json.loads(state_path.read_text())
 command = pathlib.Path(sys.argv[0]).name
+if command == 'squeue' and '--name' not in sys.argv: raise SystemExit(1)
 with log_path.open('a') as log: log.write(json.dumps([command] + sys.argv[1:]) + '\n')
 if state.get('unavailable') == command:
     print('Connection timed out', file=sys.stderr)
@@ -2221,6 +2226,7 @@ else:
     if job in state['jobs']:
         print(job + '|' + ('COMPLETED' if state.get('stale_terminal') else state['jobs'][job]) + '|0:0')
 """.replace('STATE', repr(str(self.state))).replace('LOG', repr(str(self.log))).replace('NAME', repr(self.name))
+        self.queue_program = body
         for command in ('sbatch', 'squeue', 'sacct', 'scancel'):
             path = self.bin / command
             path.write_text(PYTHON + body)
@@ -2243,9 +2249,9 @@ else:
         return RV.evidence_digest(RV.collect(self.stage))
 
     def install_controller(self):
-        path = self.bin / 'scontrol'
-        path.write_text(PYTHON + SCONTROL.replace('STATE', repr(str(self.state))).replace(
-            'LOG', repr(str(self.log))))
+        path = self.bin / 'squeue'
+        path.write_text(PYTHON + SQUEUE_STATE.replace('STATE', repr(str(self.state))).replace(
+            'LOG', repr(str(self.log))) + self.queue_program)
         path.chmod(0o755)
 
     def supervisor_fixture(self):
@@ -2276,18 +2282,21 @@ else:
         self.assertEqual((self.stage / 'job-id').read_text(), '321')
         self.assertEqual(RV.time.monotonic.call_count, 1)
         self.sleep.assert_not_called()
-        self.assertEqual(self.scheduler_calls(), [['scontrol', 'show', 'job', '-o', '321']])
+        self.assertEqual(self.scheduler_calls(), [['squeue', '-h', '-t', 'all', '--jobs=321', '-o', '%T']])
 
     def test_controller_absence_falls_back_to_accounting(self):
         self.install_controller()
         self.configure({'321': 'COMPLETED'}, controller_rc=1,
                        controller_error='slurm_load_jobs error: Invalid job id specified')
         self.assert_accounting()
-        self.assertEqual([c[0] for c in self.scheduler_calls()], ['sacct', 'scontrol', 'sacct'])
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['sacct', 'squeue', 'sacct'])
 
     def test_missing_controller_keeps_accounting_only_behavior(self):
+        (self.bin / 'squeue').unlink()
         self.configure({'321': 'COMPLETED'})
-        self.assert_accounting()
+        with mock.patch.object(RV, '_command', wraps=RV._command) as calls:
+            self.assert_accounting()
+        self.assertEqual([c.args[0][0] for c in calls.call_args_list], ['sacct', 'sacct'])
 
     def test_absence_on_stdout_with_stderr_warning(self):
         self.supervisor_fixture()
@@ -2298,19 +2307,6 @@ else:
         self.assertNotIn('error', result)
         self.assertEqual(result['execution']['scheduler_evidence_source'], 'sacct')
         self.assert_accounting(supervise=True)
-
-    def test_ambiguous_controller_paths_fall_back_to_accounting(self):
-        self.install_controller()
-        for separator in (' ', '\n'):
-            for key in ('JobId', 'JobState', 'ExitCode', 'plain'):
-                with self.subTest(separator=separator, key=key):
-                    output = ('JobId=321 JobName=verify JobState=COMPLETED ExitCode=0:0'
-                              ' WorkDir=/tmp/build' + separator + key + '=archive')
-                    if separator == ' ' and key == 'plain':
-                        continue  # No ambiguity in the three fields we consume.
-                    self.configure({'321': 'COMPLETED'}, controller_output=output)
-                    self.assert_accounting()
-        self.assertEqual([c[0] for c in self.scheduler_calls()], ['sacct', 'scontrol', 'sacct'] * 7)
 
     def assert_accounting(self, expected=('COMPLETED', '0:0'), supervise=False):
         def observe():
@@ -2334,14 +2330,19 @@ else:
         self.supervisor_fixture()
         command = RV._command
         cases = [(RV, '_command', e) for e in (None, OSError(), Unexpected(),
-                 subprocess.TimeoutExpired('scontrol', 60),
+                 subprocess.TimeoutExpired('squeue', 60),
                  UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid'))]
-        cases += [(RV.shutil, 'which', Unexpected()), (RV.re, 'findall', Unexpected())]
+        class Uncomparable(str):
+            def __eq__(self, other):
+                raise Unexpected()
+        cases += [(RV.shutil, 'which', Unexpected()), (RV, '_command', Uncomparable())]
         for status in ('RUNNING', 'FAILED', 'COMPLETED'):
             self.configure({'321': status}, controller_rc=1, controller_error='Connection timed out')
             for target, attribute, error in cases:
                 def query(argv, **kwargs):
-                    if argv[0] == 'scontrol' and error is not None:
+                    if argv[0] == 'squeue' and error is not None:
+                        if isinstance(error, str):
+                            return 0, error, ''
                         raise error
                     return command(argv, **kwargs)
                 with self.subTest(status=status, step=attribute, error=type(error).__name__):
@@ -2361,8 +2362,9 @@ else:
         self.configure({'321': 'FAILED'})
         for stream in ('stdout', 'stderr'):
             with self.subTest(stream=stream):
-                (self.bin / 'scontrol').write_text(PYTHON + 'import sys\nsys.' + stream +
-                    ".buffer.write(b'JobId=321 JobState=COMPLETED ExitCode=0:0 WorkDir=/tmp/\\xff')\n")
+                (self.bin / 'squeue').write_text(PYTHON + 'import sys\n' +
+                    ("sys.stdout.write('COMPLETED\\n')\n" if stream == 'stderr' else '') +
+                    'sys.' + stream + ".buffer.write(b'\\xff')\n")
                 self.assert_accounting(('FAILED', '0:0'))
 
     def test_controller_interrupts_propagate(self):
@@ -2371,7 +2373,7 @@ else:
         command = RV._command
         for error in (KeyboardInterrupt, SystemExit):
             def query(argv, **kwargs):
-                if argv[0] == 'scontrol':
+                if argv[0] == 'squeue':
                     raise error
                 return command(argv, **kwargs)
             with mock.patch.object(RV, '_command', side_effect=query):
@@ -2389,36 +2391,47 @@ else:
         self.assertIsNone(result['execution']['sacct_state'])
         self.assertIsNone(result['execution']['scheduler_evidence_source'])
         self.sleep.assert_called_once_with(2)
-        self.assertEqual([c[0] for c in self.scheduler_calls()], ['scontrol', 'sacct'] * 3)
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['squeue', 'sacct'] * 3)
         self.assert_accounting(None, supervise=True)
 
-    def test_controller_requires_exact_unambiguous_terminal_job(self):
+    def test_controller_requires_exact_completed_line(self):
+        self.supervisor_fixture()
+        outputs = ['FAILED\n', 'TIMEOUT\n', 'CANCELLED\n', 'COMPLETING\n', 'RUNNING\n',
+                   'COMPLETED', 'COMPLETED ', ' COMPLETED', 'COMPLETED \n', ' COMPLETED\n',
+                   'COMPLETED\nCOMPLETED\n', 'CD\n', '', 'No jobs in the system\n']
+        outputs += [state + '\n' for state in RV.TERMINAL if state != 'COMPLETED']
+        for output in outputs:
+            for status in ('COMPLETED', 'RUNNING', 'FAILED'):
+                with self.subTest(output=output, accounting=status):
+                    self.configure({'321': status}, controller_output=output)
+                    self.assert_accounting(None if status == 'RUNNING' else (status, '0:0'),
+                                           supervise=True)
+
+    def test_controller_and_accounting_share_value_domain(self):
         self.install_controller()
-        for output in ('JobId=322 JobState=COMPLETED ExitCode=0:0',
-                       'JobId=321 JobState=COMPLETING ExitCode=0:0',
-                       'JobId=321 JobState=RUNNING ExitCode=0:0',
-                       'JobId=321 JobState=COMPLETED',
-                       'JobId=321 JobState=COMPLETED ExitCode=0:0 JobId=322',
-                       'JobId=321 JobState=COMPLETED ExitCode=0:0 JobState=RUNNING',
-                       'JobId=321 JobState=COMPLETED ExitCode=0:0\nJobId=321 JobState=FAILED ExitCode=1:0',
-                       '', 'No jobs in the system'):
-            with self.subTest(output=output):
-                self.configure({'321': 'COMPLETED'}, controller_output=output)
-                self.assert_accounting()
-                self.configure({'321': 'RUNNING'}, controller_output=output)
-                self.assert_accounting(None)
-        self.assertEqual([c[0] for c in self.scheduler_calls()], ['sacct', 'scontrol', 'sacct'] * 18)
-        for terminal in RV.TERMINAL:
-            with self.subTest(terminal=terminal):
-                self.configure({}, controller_output='JobId=321 JobState=' + terminal + ' ExitCode=1:0')
-                state = RV.scheduler_state('321')
-                self.assertEqual(state, (terminal, '1:0'))
-                self.assertEqual(state.source, 'slurmctld')
-                with mock.patch.object(RV.shutil, 'which', return_value=None), mock.patch.object(
-                        RV, '_command', return_value=(0, '321|' + terminal + '|1:0', '')):
-                    accounting = RV.scheduler_state('321')
-                self.assertEqual(state, accounting)
-                self.assertIs(type(state), type(accounting))
+        self.configure({'321': 'COMPLETED'})
+        state = RV.scheduler_state('321')
+        self.assertEqual(state, ('COMPLETED', '0:0'))
+        self.assertEqual(state.source, 'slurmctld')
+        with mock.patch.object(RV.shutil, 'which', return_value=None):
+            accounting = RV.scheduler_state('321')
+        self.assertEqual(accounting.source, 'sacct')
+        self.assertEqual(state, accounting)
+        self.assertIs(type(state), type(accounting))
+
+    def test_empty_controller_exit_code_cannot_suppress_accounting(self):
+        # Reproduce the predecessor's accepted empty ExitCode through supervision.
+        self.supervisor_fixture()
+        command = RV._command
+        def query(argv, **kwargs):
+            if argv[0] in ('scontrol', 'squeue'):
+                return 0, 'JobId=321 JobState=COMPLETED ExitCode=\n', ''
+            return command(argv, **kwargs)
+        self.configure({'321': 'COMPLETED'})
+        with mock.patch.object(RV.shutil, 'which', return_value='/fixture/controller'), mock.patch.object(
+                RV, '_command', side_effect=query):
+            result = self.assert_accounting(supervise=True)
+        self.assertNotIn('error', result)
 
     def test_discovery_without_accounting_requires_complete_controller_launch(self):
         self.controller_marker()
