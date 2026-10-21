@@ -1,8 +1,8 @@
 <!-- docs-truth:status -->
 Status: live
-Date: 2026-10-20
+Date: 2026-10-21
 Title: D5 integration preparation
-Purpose: Record inactive integration and host contracts.
+Purpose: Record inactive integration, registration, lease management and host contracts.
 
 **D5 is inactive; preparation only.** [Manifest](../tests/fixtures/d5/integration-manifest.json)
 classes cite handlers: reads=read_only, files/state=local_mutation,
@@ -47,5 +47,46 @@ Outbox: key/project/unit/verb/seq, closing_evidence/kind/unit_state/why/at,
 job_id/attempt_dir/evidence, optional tracker. Envelope: schema_version,
 project/unit/attempt/idempotency_key/requested_operation/evidence_digest/
 required_connector_capability. No D5 grant/destination scope.
-Recommend Git-common-directory authority; equal shipped skill_paths.py copies
-are the independent-install precedent. U1 decides.
+DG8 (2026-10-20) places authority at
+`coordinator_paths._external_base(worktrees) / "hanig-authority" / "v1"`.
+The Git common directory holds neither authority nor a pointer to it.
+`d5_registry.py` resolves the swarm sibling through `skill_paths`.
+Registration keys are the opened Git common directory's `(st_dev, st_ino)`,
+exact `plan_id` matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, and the opened
+external state directory's `(st_dev, st_ino)`. Paths are locators only; plan
+IDs are never path components. The registry rejects conflicting plan/state
+bindings, re-verifies state identity on lookup, and permits two plans in one
+repository. Aliases of one filesystem object share a registration; clones
+and recreated inodes do not (inode reuse is an accepted limit).
+
+`registry.json` is atomically published under permanent `registry.lock`;
+records live in `plans/<random-registration-id>/`. `lookup` reads a snapshot
+without creating a lock. `d5_lease.py` provides `grant`, `revoke` and `status`
+through public registry, record and store APIs; it has no CLI or production
+caller. Grant validates before writing, requires a registration, assigns a
+fresh grant ID and session cap 1, digests exact mandate bytes, and stores
+owner response and displayed bounds without summarizing or trimming them.
+Custody and invalidation start null. Creation and replacement use the store's
+locking, consent rules and predecessor archive. Two initial grants that both
+observe no record select `store.create`; one refuses. Grant mutations also
+hold a permanent `grant.lock` with a nonblocking exclusive lock, so a caller
+seeing a newly published record while its writer still holds the store lock
+refuses instead of waiting to replace it. Sequential replacement stays allowed.
+Revocation requires registration and uses the store's terminal transition.
+
+`register`, `grant` and `revoke` refuse with "D5 is not active" until U8 changes
+`d5_registry.d5_active()`. Read-only `status` works while inactive and creates
+nothing: no external base, authority root, registry, record directory or lock.
+It reads bytes, decodes and evaluates the record without the store's locking
+`read` or invalidation-persisting `check`. The returned activation state,
+registration, record and record state are diagnostic, never authorization;
+a reported mandate change does not persist invalidation.
+
+Supported envelope: local filesystem with trusted same-UID coordinator
+writers, Git 2.36 or later and the standard repository layout. Placement
+containment and the Git/layout gates belong to U1b-1c (ARC-2794); tamper checks
+belong to U1b-1b (ARC-2793), both before activation. No claim of path-string or
+cross-clone equivalence, persistence across inode recreation, protection from
+malicious same-UID replacement, or TOCTOU against outside-lock writers.
+Cryptographic owner authentication, custody, enforcement, a CLI and activation
+remain later units. D5 stays inactive.
