@@ -237,6 +237,44 @@ class TestD5Registry(unittest.TestCase):
         self.assertIn(mock.call(self.root), direct.call_args_list + writer.call_args_list,
                       "successful retry must confirm registry-link durability")
 
+    def test_unrelated_repository_above_storage_is_allowed(self):
+        self.git("init", str(self.d))
+        entry = self.register()
+        self.assertEqual(entry["record_dir"], str(self.root / "plans" / entry["registration_id"]))
+        self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+
+    def test_retry_syncs_registry_with_symlinked_plans(self):
+        self.root.mkdir(parents=True)
+        records = self.d / "records"
+        records.mkdir()
+        (self.root / "plans").symlink_to(records, target_is_directory=True)
+        self.test_retry_after_registry_sync_failure()
+
+    def test_idempotent_retry_syncs_file_and_all_directory_links(self):
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        paths = [self.root / "registry.json", directory, *directory.parents]
+        keys = {(p.stat().st_dev, p.stat().st_ino) for p in paths}
+        synced, real_sync = set(), os.fsync
+        def sync(fd):
+            info = os.fstat(fd)
+            synced.add((info.st_dev, info.st_ino))
+            real_sync(fd)
+        before = self.tree(self.root)
+        with mock.patch.object(os, "fsync", side_effect=sync):
+            self.assertEqual(self.register(), entry)
+        self.assertTrue(keys <= synced, "retry must sync the file and every directory link")
+        for failed in keys:
+            def fail(fd):
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) == failed:
+                    raise OSError(errno.EIO, "synthetic retry sync failure")
+                real_sync(fd)
+            with self.subTest(key=failed), mock.patch.object(os, "fsync", side_effect=fail):
+                with self.assertRaisesRegex(R.AuthorityError, "durability is unconfirmed"):
+                    self.register()
+        self.assertEqual(self.tree(self.root), before)
+
     def test_registry_strict_schema_and_duplicate_keys(self):
         self.register()
         path = self.root / "registry.json"
