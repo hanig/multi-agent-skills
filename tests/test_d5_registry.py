@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
@@ -243,11 +244,11 @@ class TestD5Registry(unittest.TestCase):
                     self.assertNotEqual(candidate, directory)
                     self.assertNotIn(directory, candidate.parents)
                     return os.open(str(candidate), *args)
-                with mock.patch.object(R, "os", wraps=os) as ops, \
+                with mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops, \
                      mock.patch.object(store, "present", side_effect=checked), \
                      mock.patch.object(store, "read_bytes", wraps=store.read_bytes) as reads, \
                      mock.patch.object(os, "fsync", side_effect=AssertionError("fsync")):
-                    ops.open.side_effect = opened
+                    ops.open = opened
                     for call in (self.register, lambda: R.lookup(self.repo, "p", self.state)):
                         reads.reset_mock()
                         with self.assertRaisesRegex(R.AuthorityError, str(path)):
