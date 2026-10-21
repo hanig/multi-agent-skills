@@ -130,8 +130,8 @@ state = json.loads(pathlib.Path(STATE).read_text())
 with pathlib.Path(LOG).open('a') as log:
     log.write(json.dumps(['scontrol'] + sys.argv[1:]) + '\n')
 assert sys.argv[1:3] == ['show', 'job']
-key = 'controller_output' if '-o' in sys.argv else 'controller_multiline'
-print(state.get(key, 'JobId=321 JobName=verify JobState=COMPLETED ExitCode=0:0'))
+assert sys.argv[3:] == ['-o', '321']
+print(state.get('controller_output', 'JobId=321 JobName=verify JobState=COMPLETED ExitCode=0:0'))
 print(state.get('controller_error', ''), file=sys.stderr)
 raise SystemExit(state.get('controller_rc', 0))
 '''
@@ -2303,22 +2303,38 @@ else:
         self.assertNotIn('error', result)
         self.assertEqual(result['execution']['scheduler_evidence_source'], 'sacct')
 
-    def test_controller_fields_in_paths_use_grouped_output(self):
+    def test_ambiguous_controller_paths_fall_back_to_accounting(self):
         self.install_controller()
-        grouped = 'JobId=321 JobName=verify\n   JobState=COMPLETED Reason=None\n   Requeue=0 ExitCode=0:0\n'
-        for key in ('JobId', 'JobState', 'ExitCode'):
-            with self.subTest(key=key):
-                path = '   WorkDir=/tmp/build ' + key + '=archive\n'
-                self.configure({}, unavailable='sacct', controller_output=(grouped + path).replace('\n', ' '),
-                               controller_multiline=grouped + path)
-                state = RV.scheduler_state('321')
-                self.assertEqual(state, ('COMPLETED', '0:0'))
-                self.assertEqual(state.source, 'slurmctld')
-        self.assertEqual(self.scheduler_calls(), [call for _ in range(3) for call in (
-            ['scontrol', 'show', 'job', '-o', '321'], ['scontrol', 'show', 'job', '321'])])
-        self.configure({}, controller_output=grouped.replace('\n', ' ') + path,
-                       controller_multiline='JobId=321 JobName=verify\nJobState=COMPLETED ExitCode=0:0')
-        self.assertIsNone(RV.scheduler_state('321'))
+        for separator in (' ', '\n'):
+            for key in ('JobId', 'JobState', 'ExitCode', 'plain'):
+                with self.subTest(separator=separator, key=key):
+                    output = ('JobId=321 JobName=verify JobState=COMPLETED ExitCode=0:0'
+                              ' WorkDir=/tmp/build' + separator + key + '=archive')
+                    if separator == ' ' and key == 'plain':
+                        continue  # No ambiguity in the three fields we consume.
+                    self.configure({'321': 'COMPLETED'}, controller_output=output)
+                    state = RV.scheduler_state('321')
+                    self.assertEqual(state, ('COMPLETED', '0:0'))
+                    self.assertEqual(state.source, 'sacct')
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['scontrol', 'sacct'] * 7)
+
+    def test_controller_errors_preserve_healthy_accounting(self):
+        self.supervisor_fixture()
+        self.configure({'321': 'COMPLETED'}, controller_rc=1, controller_error='Connection timed out')
+        command = RV._command
+        for error in (None, OSError('controller unavailable'), subprocess.TimeoutExpired('scontrol', 60)):
+            with self.subTest(error=error):
+                def query(argv, **kwargs):
+                    if argv[0] == 'scontrol' and error is not None:
+                        raise error
+                    return command(argv, **kwargs)
+                with mock.patch.object(RV, '_command', side_effect=query):
+                    result = RV.supervise(self.stage)
+                self.assertNotIn('error', result)
+                self.assertEqual(result['execution']['sacct_state'], 'COMPLETED')
+                self.assertEqual(result['execution']['sacct_exit_code'], '0:0')
+                self.assertEqual(result['execution']['scheduler_evidence_source'], 'sacct')
+        self.sleep.assert_not_called()
 
     def test_controller_error_waits_until_supervision_deadline(self):
         self.supervisor_fixture()
@@ -2331,7 +2347,7 @@ else:
         self.assertIsNone(result['execution']['sacct_state'])
         self.assertIsNone(result['execution']['scheduler_evidence_source'])
         self.sleep.assert_called_once_with(2)
-        self.assertEqual([c[0] for c in self.scheduler_calls()], ['scontrol'] * 3)
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['scontrol', 'sacct'] * 3)
 
     def test_controller_requires_exact_unambiguous_terminal_job(self):
         self.install_controller()
@@ -2344,8 +2360,12 @@ else:
                        '', 'No jobs in the system'):
             with self.subTest(output=output):
                 self.configure({'321': 'COMPLETED'}, controller_output=output)
+                state = RV.scheduler_state('321')
+                self.assertEqual(state, ('COMPLETED', '0:0'))
+                self.assertEqual(state.source, 'sacct')
+                self.configure({'321': 'RUNNING'}, controller_output=output)
                 self.assertIsNone(RV.scheduler_state('321'))
-        self.assertTrue(all(c[0] == 'scontrol' for c in self.scheduler_calls()))
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['scontrol', 'sacct'] * 16)
         for terminal in RV.TERMINAL:
             with self.subTest(terminal=terminal):
                 self.configure({}, controller_output='JobId=321 JobState=' + terminal + ' ExitCode=1:0')
@@ -2384,6 +2404,19 @@ else:
         self.configure({'321': 'COMPLETED'}, unavailable='sacct')
         (self.bin / 'squeue').write_text(PYTHON + 'raise SystemExit(1)\n')
         self.assertFalse(discover())
+
+    def test_pre_change_stage_keeps_accounting_discovery(self):
+        self.install_controller()
+        self.controller_marker()
+        marker = read_json(self.stage / 'supervision-finished')
+        del marker['scheduler_evidence_source']
+        RV.publish(self.stage / 'supervision-finished', marker)
+        for unavailable in ('sacct', None):
+            self.configure({'321': 'COMPLETED'}, unavailable=unavailable)
+            observation = RV.discover_slurm_jobs(self.request, ['321'], self.stage)
+            self.assertEqual(observation['scheduler_confirmed'], unavailable is None)
+            self.assertEqual(observation['job_ids'], ['321'])
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['sacct', 'squeue'] * 2)
 
     def test_accounting_free_cleanup_and_lifted_success_probe(self):
         self.install_controller()
