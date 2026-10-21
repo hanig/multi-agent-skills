@@ -449,5 +449,30 @@ class TestD5Registry(unittest.TestCase):
         self.assert_syncs(calls, self.chain())
 
 
+    # Final OD4 counterexamples, preserved without a post-review repair.
+    def test_final_unrelated_symlink_with_existing_registration(self):
+        entry = self.register()
+        notes = self.d / "notes"
+        notes.mkdir()
+        (self.root / "plans" / "notes").symlink_to(notes, target_is_directory=True)
+        before = self.tree()
+        for call in (lambda: R.lookup(self.repo, "p", self.state), self.register):
+            with self.subTest(operation=call):
+                self.assertEqual(call(), entry)
+        self.assertEqual(self.tree(), before)
+
+    def test_final_unrelated_symlink_with_absent_registry(self):
+        (self.root / "plans").mkdir(parents=True)
+        notes = self.d / "notes.txt"
+        notes.write_text("coordinator notes")
+        (self.root / "plans" / "notes").symlink_to(notes)
+        before = self.tree()
+        with self.subTest(operation="lookup"):
+            self.assertIsNone(R.lookup(self.repo, "p", self.state))
+            self.assertEqual(self.tree(), before)
+        with self.subTest(operation="register"):
+            self.assertEqual(self.register()["plan_id"], "p")
+
+
 if __name__ == "__main__":
     unittest.main()
