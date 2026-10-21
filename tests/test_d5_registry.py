@@ -351,6 +351,36 @@ class TestD5Registry(unittest.TestCase):
         self.assertEqual(R.lookup(self.repo, "p", self.state), first)
         self.assertEqual(self.register(plan="q", state=other)["plan_id"], "q")
 
+    # Preserved final-round counterexamples; unresolved, not ready to merge.
+    def test_record_became_worktree(self):
+        entry = self.register()
+        record = Path(entry["record_dir"])
+        before = record.stat()
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(record))
+        self.assertEqual((before.st_dev, before.st_ino),
+                         (record.stat().st_dev, record.stat().st_ino))
+        self.assertIn(record, R.CP.operated_worktrees(cwd=self.repo))
+        for name, call in (("lookup", lambda: R.lookup(self.repo, "p", self.state)),
+                           ("register", self.register)):
+            with self.subTest(operation=name), self.assertRaises(R.AuthorityError):
+                call()
+
+    def test_record_replaced_with_symlink(self):
+        entry = self.register()
+        record = Path(entry["record_dir"])
+        record.rmdir()
+        record.symlink_to(self.repo / ".git", target_is_directory=True)
+        with self.assertRaises(R.AuthorityError):
+            self.register()
+
+    def test_traverse_only_preexisting_ancestor(self):
+        self.base.mkdir()
+        original = self.d.stat().st_mode
+        self.d.chmod(0o111)
+        try:
+            self.register()
+        finally:
+            self.d.chmod(original)
 
 if __name__ == "__main__":
     unittest.main()
