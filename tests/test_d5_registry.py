@@ -224,6 +224,19 @@ class TestD5Registry(unittest.TestCase):
             self.register(repo=checkout)
         self.assertEqual(self.tree(), before)
 
+    def test_retry_after_registry_sync_failure(self):
+        with mock.patch.object(store, "_sync_directory",
+                               side_effect=OSError(errno.EIO, "synthetic post-replace")):
+            with self.assertRaisesRegex(R.AuthorityError, "durability is unconfirmed"):
+                self.register()
+        self.assertTrue((self.root / "registry.json").is_file())
+        with mock.patch.object(store, "sync_directory", wraps=store.sync_directory) as direct:
+            with mock.patch.object(store, "_sync_directory", wraps=store._sync_directory) as writer:
+                result = self.register()
+        self.assertEqual(result["plan_id"], "p")
+        self.assertIn(mock.call(self.root), direct.call_args_list + writer.call_args_list,
+                      "successful retry must confirm registry-link durability")
+
     def test_registry_strict_schema_and_duplicate_keys(self):
         self.register()
         path = self.root / "registry.json"
