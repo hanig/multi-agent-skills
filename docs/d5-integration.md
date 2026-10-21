@@ -60,11 +60,10 @@ identity on lookup, and permits two plans in one repository. Aliases of one
 filesystem object share a registration; clones and recreated inodes do not.
 
 `registry.json` is atomically published under permanent `registry.lock`;
-records live in `plans/<random-registration-id>/`. The management library
-preserves exact owner confirmation through the existing record/store APIs.
-`register`, `grant` and `revoke` refuse with "D5 is not active" until U8 changes
-`d5_active()`. Read-only `status` creates nothing, even with no authority root;
-its record evaluation is diagnostic and does not persist mandate invalidation.
+record directories live in `plans/<random-registration-id>/`.
+`register` refuses with "D5 is not active" until U8 changes `d5_active()`.
+Read-only `lookup` creates nothing, even with no authority root. The
+`grant`, `revoke` and `status` management API is deferred to U1b-2.
 Supported: local filesystem, trusted same-UID coordinator writers, Git 2.31+.
 No claim of path-string or cross-clone equivalence, persistence across inode
 recreation, protection from malicious same-UID replacement, or TOCTOU against
