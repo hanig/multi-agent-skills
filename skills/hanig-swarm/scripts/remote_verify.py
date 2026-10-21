@@ -603,16 +603,13 @@ class SchedulerState(tuple):
 
 
 def controller_state(job):
-    """Use only unambiguous terminal evidence; all controller errors fall back."""
+    """Accept only exact controller success; all other readings fall back."""
     try:
-        if shutil.which("scontrol"):
-            rc, out, err = _command(["scontrol", "show", "job", "-o", job])
-            pairs = re.findall(r"(?:^|\s)(JobId|JobState|ExitCode)=(\S*)", out)
-            fields = dict(pairs)
-            if (not rc and len(out.splitlines()) == 1 and out.startswith("JobId=")
-                    and len(pairs) == 3 and set(fields) == {"JobId", "JobState", "ExitCode"}
-                    and fields["JobId"] == job and fields["JobState"] in TERMINAL):
-                return SchedulerState(fields["JobState"], fields["ExitCode"], "slurmctld")
+        if shutil.which("squeue"):
+            rc, out, err = _command(["squeue", "-h", "-t", "all", "--jobs=" + job, "-o", "%T"])
+            if rc == 0 and out == "COMPLETED\n":
+                # Slurm COMPLETED means every process on every node exited zero.
+                return SchedulerState("COMPLETED", "0:0", "slurmctld")
     except Exception:
         pass
     return None
