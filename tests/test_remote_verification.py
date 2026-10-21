@@ -2362,6 +2362,39 @@ else:
         self.assertLessEqual(slept, RV.CLEANUP_REPOLL_BOUND_SECONDS)
         self.assertLessEqual(slept + 10, timeout)
 
+    def assert_completing_transport_budget(self, query_seconds, queue_lag):
+        # These cases timed out through real remote_call with local-only exec.
+        # Replay query latency on a virtual clock to keep the regression fast.
+        self.configure({'321': 'COMPLETED'})
+        elapsed = [0.0]
+        command = RV._command
+
+        def wait(seconds):
+            elapsed[0] += seconds
+
+        def delayed_query(argv, **kwargs):
+            elapsed[0] += query_seconds
+            if argv[0] == 'squeue':
+                state = read_json(self.state)
+                state['stale_queue_reads'] = (100 if elapsed[0] < queue_lag else 0)
+                self.state.write_text(json.dumps(state))
+            return command(argv, **kwargs)
+
+        self.sleep.side_effect = wait
+        with mock.patch.object(RV, '_command', side_effect=delayed_query):
+            result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertTrue(result['quiescent'])
+        self.assertNotIn('scancel', [c[0] for c in self.scheduler_calls()])
+        timeout = inspect.signature(RV.remote_call).parameters['timeout'].default
+        self.assertLessEqual(elapsed[0], timeout)
+
+    def test_completing_transport_budget_with_one_second_queries(self):
+        self.assert_completing_transport_budget(query_seconds=1, queue_lag=29)
+
+    def test_completing_transport_budget_with_slow_queries(self):
+        self.assert_completing_transport_budget(query_seconds=3.35, queue_lag=19)
+
     def test_mixed_or_unknown_accounting_keeps_short_repoll(self):
         for jobs in ({'321': 'COMPLETED', '322': 'RUNNING'},
                      {'321': 'UNKNOWN'}):
