@@ -1,9 +1,9 @@
-"""Inert D5 registration and management library; no production callers or CLI.
+"""Inert D5 registration library; no production callers or CLI.
 
 Local filesystem, trusted same-UID writers. Filesystem objects identify a
 repository and state directory; paths are locators, never identity. Atomic
-registry snapshots permit read-only lookup/status without creating a lock.
-The permanent registry lock serializes registration and management writes.
+registry snapshots permit read-only lookup without creating a lock.
+The permanent registry lock serializes registration writes.
 No custody, enforcement, migration or protection from outside-lock writers.
 """
 import fcntl
@@ -204,56 +204,3 @@ def lookup(checkout, plan_id, state_dir):
     """Read an atomic registry snapshot; absent registration returns None."""
     with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd):
         return _find(_entries(root), identity, state_fd)
-
-
-@contextmanager
-def _registered(checkout, plan_id, state_dir):
-    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd):
-        _require(store.present(root / "registry.json", "registry"), "not registered")
-        with _locked(root):
-            entry = _find(_entries(root), identity, state_fd)
-            _require(entry is not None, "not registered")
-            yield entry
-
-
-def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
-          mandate_bytes, scope, owner_response, displayed_bounds):
-    """Create or replace a grant, preserving exact confirmation and store rules."""
-    _active()
-    record = {"schema_version": 1, "grant_id": uuid.uuid4().hex,
-              "issued_at": issued_at, "confirmed_at": confirmed_at,
-              "expires_at": expires_at, "session_cap": 1,
-              "mandate_sha256": authority.mandate_digest(mandate_bytes),
-              "scope": scope, "confirmation": {"owner_response": owner_response,
-                                               "displayed_bounds": displayed_bounds},
-              "custody": None, "invalidation": None}
-    authority.validate(record)
-    with _registered(checkout, plan_id, state_dir) as entry:
-        directory = Path(entry["record_dir"])
-        operation = store.replace if store.present(directory / store.RECORD_NAME, "record") else store.create
-        return operation(directory, record)
-
-
-def revoke(checkout, plan_id, state_dir, now, reason):
-    """Persist revocation using the record store's terminal transition."""
-    _active()
-    with _registered(checkout, plan_id, state_dir) as entry:
-        return store.revoke(entry["record_dir"], now, reason)
-
-
-def status(checkout, plan_id, state_dir, *, now, mandate_bytes):
-    """Read-only snapshot. Evaluation never persists a mandate invalidation.
-
-    The result is diagnostic, never an authorization decision. In particular,
-    mandate_changed here is not the durable check performed by the store.
-    """
-    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd):
-        entry = _find(_entries(root), identity, state_fd)
-        record, state = None, "absent"
-        if entry is not None:
-            path = Path(entry["record_dir"]) / store.RECORD_NAME
-            if store.present(path, "record"):
-                record = authority.decode(store.read_bytes(path))
-                state = authority.evaluate(record, now, mandate_bytes)[0]
-        return {"state": "active" if d5_active() else "inactive",
-                "registration": entry, "record": record, "record_state": state}
