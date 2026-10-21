@@ -2367,8 +2367,14 @@ else:
 
     def test_controller_interrupts_propagate(self):
         self.install_controller()
+        self.configure({'321': 'COMPLETED'})
+        command = RV._command
         for error in (KeyboardInterrupt, SystemExit):
-            with mock.patch.object(RV, '_command', side_effect=error):
+            def query(argv, **kwargs):
+                if argv[0] == 'scontrol':
+                    raise error
+                return command(argv, **kwargs)
+            with mock.patch.object(RV, '_command', side_effect=query):
                 with self.assertRaises(error):
                     RV.scheduler_state('321')
 
