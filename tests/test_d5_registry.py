@@ -127,16 +127,18 @@ class TestD5Registry(unittest.TestCase):
     def test_root_and_state_must_be_external(self):
         linked = self.d / "linked"
         self.git("-C", str(self.repo), "worktree", "add", "--detach", str(linked))
-        for worktree in (self.repo, linked):
+        separate = self.d / "separate"
+        self.git("init", "--separate-git-dir=" + str(self.d / "common"), str(separate))
+        for worktree in (self.repo, linked, separate):
             with mock.patch.object(R.CP, "_external_base", return_value=worktree):
                 before = self.tree()
                 with self.assertRaisesRegex(R.AuthorityError, "authority root.*inside"):
-                    self.register()
+                    self.register(repo=worktree)
                 self.assertEqual(self.tree(), before)
             inside = worktree / "state"
             inside.mkdir()
             with self.assertRaisesRegex(R.AuthorityError, "state-dir.*inside"):
-                self.register(state=inside)
+                self.register(repo=worktree, state=inside)
         self.assertFalse(self.root.exists())
 
     def test_symlinked_root_cannot_enter_worktree(self):
