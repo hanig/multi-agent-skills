@@ -51,12 +51,8 @@ def _plan_id(value):
              "invalid plan_id")
 
 
-def _inside(path, directory):
-    try:
-        path.relative_to(directory)
-        return True
-    except ValueError:
-        return False
+def _key(info):
+    return (info.st_dev, info.st_ino)
 
 
 def _common(checkout, check=True):
@@ -81,19 +77,19 @@ def _identity(checkout, plan_id, state_dir):
         checkout = Path(checkout).absolute()
         state, _, worktrees = CP.resolve_paths(state_dir=state_dir, cwd=checkout)
         root = (CP._external_base(worktrees) / "hanig-authority" / "v1").resolve()
-        _require(not any(_inside(root, wt) for wt in worktrees),
-                 "authority root resolves inside an operated worktree")
         common = _common(checkout)
-        _require(not _inside(root, common.resolve()),
-                 "authority root resolves inside the Git common directory")
-        for path in (root, state, (root / "plans").resolve()):
-            for parent in (path, *path.parents):
-                if parent.is_dir():
-                    other = _common(parent, check=False)
-                    _require(other is None or not other.samefile(common),
-                             "authority/state path is inside operated Git storage")
         repo_fd = os.open(str(common), os.O_RDONLY | os.O_DIRECTORY)
         with store.cleanup(os.close, repo_fd):
+            repo_key = _key(os.fstat(repo_fd))
+            protected = {repo_key} | {_key(wt.stat()) for wt in worktrees if wt.is_dir()}
+            for path in (root, state, (root / "plans").resolve()):
+                for parent in (path, *path.parents):
+                    if parent.is_dir():
+                        # Git identity also covers whitespace paths lost by CP's listing.
+                        other = _common(parent, check=False)
+                        _require(_key(parent.stat()) not in protected and
+                                 (other is None or _key(other.stat()) != repo_key),
+                                 "authority root/state path is inside operated Git storage")
             state_fd = os.open(str(state), os.O_RDONLY | os.O_DIRECTORY)
             with store.cleanup(os.close, state_fd):
                 repo_info, state_info = os.fstat(repo_fd), os.fstat(state_fd)
@@ -200,6 +196,14 @@ def register(checkout, plan_id, state_dir):
             entries = _entries(root)
             existing = _find(entries, identity, state_fd)
             if existing is not None:
+                # A visible entry may follow a failed publication fsync. Confirm
+                # its bytes and every directory link without rewriting anything.
+                fd = os.open(str(root / "registry.json"), os.O_RDONLY | os.O_NOFOLLOW)
+                with store.cleanup(os.close, fd):
+                    os.fsync(fd)
+                directory = Path(existing["record_dir"])
+                for path in (directory, *directory.parents):
+                    store.sync_directory(path)
                 return existing
             rid = uuid.uuid4().hex
             directory = root / "plans" / rid
