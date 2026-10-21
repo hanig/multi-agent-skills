@@ -4,6 +4,7 @@ from contextlib import redirect_stdout
 import hashlib
 import fcntl
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -2305,7 +2306,105 @@ else:
         self.assertTrue(result['quiescent'])
         self.assertFalse(self.stage.exists())
         self.assertEqual(read_json(self.stage.with_name('stage.cleanup.json')), result)
-        self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(2)])
+        self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(4)])
+
+    def test_completing_queue_lag_within_bound_removes_without_cancellation(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=4)
+        waits = []
+
+        def unlocked_wait(seconds):
+            # Exercise both OS locks at every actual wait, including backoff.
+            for path in (self.stage / 'cleanup.lock',
+                         self.stage.with_name('stage.cleanup.lock')):
+                with path.open('a') as handle:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            waits.append(seconds)
+
+        self.sleep.side_effect = unlocked_wait
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(result['cleanup'], 'removed')
+        self.assertTrue(result['quiescent'])
+        self.assertFalse(self.stage.exists())
+        self.assertEqual(result['cancellation_attempts'], [])
+        self.assertNotIn('scancel', [c[0] for c in self.scheduler_calls()])
+        self.assertEqual(waits, [2, 4, 8, 16][:len(waits)])
+        self.assertLessEqual(sum(waits), RV.CLEANUP_REPOLL_BOUND_SECONDS)
+        self.assertEqual(read_json(self.stage.with_name('stage.cleanup.json')), result)
+
+    def test_completing_queue_lag_beyond_bound_retains_stage(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=20)
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(self.sleep.call_args_list,
+                         [mock.call(2), mock.call(4), mock.call(8), mock.call(16)])
+        self.assertEqual(sum(c.args[0] for c in self.sleep.call_args_list),
+                         RV.CLEANUP_REPOLL_BOUND_SECONDS)
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertEqual(result['cleanup_error'], 'job termination unconfirmed; stage retained')
+        self.assertEqual(result['queued_job_ids'], ['321'])
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+        self.assertEqual(result['cancellation_attempts'], [])
+        self.assertNotIn('scancel', [c[0] for c in self.scheduler_calls()])
+        self.assertEqual(read_json(self.stage / 'cleanup.json'), result)
+        # A later retrieval can still reconcile and remove the retained stage.
+        self.configure({'321': 'COMPLETED'})
+        recovered = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(recovered['cleanup'], 'removed')
+        self.assertFalse(self.stage.exists())
+
+    def test_completing_repoll_fits_transport_timeout(self):
+        timeout = inspect.signature(RV.remote_call).parameters['timeout'].default
+        self.assertLessEqual(RV.CLEANUP_REPOLL_BOUND_SECONDS + 10, timeout)
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=8)
+        RV.cleanup(self.stage, self.ack())
+        # Measure the consumer too: an unused constant cannot certify a bound.
+        slept = sum(c.args[0] for c in self.sleep.call_args_list)
+        self.assertLessEqual(slept, RV.CLEANUP_REPOLL_BOUND_SECONDS)
+        self.assertLessEqual(slept + 10, timeout)
+
+    def test_mixed_or_unknown_accounting_keeps_short_repoll(self):
+        for jobs in ({'321': 'COMPLETED', '322': 'RUNNING'},
+                     {'321': 'UNKNOWN'}):
+            with self.subTest(jobs=jobs):
+                self.configure(jobs, stale_queue_reads=20)
+                self.sleep.reset_mock()
+                result = RV.cleanup(self.stage, self.ack())
+                self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(2)])
+                self.assertEqual(result['cleanup'], 'unconfirmed')
+                self.assertFalse(result['quiescent'])
+                self.assertTrue(self.stage.exists())
+
+    def test_completing_repoll_stops_on_unknown_accounting(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=20)
+
+        def during_wait(seconds):
+            if seconds == 4:
+                self.configure({'321': 'UNKNOWN'}, stale_queue_reads=20)
+
+        self.sleep.side_effect = during_wait
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(4)])
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertEqual(result['cleanup_error'], 'job termination unconfirmed; stage retained')
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+        self.assertEqual(len(result['cancellation_attempts']), 1)
+
+    def test_completing_repoll_discovery_error_retains_stage(self):
+        self.configure({'321': 'COMPLETED'}, stale_queue_reads=20)
+
+        def during_wait(seconds):
+            if seconds == 4:
+                self.configure({'321': 'COMPLETED'}, unavailable='squeue')
+
+        self.sleep.side_effect = during_wait
+        result = RV.cleanup(self.stage, self.ack())
+        self.assertEqual(self.sleep.call_args_list, [mock.call(2), mock.call(4)])
+        self.assertEqual(result['cleanup'], 'unconfirmed')
+        self.assertIn('squeue', result['cleanup_error'])
+        self.assertFalse(result['quiescent'])
+        self.assertTrue(self.stage.exists())
+        self.assertNotIn('scancel', [c[0] for c in self.scheduler_calls()])
 
     def test_overlapping_cleanup_during_repoll_reloads_cancellation_history(self):
         self.configure({'321': 'COMPLETED'}, stale_queue_reads=3)
