@@ -187,6 +187,14 @@ class SlurmEvidence(unittest.TestCase):
             self.observation(end_time=base + observed)
             self.obs_check("FAILED" if wins else "DONE", "slurmctld-observed" if wins else "exit-record")
 
+    def test_lowercase_exit_recency(self):
+        self.real_tools()
+        base = time.strftime("%Y-%m-%dT%H:%M:%S",
+                             time.gmtime(U.parse_iso_ts(self.submitted) + 2))
+        self.exit_record(end_time=base.replace("T", "t") + ".900Z")
+        self.observation(job_state="NODE_FAIL", end_time=base + ".100Z")
+        self.obs_check("DONE", "exit-record")
+
     def test_observation_rejections(self):
         self.real_tools()
         self.exit_record()
