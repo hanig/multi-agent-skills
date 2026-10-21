@@ -2297,6 +2297,7 @@ else:
         result = RV.supervise(self.stage)
         self.assertNotIn('error', result)
         self.assertEqual(result['execution']['scheduler_evidence_source'], 'sacct')
+        self.assert_accounting(supervise=True)
 
     def test_ambiguous_controller_paths_fall_back_to_accounting(self):
         self.install_controller()
@@ -2383,6 +2384,7 @@ else:
         self.assertIsNone(result['execution']['scheduler_evidence_source'])
         self.sleep.assert_called_once_with(2)
         self.assertEqual([c[0] for c in self.scheduler_calls()], ['scontrol', 'sacct'] * 3)
+        self.assert_accounting(None, supervise=True)
 
     def test_controller_requires_exact_unambiguous_terminal_job(self):
         self.install_controller()
