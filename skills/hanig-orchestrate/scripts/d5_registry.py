@@ -14,7 +14,7 @@ import re
 import subprocess
 import sys
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 
 import skill_paths
 import d5_authority as authority
@@ -28,7 +28,7 @@ import child_environment as CE
 
 AuthorityError = authority.AuthorityError
 _ENTRY_FIELDS = {"registration_id", "repo_key", "plan_id", "state_key",
-                 "checkout", "git_common_dir", "state_dir", "record_dir"}
+                 "checkout", "git_common_dir", "state_dir", "record_dir", "record_key"}
 
 
 def d5_active():
@@ -69,27 +69,39 @@ def _common(checkout, check=True):
     return common
 
 
+def _worktrees(checkout):
+    raw = subprocess.run(
+        ["git", "-C", str(checkout), "worktree", "list", "--porcelain", "-z"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+        env=CE.child_env(), timeout=30, check=True).stdout
+    return [Path(os.fsdecode(field[9:])) for field in raw.split(b"\0")
+            if field.startswith(b"worktree ")]
+
+
+def _outside(path, protected):
+    path = path.resolve()
+    for parent in (path, *path.parents):
+        info = store.present(parent, "containment")
+        _require(not info or _key(info) not in protected,
+                 "authority root/state path is inside operated Git storage")
+
+
 @contextmanager
 def _identity(checkout, plan_id, state_dir):
     _plan_id(plan_id)
     _require(state_dir is not None, "state_dir is required and must exist")
     try:
         checkout = Path(checkout).absolute()
-        state, _, worktrees = CP.resolve_paths(state_dir=state_dir, cwd=checkout)
-        root = (CP._external_base(worktrees) / "hanig-authority" / "v1").resolve()
+        state, _, _ = CP.resolve_paths(state_dir=state_dir, cwd=checkout)
+        worktrees = _worktrees(checkout)
+        root = CP._external_base(worktrees) / "hanig-authority" / "v1"
         common = _common(checkout)
         repo_fd = os.open(str(common), os.O_RDONLY | os.O_DIRECTORY)
         with store.cleanup(os.close, repo_fd):
             repo_key = _key(os.fstat(repo_fd))
             protected = {repo_key} | {_key(wt.stat()) for wt in worktrees if wt.is_dir()}
-            for path in (root, state, (root / "plans").resolve()):
-                for parent in (path, *path.parents):
-                    if parent.is_dir():
-                        # Git identity also covers whitespace paths lost by CP's listing.
-                        other = _common(parent, check=False)
-                        _require(_key(parent.stat()) not in protected and
-                                 (other is None or _key(other.stat()) != repo_key),
-                                 "authority root/state path is inside operated Git storage")
+            for path in (root, state, root / "plans"):
+                _outside(path, protected)
             state_fd = os.open(str(state), os.O_RDONLY | os.O_DIRECTORY)
             with store.cleanup(os.close, state_fd):
                 repo_info, state_info = os.fstat(repo_fd), os.fstat(state_fd)
@@ -98,7 +110,7 @@ def _identity(checkout, plan_id, state_dir):
                     "plan_id": plan_id,
                     "state_key": [state_info.st_dev, state_info.st_ino],
                     "checkout": str(checkout), "git_common_dir": str(common),
-                    "state_dir": str(state)}, state_fd
+                    "state_dir": str(state)}, state_fd, protected
     except (OSError, subprocess.SubprocessError, CP.PathPolicyError) as exc:
         raise AuthorityError("registry: filesystem/git operation failed; "
                              "durability is unconfirmed: {}".format(exc)) from exc
@@ -135,7 +147,7 @@ def _entries(root):
         _require(type(rid) is str and re.fullmatch(r"[0-9a-f]{32}", rid) is not None,
                  "invalid registration_id")
         _plan_id(entry["plan_id"])
-        for field in ("repo_key", "state_key"):
+        for field in ("repo_key", "state_key", "record_key"):
             key = entry[field]
             _require(type(key) is list and len(key) == 2 and
                      all(type(n) is int and n >= 0 for n in key), "invalid " + field)
@@ -167,11 +179,37 @@ def _find(entries, identity, state_fd):
     return None
 
 
-def _mkdir(path):
-    """Persist each new directory link before publishing any entry using it."""
-    if path == path.parent:
+def _record_key(root, registration_id):
+    """Walk owned directories without following substituted links."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with ExitStack() as stack:
+        fd = os.open(str(root), flags)
+        stack.callback(os.close, fd)
+        for child in (None, "plans", registration_id):
+            if child is not None:
+                fd = os.open(child, flags, dir_fd=fd)
+                stack.callback(os.close, fd)
+            try:
+                os.stat(".git", dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise AuthorityError("authority storage became a Git worktree")
+        return list(_key(os.fstat(fd)))
+
+
+def _check_record(root, entry):
+    _require(_record_key(root, entry["registration_id"]) == entry["record_key"],
+             "record_key mismatch: record directory replaced")
+
+
+def _mkdir(path, base, protected):
+    """Confirm owned links on every attempt, stopping at the external base."""
+    _outside(path, protected)
+    if path == base:
+        path.mkdir(parents=True, exist_ok=True)
         return
-    _mkdir(path.parent)
+    _mkdir(path.parent, base, protected)
     try:
         path.mkdir(mode=0o700)
     except FileExistsError:
@@ -190,27 +228,31 @@ def _locked(root):
 def register(checkout, plan_id, state_dir):
     """Register one (repo object, plan) with one state object, or return it intact."""
     _active()
-    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd):
-        _mkdir(root)
+    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd, protected):
+        base = root.parent.parent
+        _mkdir(root, base, protected)
         with _locked(root):
             entries = _entries(root)
             existing = _find(entries, identity, state_fd)
             if existing is not None:
+                _check_record(root, existing)
                 # A visible entry may follow a failed publication fsync. Confirm
                 # its bytes and every directory link without rewriting anything.
                 fd = os.open(str(root / "registry.json"), os.O_RDONLY | os.O_NOFOLLOW)
                 with store.cleanup(os.close, fd):
                     os.fsync(fd)
                 directory = Path(existing["record_dir"])
-                for path in (directory, *directory.parents):
+                for path in (directory, root / "plans", root, root.parent, base):
                     store.sync_directory(path)
                 return existing
             rid = uuid.uuid4().hex
             directory = root / "plans" / rid
-            _mkdir(directory.parent)
+            _mkdir(directory.parent, base, protected)
+            _outside(directory, protected)
             directory.mkdir(mode=0o700)  # Never reuse a pre-existing record root.
             store.sync_directory(directory.parent)
-            entry = dict(identity, registration_id=rid, record_dir=str(directory))
+            entry = dict(identity, registration_id=rid, record_dir=str(directory),
+                         record_key=_record_key(root, rid))
             raw = (json.dumps({"schema_version": 1, "entries": entries + [entry]},
                               sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
             store.write_bytes(root / "registry.json", raw)
@@ -219,5 +261,8 @@ def register(checkout, plan_id, state_dir):
 
 def lookup(checkout, plan_id, state_dir):
     """Read an atomic registry snapshot; absent registration returns None."""
-    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd):
-        return _find(_entries(root), identity, state_fd)
+    with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd, _):
+        entry = _find(_entries(root), identity, state_fd)
+        if entry is not None:
+            _check_record(root, entry)
+        return entry
