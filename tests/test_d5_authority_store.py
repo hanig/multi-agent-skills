@@ -2,6 +2,7 @@
 import errno
 import fcntl
 import hashlib
+import io
 import json
 import os
 import stat
@@ -82,6 +83,16 @@ class TestD5AuthorityStore(unittest.TestCase):
         for content in ("text", None, bytearray(MANDATE)):
             self.refuses("mandate_bytes", A.check, self.d, 101, content)
         self.stored(grant())
+
+    def test_expired_mismatch_is_persisted(self):
+        self.create()
+        expected = grant()
+        expiry = expected["expires_at"]
+        self.eq(A.check(self.d, expiry, MANDATE), "expired")
+        self.eq(A.check(self.d, expiry + 1, b"changed"), "mandate_changed")
+        self.eq(A.check(self.d, expiry + 2, MANDATE), "invalidated")
+        expected["invalidation"] = records.evaluate(expected, expiry + 1, b"changed")[1]
+        self.stored(expected)
 
 
     def test_interrupted_write(self):
@@ -164,7 +175,12 @@ class TestD5AuthorityStore(unittest.TestCase):
         with self.assertRaises(FileNotFoundError), self.filesystem_refusal():
             A.read(self.d)
         self.create()
-        with mock.patch.object(A.os, "read", side_effect=PermissionError("denied")):
+        real_open = os.open
+        def opening(path, *args, **kwargs):
+            if Path(path) == self.path:
+                raise PermissionError("denied")
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(A.os, "open", side_effect=opening):
             with self.assertRaises(PermissionError), self.filesystem_refusal():
                 A.read(self.d)
         self.stored(grant())
@@ -247,7 +263,7 @@ class TestD5AuthorityStore(unittest.TestCase):
                     def closing(fd):
                         kind = descriptors.pop(fd, None)
                         real_close(fd)
-                        if step == kind + "_close" if kind else False:
+                        if kind is not None and step == kind + "_close":
                             calls.append(step)
                             raise fault
                     def injected(original):
@@ -358,10 +374,14 @@ class TestD5AuthorityStore(unittest.TestCase):
                 primary = OSError(errno.EIO, "primary failure")
                 secondary = OSError(errno.EACCES, "cleanup failure")
                 real_close, real_fsync, real_lstat, fdopen = os.close, os.fsync, os.lstat, os.fdopen
+                path_open = io.open
+                lock_info = (Path(d) / A.LOCK_NAME).stat()
                 def closing(fd):
-                    directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+                    info = os.fstat(fd)
+                    directory = stat.S_ISDIR(info.st_mode)
+                    lock = (info.st_dev, info.st_ino) == (lock_info.st_dev, lock_info.st_ino)
                     real_close(fd)
-                    if directory == (cleanup == "directory_close"):
+                    if (directory and cleanup == "directory_close") or (lock and cleanup == "lock_close"):
                         raise secondary
                 def sync(fd):
                     if stat.S_ISDIR(os.fstat(fd).st_mode):
@@ -371,17 +391,22 @@ class TestD5AuthorityStore(unittest.TestCase):
                     if Path(path).name.startswith(".authority-"):
                         raise secondary
                     return real_lstat(path, *args, **kwargs)
-                def file_open(fd, mode, **kwargs):
-                    handle = fdopen(fd, mode, **kwargs)
+                def wrapped(handle, mode):
                     if mode != ("rb" if cleanup == "read_close" else "wb"):
                         return handle
-                    proxy = mock.Mock(wraps=handle)
+                    proxy = mock.MagicMock(wraps=handle)
+                    proxy.__enter__.return_value = proxy
                     getattr(proxy, "read" if mode == "rb" else "write").side_effect = primary
                     def close():
                         handle.close()
                         raise secondary
                     proxy.close.side_effect = close
+                    proxy.__exit__.side_effect = lambda *args: close()
                     return proxy
+                def file_open(fd, mode, **kwargs):
+                    return wrapped(fdopen(fd, mode, **kwargs), mode)
+                def legacy_open(path, mode="r", *args, **kwargs):
+                    return wrapped(path_open(path, mode, *args, **kwargs), mode)
                 with mock.patch.object(A.os, "close", side_effect=closing) if cleanup in (
                         "directory_close", "lock_close") else mock.patch.object(A.os, "close", wraps=real_close):
                     with mock.patch.object(A.os, "replace", side_effect=primary) if cleanup in (
@@ -392,7 +417,9 @@ class TestD5AuthorityStore(unittest.TestCase):
                                     mock.patch.object(A.os, "lstat", wraps=real_lstat):
                                 with mock.patch.object(A.os, "fsync", side_effect=sync) if cleanup == "directory_close" else \
                                         mock.patch.object(A.os, "fsync", wraps=real_fsync):
-                                    with mock.patch.object(A.os, "fdopen", side_effect=file_open) if cleanup in (
+                                    with mock.patch.object(io, "open", side_effect=legacy_open) if cleanup == "read_close" else \
+                                            mock.patch.object(io, "open", wraps=path_open), \
+                                            mock.patch.object(A.os, "fdopen", side_effect=file_open) if cleanup in (
                                             "file_close", "read_close") else mock.patch.object(A.os, "fdopen", wraps=fdopen):
                                         with self.assertRaises(A.AuthorityError) as caught:
                                             if cleanup == "lock_close":

@@ -1,8 +1,13 @@
-"""Inert D5 storage. Keep authority.lock permanent.
+"""Inert D5 record I/O. Keep authority.lock permanent.
 
 No authority decision is made on unknown filesystem state: a lookup or
-durability failure refuses. At or after replace, durability is unconfirmed
-on failure: the complete old or new record may be visible. Never roll back.
+durability failure refuses. At or after os.replace, durability is unconfirmed
+on failure: the complete old or new record may be visible (create may leave
+no record). Never roll back. A visible mandate_changed invalidation is fail-safe.
+
+Replacement belongs to U1a-2b. A visible replacement has already passed
+replacement_allowed. It carries either fresh owner consent, or re-used consent
+that extends neither expiry nor scope.
 """
 import fcntl
 import os
@@ -11,8 +16,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from d5_authority import (AuthorityError, validate, encode, decode, evaluate,
-                          revoked, replacement_allowed)
+from d5_authority import AuthorityError, validate, encode, decode, evaluate
 
 RECORD_NAME = "authority.json"
 LOCK_NAME = "authority.lock"
@@ -33,45 +37,69 @@ def _present(path, field):
 
 
 @contextmanager
+def _cleanup(action, *args):
+    """Keep the primary error, attaching secondary cleanup errors for diagnosis."""
+    try:
+        yield
+    except BaseException as primary:
+        try:
+            action(*args)
+        except BaseException as secondary:
+            primary.cleanup_errors = getattr(primary, "cleanup_errors", ()) + (secondary,)
+        raise
+    else:
+        action(*args)
+
+
+@contextmanager
 def _locked(directory):
     directory = Path(directory)
     try:
         fd = os.open(str(directory / LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
-        try:
+        with _cleanup(os.close, fd):
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield directory
-        finally:
-            os.close(fd)
     except OSError as exc:
         raise AuthorityError("record: filesystem operation failed; "
                              "durability is unconfirmed: {}".format(exc)) from exc
 
 
+@contextmanager
+def _file(fd, mode):
+    with _cleanup(os.close, fd):
+        handle = os.fdopen(fd, mode, closefd=False)
+        with _cleanup(handle.close):
+            yield handle
+
+
 def _load(path):
-    raw = path.read_bytes()
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with _file(fd, "rb") as handle:
+        _require(stat.S_ISREG(os.fstat(fd).st_mode), "record", "expected regular file")
+        raw = handle.read()
     return decode(raw), raw
 
 
 def _sync_directory(directory):
     fd = os.open(str(directory), os.O_RDONLY)
-    try:
+    with _cleanup(os.close, fd):
         os.fsync(fd)
-    finally:
-        os.close(fd)
+
+
+def _remove_temporary(name):
+    if _present(name, "temporary"):
+        os.unlink(name)
 
 
 def _write(path, raw):
     fd, name = tempfile.mkstemp(prefix=".authority-", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "wb") as handle:
+    with _cleanup(_remove_temporary, name):
+        with _file(fd, "wb") as handle:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(name, str(path))
         _sync_directory(path.parent)
-    finally:
-        if _present(name, "temporary"):
-            os.unlink(name)
 
 
 def _unused_id(directory, record):
@@ -104,37 +132,3 @@ def check(directory, now, mandate_bytes):
             record["invalidation"] = invalidation
             _write(directory / RECORD_NAME, encode(record))
         return state
-
-
-def revoke(directory, now, reason):
-    with _locked(directory) as directory:
-        record, _ = _load(directory / RECORD_NAME)
-        updated = revoked(record, now, reason)
-        if updated != record:
-            _write(directory / RECORD_NAME, encode(updated))
-        return updated
-
-
-def replace(directory, new):
-    raw = encode(new)
-    new = decode(raw)
-    with _locked(directory) as directory:
-        old, old_raw = _load(directory / RECORD_NAME)
-        replacement_allowed(old, new)
-        _unused_id(directory, new)
-        archive = directory / "superseded"
-        try:
-            os.mkdir(archive, 0o700)
-        except FileExistsError:
-            pass
-        info = _present(archive, "superseded")
-        _require(info and stat.S_ISDIR(info.st_mode),
-                 "superseded", "expected directory")
-        _sync_directory(directory)
-        predecessor = archive / (old["grant_id"] + ".json")
-        if _present(predecessor, "superseded"):
-            _require(predecessor.read_bytes() == old_raw, "superseded",
-                     "predecessor archive has different bytes")
-        _write(predecessor, old_raw)
-        _write(directory / RECORD_NAME, raw)
-    return new
