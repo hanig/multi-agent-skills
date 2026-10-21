@@ -603,41 +603,19 @@ class SchedulerState(tuple):
 
 
 def scheduler_state(job):
+    # The controller only improves on accounting: errors, nonterminal states
+    # and lossy field-like path text all retain the legacy sacct fallback.
     try:
-        if not shutil.which("scontrol"):
-            raise FileNotFoundError("scontrol is not installed")
-        for grouped in (False, True):
-            rc, out, err = _command(["scontrol", "show", "job"] +
-                                    ([] if grouped else ["-o"]) + [job])
-            if rc:
-                if any("Invalid job id specified" in text for text in (err, out)):
-                    break
-                return None
-            pattern = r"(?:^|\s)(JobId|JobState|ExitCode)=(\S*)"
-            pairs = re.findall(pattern, out)
-            if grouped:
-                # Native line groups separate scheduler fields from path text.
-                pairs = []
-                groups = {"JobId": "JobId", "JobState": "JobState", "Requeue": "ExitCode"}
-                for line in out.splitlines():
-                    heading = line.lstrip().split("=", 1)[0]
-                    if heading in groups:
-                        if heading == "JobId":
-                            line = line.split(" JobName=", 1)[0]
-                        found = re.findall(pattern, line)
-                        if len(found) != 1 or found[0][0] != groups[heading]:
-                            return None
-                        pairs.extend(found)
+        if shutil.which("scontrol"):
+            rc, out, err = _command(["scontrol", "show", "job", "-o", job])
+            pairs = re.findall(r"(?:^|\s)(JobId|JobState|ExitCode)=(\S*)", out)
             fields = dict(pairs)
-            if len(pairs) == 3 and set(fields) == {"JobId", "JobState", "ExitCode"}:
-                return (SchedulerState(fields["JobState"], fields["ExitCode"], "slurmctld")
-                        if fields["JobId"] == job and fields["JobState"] in TERMINAL else None)
-            if grouped:
-                return None
-    except FileNotFoundError:
-        pass  # Accounting-only installations retain their existing behavior.
+            if (not rc and len(out.splitlines()) == 1 and out.startswith("JobId=")
+                    and len(pairs) == 3 and set(fields) == {"JobId", "JobState", "ExitCode"}
+                    and fields["JobId"] == job and fields["JobState"] in TERMINAL):
+                return SchedulerState(fields["JobState"], fields["ExitCode"], "slurmctld")
     except (OSError, subprocess.SubprocessError):
-        return None
+        pass
     try:
         rc, out, err = _command(["sacct", "-n", "-P", "-j", job,
                                   "--format=JobIDRaw,State%40,ExitCode"])
@@ -814,9 +792,7 @@ def discover_slurm_jobs(request, known=(), stage=None):
             errors.append(source + ": " + str(exc))
     if accounting_unavailable and queue_confirmed and not queued and stage is not None:
         try:
-            # supervise submits once and saves that ID before polling. Its
-            # bound terminal marker plus an empty live queue closes this set;
-            # neither a lost submission response nor partial accounting does.
+            # One recorded submission, finished supervision and an empty queue.
             job = (stage / "job-id").read_text()
             finished = json.loads((stage / "supervision-finished").read_text())
             if (re.fullmatch(r"[0-9]+", job) and isinstance(finished, dict)
