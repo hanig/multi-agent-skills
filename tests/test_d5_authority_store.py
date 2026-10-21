@@ -1,11 +1,11 @@
 """Real temporary grant stores: schema, terminal history and durable transitions."""
-import copy
 import errno
 import fcntl
 import hashlib
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -40,13 +40,6 @@ class TestD5AuthorityStore(unittest.TestCase):
     def stored(self, expected):
         self.eq(A.read(self.d), expected)
 
-    def successor(self, old=None, fresh=False):
-        new = copy.deepcopy(old if old is not None else grant())
-        new["grant_id"] = "b" * 32
-        if fresh:
-            new["confirmation"]["owner_response"] += " fresh"
-            new["invalidation"] = None
-        return new
 
     @contextmanager
     def filesystem_refusal(self, field="record"):
@@ -79,100 +72,22 @@ class TestD5AuthorityStore(unittest.TestCase):
                 self.eq(old["invalidation"]["at"], 102)
                 self.eq(A.check(d, 103, MANDATE), "invalidated")
                 self.eq(A.check(d, 104, content), "invalidated")
-                self.eq(A.revoke(d, 105, "later"), old)
                 self.eq(A.read(d), old)
 
-    def test_revoke_and_expired_mismatch(self):
-        self.create()
-        old = A.revoke(self.d, 102, "  owner said stop\n")
-        self.eq(old["invalidation"],
-                        {"at": 102, "kind": "revoked", "reason": "  owner said stop\n"})
-        self.eq(A.revoke(self.d, 103, "again"), old)
-        self.eq(A.check(self.d, 86501, b"changed"), "invalidated")
-        with tempfile.TemporaryDirectory() as d:
-            A.create(d, grant())
-            self.eq(A.check(d, 86501, b"changed"), "mandate_changed")
 
     def test_argument_refusals(self):
         self.create()
         for now in (True, 1.0, "101", None, 0, -1, 2**63, 1 << 16384):
             self.refuses("now", A.check, self.d, now, MANDATE)
-            self.refuses("now", A.revoke, self.d, now, "stop")
         for content in ("text", None, bytearray(MANDATE)):
             self.refuses("mandate_bytes", A.check, self.d, 101, content)
-        for reason in ("", None, 1):
-            self.refuses("reason", A.revoke, self.d, 101, reason)
         self.stored(grant())
 
-    def test_expansion_needs_consent(self):
-        self.create()
-        new = self.successor()
-        new["issued_at"] += 1
-        new["expires_at"] += 1
-        self.refuses("expires_at", A.replace, self.d, new)
-        for key in grant()["scope"]:
-            new = self.successor()
-            new["scope"][key].append("additional")
-            self.refuses("scope." + key, A.replace, self.d, new)
-        self.stored(grant())
-        new = self.successor(fresh=True)
-        new["issued_at"] += 1
-        new["expires_at"] += 1
-        for values in new["scope"].values():
-            values.append("additional")
-        self.eq(A.replace(self.d, new), new)
-
-    def test_same_id_refused(self):
-        self.create()
-        self.refuses("grant_id", A.replace, self.d, grant())
-        A.revoke(self.d, 101, "stop")
-        new = grant()
-        new["confirmation"]["owner_response"] += " new"
-        self.refuses("grant_id", A.replace, self.d, new)
-        self.assertIsNotNone(A.read(self.d)["invalidation"])
-
-    def test_terminal_archive(self):
-        self.create()
-        A.check(self.d, 101, b"changed")
-        old = A.read(self.d)
-
-        raw = json.dumps(old, indent=4).encode() + b" \n"
-        self.path.write_bytes(raw)
-        self.refuses("confirmation", A.replace, self.d, self.successor(old))
-        new = self.successor(old, fresh=True)
-        self.eq(A.replace(self.d, new), new)
-        archive = self.d / "superseded" / (old["grant_id"] + ".json")
-        self.eq(archive.read_bytes(), raw)
-        self.eq(json.loads(archive.read_bytes())["invalidation"], old["invalidation"])
-        self.eq(A.check(self.d, 102, MANDATE), "valid")
-        recycled = grant()
-        recycled["confirmation"]["owner_response"] += " new again"
-        self.refuses("grant_id", A.replace, self.d, recycled)
-        self.path.unlink()
-        self.refuses("grant_id", A.create, self.d, recycled)
-        self.eq(archive.read_bytes(), raw)
-
-    def test_fresh_consent_clear(self):
-        self.create()
-        new = self.successor(fresh=True)
-        new["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
-        self.refuses("invalidation", A.replace, self.d, new)
-
-    def test_archive_conflict(self):
-        self.create()
-        archive = self.d / "superseded"
-        archive.mkdir()
-        prior = archive / ("a" * 32 + ".json")
-        prior.write_bytes(b"different")
-        self.refuses("superseded", A.replace, self.d, self.successor())
-        self.stored(grant())
-        self.eq(prior.read_bytes(), b"different")
 
     def test_interrupted_write(self):
         self.create()
         old_raw = self.path.read_bytes()
-        for op in (lambda: A.revoke(self.d, 101, "stop"),
-                        lambda: A.check(self.d, 101, b"changed")):
+        for op in (lambda: A.check(self.d, 101, b"changed"),):
             with mock.patch.object(A.os, "replace", side_effect=OSError("injected before replace")):
                 with self.assertRaisesRegex(OSError, "injected"), self.filesystem_refusal():
                     op()
@@ -180,42 +95,6 @@ class TestD5AuthorityStore(unittest.TestCase):
             self.stored(grant())
             self.eq(list(self.d.glob(".authority-*")), [])
 
-    def test_replacement_retry(self):
-        self.create()
-        old_raw = self.path.read_bytes()
-        replace = os.replace
-        def fail_head(src, dst):
-            if Path(dst) == self.path:
-                raise OSError("head interrupted")
-            return replace(src, dst)
-        with mock.patch.object(A.os, "replace", side_effect=OSError("archive interrupted")):
-            with self.assertRaisesRegex(OSError, "archive interrupted"), self.filesystem_refusal():
-                A.replace(self.d, self.successor())
-        self.stored(grant())
-        with mock.patch.object(A.os, "replace", side_effect=fail_head):
-            with self.assertRaisesRegex(OSError, "head interrupted"), self.filesystem_refusal():
-                A.replace(self.d, self.successor())
-        self.stored(grant())
-        archive = self.d / "superseded" / ("a" * 32 + ".json")
-        self.eq(archive.read_bytes(), old_raw)
-        self.eq(A.replace(self.d, self.successor()), self.successor())
-        self.eq(archive.read_bytes(), old_raw)
-
-    def test_archive_fsync_retry(self):
-        self.create()
-        sync = A._sync_directory
-        def fail_archive(path):
-            if path.name == "superseded":
-                raise OSError("archive fsync failed")
-            return sync(path)
-        with mock.patch.object(A, "_sync_directory", side_effect=fail_archive):
-            with self.assertRaisesRegex(OSError, "archive fsync failed"), self.filesystem_refusal():
-                A.replace(self.d, self.successor())
-        self.stored(grant())
-        with mock.patch.object(A.os, "replace", wraps=A.os.replace) as install:
-            A.replace(self.d, self.successor())
-        self.eq([Path(call.args[1]).parent for call in install.call_args_list],
-                        [self.d / "superseded", self.d])
 
     def test_corrupt_reads_refuse(self):
         r = grant()
@@ -226,9 +105,7 @@ class TestD5AuthorityStore(unittest.TestCase):
                     json.dumps(r).encode(), duplicate.encode()):
             self.path.write_bytes(raw)
             for op in (lambda: A.read(self.d),
-                            lambda: A.check(self.d, 101, MANDATE),
-                            lambda: A.revoke(self.d, 101, "stop"),
-                            lambda: A.replace(self.d, self.successor())):
+                            lambda: A.check(self.d, 101, MANDATE)):
                 with self.assertRaises(A.AuthorityError):
                     op()
             self.eq(self.path.read_bytes(), raw)
@@ -236,9 +113,7 @@ class TestD5AuthorityStore(unittest.TestCase):
     def test_target_directory_is_input(self):
         missing = self.d / "not-created"
         for op in (lambda: A.create(missing, grant()), lambda: A.read(missing),
-                        lambda: A.check(missing, 101, MANDATE),
-                        lambda: A.revoke(missing, 101, "stop"),
-                        lambda: A.replace(missing, self.successor())):
+                        lambda: A.check(missing, 101, MANDATE)):
             with self.assertRaises(FileNotFoundError), self.filesystem_refusal():
                 op()
             self.assertFalse(missing.exists())
@@ -263,38 +138,10 @@ class TestD5AuthorityStore(unittest.TestCase):
                 mock.patch.object(A.os, "replace", side_effect=install):
             self.create()
             A.check(self.d, 101, b"changed")
-            A.replace(self.d, self.successor(fresh=True))
-            A.revoke(self.d, 102, "stop")
-        self.eq(events.count("replace"), 5)
+        self.eq(events.count("replace"), 2)
         for index, event in enumerate(events):
             if event == "replace":
                 self.eq(events[index - 1:index + 2], ["file", "replace", "directory"])
-
-    def test_reused_consent_invalidated(self):
-        self.create()
-        new = self.successor()
-        new["invalidation"] = {"at": 101, "kind": "revoked", "reason": "stop"}
-        self.eq(A.replace(self.d, new), new)
-        self.eq(A.check(self.d, 102, MANDATE), "invalidated")
-        self.stored(new)
-
-    def test_retired_id_lookup_error(self):
-        self.create()
-        A.revoke(self.d, 101, "stop")
-        A.replace(self.d, self.successor(fresh=True))
-        prior = self.d / "superseded" / ("a" * 32 + ".json")
-        raw = prior.read_bytes()
-        self.path.unlink()
-        lstat = os.lstat
-        def denied(path, *args, **kwargs):
-            if Path(path) == prior:
-                raise PermissionError("archive lookup denied")
-            return lstat(path, *args, **kwargs)
-        with mock.patch.object(A.os, "lstat", side_effect=denied):
-            with self.assertRaises(PermissionError), self.filesystem_refusal("grant_id"):
-                A.create(self.d, grant())
-        self.assertFalse(self.path.exists())
-        self.eq(prior.read_bytes(), raw)
 
 
     def test_present_classification(self):
@@ -312,22 +159,47 @@ class TestD5AuthorityStore(unittest.TestCase):
         self.assertTrue(A._present(self.path, "probe"))
         self.assertTrue(A._present(self.d, "probe"))
 
+
+    def test_missing_and_unreadable_are_distinct(self):
+        with self.assertRaises(FileNotFoundError), self.filesystem_refusal():
+            A.read(self.d)
+        self.create()
+        with mock.patch.object(A.os, "read", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError), self.filesystem_refusal():
+                A.read(self.d)
+        self.stored(grant())
+
+
+    def test_retired_id_lookup_error(self):
+        archive = self.d / "superseded"
+        archive.mkdir()
+        prior = archive / ("a" * 32 + ".json")
+        raw = records.encode(records.revoked(grant(), 101, "stop"))
+        prior.write_bytes(raw)
+        real = os.lstat
+        def denied(path, *args, **kwargs):
+            if Path(path).parent == archive:
+                raise PermissionError(errno.EACCES, "archive lookup denied")
+            return real(path, *args, **kwargs)
+        for identifier in ("a" * 32, "b" * 32):
+            with self.subTest(identifier=identifier):
+                record = grant()
+                record["grant_id"] = identifier
+                with mock.patch.object(A.os, "lstat", side_effect=denied):
+                    with self.assertRaises(PermissionError), self.filesystem_refusal("grant_id"):
+                        A.create(self.d, record)
+                self.assertFalse(self.path.exists())
+                self.eq(prior.read_bytes(), raw)
+        self.refuses("grant_id", A.create, self.d, grant())
+
     def test_lookup_routing(self):
-        sites = ("record", "grant_id", "archive_directory", "superseded", "temporary")
-        for site in sites:
+        for site in ("record", "grant_id", "temporary"):
             for number in (errno.ENOENT, errno.EACCES):
                 with self.subTest(site=site, errno=number), tempfile.TemporaryDirectory() as d:
                     directory = Path(d)
-                    if site in ("archive_directory", "superseded"):
-                        A.create(d, grant())
                     target = directory / "superseded" / ("a" * 32 + ".json")
                     if site == "record":
                         target = directory / A.RECORD_NAME
-                    elif site == "archive_directory":
-                        target = directory / "superseded"
-                    replacing = site in ("archive_directory", "superseded")
-                    operation = A.replace if replacing else A.create
-                    expected = self.successor() if replacing else grant()
                     real = os.lstat
                     fault = OSError(number, "lookup")
                     def lookup(path, *args, **kwargs):
@@ -336,94 +208,205 @@ class TestD5AuthorityStore(unittest.TestCase):
                         if match:
                             raise fault
                         return real(path, *args, **kwargs)
-                    field = "superseded" if site == "archive_directory" else site
                     with mock.patch.object(A.os, "lstat", side_effect=lookup):
                         if number == errno.EACCES:
-                            with self.assertRaisesRegex(A.AuthorityError, field) as caught:
-                                operation(d, expected)
+                            with self.assertRaisesRegex(A.AuthorityError, site) as caught:
+                                A.create(d, grant())
                             self.assertIs(caught.exception.__cause__, fault)
                             self.assertIn("durability is unconfirmed", str(caught.exception))
-                        elif site == "archive_directory":
-                            self.refuses(field, operation, d, expected)
                         else:
-                            self.eq(operation(d, expected), expected)
+                            self.eq(A.create(d, grant()), grant())
 
     def test_durability_faults(self):
-        cases = [("open", 1), ("flock", 1), ("mkdir", 1)]
-        for step in ("mkstemp", "write", "flush", "replace", "replace_after"):
-            cases.extend((step, occurrence) for occurrence in (1, 2))
-        # Parent directory, archive file/directory, current file/directory.
-        cases.extend(("fsync", occurrence) for occurrence in range(1, 6))
-        for step, occurrence in cases:
-            with self.subTest(step=step, occurrence=occurrence), tempfile.TemporaryDirectory() as d:
-                A.create(d, grant())
-                (Path(d) / "superseded").mkdir()
-                current = Path(d) / A.RECORD_NAME
-                old_raw = current.read_bytes()
-                fault = OSError(errno.EIO, "durability")
-                owner = A.fcntl if step == "flock" else A.os
-                if step == "mkstemp":
-                    owner = A.tempfile
-                name = "replace" if step == "replace_after" else step
-                calls = []
-                def injected(original):
-                    def call(*args, **kwargs):
-                        calls.append(args)
-                        if len(calls) == occurrence:
+        steps = ("lock_open", "flock", "mkstemp", "fdopen", "write", "flush",
+                 "file_fsync", "file_close", "replace", "replace_after",
+                 "directory_open", "directory_fsync", "directory_close", "lock_close")
+        for operation in ("create", "check"):
+            for step in steps:
+                with self.subTest(operation=operation, step=step), tempfile.TemporaryDirectory() as d:
+                    current = Path(d) / A.RECORD_NAME
+                    old = None
+                    new = grant()
+                    if operation == "check":
+                        A.create(d, grant())
+                        old = current.read_bytes()
+                        new["invalidation"] = records.evaluate(new, 101, b"changed")[1]
+                    fault = OSError(errno.EIO, "durability")
+                    calls = []
+                    real_open, real_close = os.open, os.close
+                    descriptors = {}
+                    def opening(path, flags, *args, **kwargs):
+                        kind = "lock" if Path(path).name == A.LOCK_NAME else "directory"
+                        if step == kind + "_open" and (kind == "lock" or Path(path) == Path(d)):
+                            calls.append(step)
+                            raise fault
+                        fd = real_open(path, flags, *args, **kwargs)
+                        if kind == "lock" or Path(path) == Path(d):
+                            descriptors[fd] = kind
+                        return fd
+                    def closing(fd):
+                        kind = descriptors.pop(fd, None)
+                        real_close(fd)
+                        if step == kind + "_close" if kind else False:
+                            calls.append(step)
+                            raise fault
+                    def injected(original):
+                        def call(*args, **kwargs):
+                            calls.append(step)
                             if step == "replace_after":
                                 original(*args, **kwargs)
                             raise fault
-                        return original(*args, **kwargs)
-                    return call
-                if step in ("write", "flush"):
-                    name = "fdopen"
-                    fdopen = os.fdopen
-                    @contextmanager
-                    def effect(*args, **kwargs):
-                        with fdopen(*args, **kwargs) as handle:
+                        return call
+                    owner, name = A.os, "replace"
+                    effect = None
+                    if step == "flock":
+                        owner, name = A.fcntl, "flock"
+                    elif step == "mkstemp":
+                        owner, name = A.tempfile, "mkstemp"
+                    elif step in ("fdopen", "write", "flush", "file_close"):
+                        name = "fdopen"
+                        fdopen = os.fdopen
+                        def file_open(fd, mode, **kwargs):
+                            handle = fdopen(fd, mode, **kwargs)
+                            if mode != "wb":
+                                return handle
+                            if step == "fdopen":
+                                handle.close()
+                                calls.append(step)
+                                raise fault
                             proxy = mock.Mock(wraps=handle)
-                            getattr(proxy, step).side_effect = injected(getattr(handle, step))
-                            yield proxy
-                else:
-                    effect = injected(getattr(owner, name))
-                with mock.patch.object(owner, name, side_effect=effect):
-                    with self.assertRaisesRegex(A.AuthorityError, "record") as caught:
-                        A.replace(d, self.successor())
-                self.assertIs(caught.exception.__cause__, fault)
-                self.eq(len(calls), occurrence)
-                uncertain = (step in ("replace", "replace_after") and occurrence == 2
-                             or step == "fsync" and occurrence == 5)
-                if uncertain:
-                    self.assertIn("durability is unconfirmed", str(caught.exception))
-                    self.assertIn(A.read(d), [grant(), self.successor()])
-                else:
-                    self.eq(current.read_bytes(), old_raw)
-                    self.eq(A.read(d), grant())
+                            if step == "file_close":
+                                def close():
+                                    handle.close()
+                                    calls.append(step)
+                                    raise fault
+                                proxy.close.side_effect = close
+                            else:
+                                getattr(proxy, step).side_effect = injected(getattr(handle, step))
+                            return proxy
+                        effect = file_open
+                    elif step in ("file_fsync", "directory_fsync"):
+                        name = "fsync"
+                        fsync = os.fsync
+                        def sync(fd):
+                            directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+                            if directory == (step == "directory_fsync"):
+                                calls.append(step)
+                                raise fault
+                            return fsync(fd)
+                        effect = sync
+                    elif step.endswith("_open") or step in ("directory_close", "lock_close"):
+                        name = "fstat"  # open/close hooks below inject these faults.
+                        effect = os.fstat
+                    effect = effect or injected(getattr(owner, name))
+                    with mock.patch.object(A.os, "open", side_effect=opening), \
+                            mock.patch.object(A.os, "close", side_effect=closing), \
+                            mock.patch.object(owner, name, side_effect=effect):
+                        with self.assertRaisesRegex(A.AuthorityError, "record") as caught:
+                            if operation == "create":
+                                A.create(d, grant())
+                            else:
+                                A.check(d, 101, b"changed")
+                    self.assertIs(caught.exception.__cause__, fault)
+                    self.eq(calls, [step])
+                    after = step in ("replace", "replace_after", "directory_open",
+                                     "directory_fsync", "directory_close", "lock_close")
+                    if after:
+                        self.assertIn("durability is unconfirmed", str(caught.exception))
+                        visible = A.read(d) if current.exists() else None
+                        self.assertIn(visible, [grant() if old else None, new])
+                    elif old is not None:
+                        self.eq(current.read_bytes(), old)
+                        self.eq(A.read(d), grant())
+                    else:
+                        self.assertFalse(current.exists())
 
-    def test_missing_and_unreadable_are_distinct(self):
-        with self.assertRaises(FileNotFoundError), self.filesystem_refusal():
-            A.read(self.d)
-        self.create()
-        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
-            with self.assertRaises(PermissionError), self.filesystem_refusal():
-                A.read(self.d)
-        self.stored(grant())
+    def test_nonregular_reads_refuse_promptly(self):
+        script = (
+            "import sys; from tests.test_d5_authority_store import A, MANDATE\n"
+            "try:\n"
+            " (A.read(sys.argv[1]) if sys.argv[2] == 'read' "
+            "else A.check(sys.argv[1], 101, MANDATE))\n"
+            "except A.AuthorityError as exc:\n"
+            " assert 'record' in str(exc), str(exc)\n"
+            "else:\n"
+            " raise AssertionError('accepted non-regular record')\n"
+        )
+        for kind in ("fifo", "directory", "symlink", "dangling"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as d:
+                path = Path(d) / A.RECORD_NAME
+                if kind == "fifo":
+                    os.mkfifo(path)
+                elif kind == "directory":
+                    path.mkdir()
+                else:
+                    target = Path(d) / "target"
+                    if kind == "symlink":
+                        target.write_bytes(records.encode(grant()))
+                    path.symlink_to(target)
+                for operation in ("read", "check"):
+                    with self.subTest(operation=operation):
+                        result = subprocess.run([sys.executable, "-c", script, d, operation],
+                                                cwd=str(ROOT), capture_output=True,
+                                                text=True, timeout=2)
+                        self.eq(result.returncode, 0, result.stdout + result.stderr)
 
-    @unittest.skipIf(os.geteuid() == 0, "root bypasses search permissions")
-    def test_retired_id_unsearchable_archive(self):
-        self.create()
-        old = A.revoke(self.d, 101, "stop")
-        A.replace(self.d, self.successor(fresh=True))
-        self.path.unlink()
-        archive = self.d / "superseded"
-        archive.chmod(0o200)
-        try:
-            with self.assertRaises(PermissionError), self.filesystem_refusal("grant_id"):
-                A.create(self.d, grant())
-            self.assertFalse(self.path.exists())
-        finally:
-            archive.chmod(0o700)
-        self.eq(json.loads((archive / ("a" * 32 + ".json")).read_bytes()), old)
+    def test_cleanup_preserves_primary_failure(self):
+        for cleanup in ("unlink", "lookup", "directory_close", "file_close", "read_close", "lock_close"):
+            with self.subTest(cleanup=cleanup), tempfile.TemporaryDirectory() as d:
+                A.create(d, grant())
+                primary = OSError(errno.EIO, "primary failure")
+                secondary = OSError(errno.EACCES, "cleanup failure")
+                real_close, real_fsync, real_lstat, fdopen = os.close, os.fsync, os.lstat, os.fdopen
+                def closing(fd):
+                    directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+                    real_close(fd)
+                    if directory == (cleanup == "directory_close"):
+                        raise secondary
+                def sync(fd):
+                    if stat.S_ISDIR(os.fstat(fd).st_mode):
+                        raise primary
+                    return real_fsync(fd)
+                def lookup(path, *args, **kwargs):
+                    if Path(path).name.startswith(".authority-"):
+                        raise secondary
+                    return real_lstat(path, *args, **kwargs)
+                def file_open(fd, mode, **kwargs):
+                    handle = fdopen(fd, mode, **kwargs)
+                    if mode != ("rb" if cleanup == "read_close" else "wb"):
+                        return handle
+                    proxy = mock.Mock(wraps=handle)
+                    getattr(proxy, "read" if mode == "rb" else "write").side_effect = primary
+                    def close():
+                        handle.close()
+                        raise secondary
+                    proxy.close.side_effect = close
+                    return proxy
+                with mock.patch.object(A.os, "close", side_effect=closing) if cleanup in (
+                        "directory_close", "lock_close") else mock.patch.object(A.os, "close", wraps=real_close):
+                    with mock.patch.object(A.os, "replace", side_effect=primary) if cleanup in (
+                            "unlink", "lookup") else mock.patch.object(A.os, "replace", wraps=os.replace):
+                        with mock.patch.object(A.os, "unlink", side_effect=secondary) if cleanup == "unlink" else \
+                                mock.patch.object(A.os, "unlink", wraps=os.unlink):
+                            with mock.patch.object(A.os, "lstat", side_effect=lookup) if cleanup == "lookup" else \
+                                    mock.patch.object(A.os, "lstat", wraps=real_lstat):
+                                with mock.patch.object(A.os, "fsync", side_effect=sync) if cleanup == "directory_close" else \
+                                        mock.patch.object(A.os, "fsync", wraps=real_fsync):
+                                    with mock.patch.object(A.os, "fdopen", side_effect=file_open) if cleanup in (
+                                            "file_close", "read_close") else mock.patch.object(A.os, "fdopen", wraps=fdopen):
+                                        with self.assertRaises(A.AuthorityError) as caught:
+                                            if cleanup == "lock_close":
+                                                A.check(d, True, MANDATE)
+                                            else:
+                                                A.check(d, 101, b"changed")
+                error = caught.exception
+                if cleanup == "lock_close":
+                    self.assertIn("now", str(error))
+                else:
+                    self.assertIs(error.__cause__, primary)
+                    error = primary
+                attached = error.cleanup_errors[0]
+                self.assertIs(attached.__cause__ if cleanup == "lookup" else attached, secondary)
 
 
 if __name__ == "__main__":
