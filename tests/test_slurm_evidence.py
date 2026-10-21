@@ -149,9 +149,16 @@ class SlurmEvidence(unittest.TestCase):
     def test_observation_precedence(self):
         self.real_tools()
         self.stub("sacct", "import sys; sys.exit('accounting down')")
-        for state, result in (("FAILED", "FAILED"), ("PREEMPTED", "PREEMPTED")):
+        for state in ("FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
+                      "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE"):
+            result = "PREEMPTED" if state == "PREEMPTED" else "FAILED"
             self.observation(job_state=state)
-            self.obs_check(result, "slurmctld-observed")
+            for status in (None, 1):
+                if status is not None:
+                    self.exit_record(exit_status=status)
+                receipt = self.obs_check(result, "slurmctld-observed")
+                self.assertTrue(any("state " + state in n for n in receipt["notes"]))
+            (self.attempt / U.SLURM_EXIT_RECORD).unlink()
         self.assertTrue(U.SACCT_UNAVAILABLE)
         for live, recorded, result in (("RUNNING", "FAILED", "RUNNING"),
                                        ("FAILED", "COMPLETED", "FAILED"), ("COMPLETED", "FAILED", "DONE")):
@@ -159,6 +166,8 @@ class SlurmEvidence(unittest.TestCase):
             self.observation(job_state=recorded)
             self.obs_check(result, "slurmctld")
         self.stub("scontrol", "import sys; sys.exit('controller down')")
+        self.obs_check("INCOMPLETE", None)
+        (self.bin / "scontrol").unlink()
         self.obs_check("INCOMPLETE", None)
         self.stub("scontrol", "import sys; sys.exit('Invalid job id specified')")
         U.SACCT_UNAVAILABLE = False  # Next coordinator pass retries accounting.
@@ -169,31 +178,19 @@ class SlurmEvidence(unittest.TestCase):
         self.stub("sacct", "print(%r)" % self.accounting(state=""))
         self.obs_check("INCOMPLETE", None)
 
-    def test_observation_recency(self):
+    def test_observation_conflict(self):
         self.real_tools()
-        for delta, expected, source in ((-1, "DONE", "exit-record"),
-                (0, "DONE", "exit-record"), (1, "FAILED", "slurmctld-observed")):
-            self.exit_record(end_time=self.submitted)
-            ended = time.strftime("%Y-%m-%dT%H:%M:%S%z",
-                                  time.localtime(U.parse_iso_ts(self.submitted) + delta))
-            self.observation(end_time=ended)
-            self.obs_check(expected, source)
         base = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(U.parse_iso_ts(self.submitted) + 2))
-        for exited, observed, wins in ((".100Z", ".900Z", True), ("Z", ".900Z", True),
-                (".900Z", ".100Z", False), (".10Z", ".1+0000", False),
-                (".100000000000000001Z", ".100000000000000009Z", True),
-                (".2Z", ".9+00:00:00.8", False)):
+        for exited, observed in ((".100Z", ".900Z"), (".900Z", ".100Z"), ("Z", "Z")):
             self.exit_record(end_time=base + exited)
             self.observation(end_time=base + observed)
-            self.obs_check("FAILED" if wins else "DONE", "slurmctld-observed" if wins else "exit-record")
-
-    def test_lowercase_exit_recency(self):
-        self.real_tools()
-        base = time.strftime("%Y-%m-%dT%H:%M:%S",
-                             time.gmtime(U.parse_iso_ts(self.submitted) + 2))
+            receipt = self.obs_check("INCOMPLETE", None)
+            self.assertIn("conflict", " ".join(receipt["notes"]))
         self.exit_record(end_time=base.replace("T", "t") + ".900Z")
         self.observation(job_state="NODE_FAIL", end_time=base + ".100Z")
-        self.obs_check("DONE", "exit-record")
+        self.assertIn("conflict", " ".join(self.obs_check("INCOMPLETE", None)["notes"]))
+        self.stub("sacct", "print(%r)" % self.accounting())
+        self.obs_check("DONE", "sacct")
 
     def test_observation_rejections(self):
         self.real_tools()
@@ -201,6 +198,8 @@ class SlurmEvidence(unittest.TestCase):
         for change in ({"job_id": "43"}, {"unit_id": "other"}, {"attempt_id": "other"},
                        {"submit_time": "2000-01-01T00:00:00Z"}, {"submit_time": "2099-01-01T00:00:00Z"},
                        {"job_state": "RUNNING"}, {"job_state": "COMPLETED"}, {"job_state": []},
+                       {"job_state": "REVOKED"}, {"job_state": "SPECIAL_EXIT"},
+                       {"job_state": "REQUEUED"}, {"job_state": "RESIZING"}, {"job_state": "SUSPENDED"},
                        {"submit_time": "not-a-date"}, {"submit_time": []},
                        {"end_time": "not-a-date"}, {"end_time": []}, {"schema_version": True},
                        {"source": "exit-record"}, {"exit_code": ""}, {"extra": 1}):
@@ -209,10 +208,21 @@ class SlurmEvidence(unittest.TestCase):
                 receipt = self.obs_check("DONE", "exit-record")
                 self.assertIn("controller observation ignored:", " ".join(receipt["notes"]))
         path = self.observation()
-        for malformed in ('{', '[]', '{}', '[' * 10000 + ']' * 10000):
+        for malformed in ('{', 'null', 'true', '42', '"text"', '[]', '{}',
+                          '[' * 10000 + ']' * 10000, path.read_text() + ' ' * 65536):
             path.write_text(malformed)
             receipt = self.obs_check("DONE", "exit-record")
             self.assertIn("controller observation ignored:", " ".join(receipt["notes"]))
+        row = json.loads(self.observation().read_text())
+        for key in row:
+            for value in (None, [], {}, 42, False, ""):
+                bad = dict(row, **{key: value})
+                if value is None:
+                    del bad[key]
+                path.write_text(json.dumps(bad))
+                self.assertIn("controller observation ignored:",
+                              " ".join(self.obs_check("DONE", "exit-record")["notes"]))
+        path.unlink()
         self.obs_check("DONE", "exit-record")
         (self.attempt / U.SLURM_EXIT_RECORD).unlink()
         self.observation(job_state="COMPLETED", exit_code="0:0")

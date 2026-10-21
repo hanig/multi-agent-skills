@@ -25,7 +25,12 @@ process attribution nor scientific correctness.
   controller absence admits FAILED, CANCELLED,
   TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, BOOT_FAIL, DEADLINE observations
   with matching job/unit/attempt and submit bounds. Note/ignore malformed
-  records/times and COMPLETED. Later valid observation/exit end wins; exit wins ties.
+  records/times and COMPLETED. A valid observation conflicting with authorized exit success
+  means INCOMPLETE with a note, regardless of end times.
+  Otherwise observation decides. This tier applies only where scontrol answers;
+  Errors or missing executables cannot establish absence.
+  Conflict INCOMPLETE is transient: sacct decides once slurmdbd returns.
+  An unobserved later incarnation without an exit record is not detected.
 3. If accounting selects no owned row, an authorized exit record may supply
   the last fallback. An owned row, even one with a missing state, blocks this
   weaker evidence. Unowned historical rows neither certify nor veto it.

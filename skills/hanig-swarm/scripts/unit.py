@@ -70,7 +70,6 @@ Python 3.8+, stdlib only, login-node safe. No network.
 
 import argparse
 import calendar
-import decimal
 import hashlib
 import json
 import os
@@ -754,7 +753,7 @@ def scontrol_state(job_id, declared_at, bound_at, newest, notes):
     return (state, fields.get("ExitCode"), submit, None), False
 
 
-def slurm_exit_state(unit_dir, job_id, declared_at, notes, end_out=None):
+def slurm_exit_state(unit_dir, job_id, declared_at, notes):
     """A wrapper attestation is admissible only after positive queue absence.
 
     This is weaker than scheduler evidence: trusted writers can alter it,
@@ -784,27 +783,8 @@ def slurm_exit_state(unit_dir, job_id, declared_at, notes, end_out=None):
         return empty
     notes.append("exit-record: job wrapper attestation, not scheduler evidence; "
                  "a later unobserved requeue may be missed")
-    if end_out is not None:
-        end_out.append(slurm_end_time(record["end_time"]))
     return ("COMPLETED" if status == 0 else "FAILED",
             str(status) + ":0", None, None)
-
-
-def slurm_end_time(value):
-    """Order admitted times without dropping seconds or offset fractions."""
-    seconds = parse_iso_ts(value)
-    if seconds is None:
-        return None
-    fraction = re.search(r"[T ]\d{2}:\d{2}:\d{2}\.(\d+)", value)
-    offset = re.search(r"([+-])\d{2}:?\d{2}:?\d{2}\.(\d+)$", value.strip())
-    with decimal.localcontext() as context:
-        context.prec = len(value) + 20
-        result = decimal.Decimal(seconds)
-        if fraction:
-            result += decimal.Decimal("0." + fraction.group(1))
-        if offset:
-            result -= decimal.Decimal(offset.group(1) + "0." + offset.group(2))
-        return result
 
 
 def controller_observation_path(path, unit_dir):
@@ -824,10 +804,16 @@ def controller_observation_path(path, unit_dir):
 def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
     empty = (None, None, None, None)
     path, error = controller_observation_path(path, unit_dir)
-    try:
-        row, err = read_json(path) if path is not None else (None, error)
-    except RecursionError:
-        row, err = None, "JSON nesting limit"
+    row, err = None, error
+    if path is not None:
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(65537)
+            if len(raw) > 65536:
+                raise ValueError("observation too large")
+            row = json.loads(raw)
+        except (OSError, ValueError, RecursionError) as exc:
+            err = str(exc)
     fields = {"schema_version", "unit_id", "attempt_id", "job_id", "job_state",
               "exit_code", "submit_time", "end_time", "observed_at", "source"}
     if (not err and isinstance(row, dict) and set(row) == fields
@@ -839,11 +825,11 @@ def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
             and row["unit_id"] == spec.get("task_id")
             and row["attempt_id"] == spec.get("attempt_id") == Path(unit_dir).name
             and sacct_row_is_ours(parse_iso_ts(row["submit_time"]), declared_at, bound_at)[0]
-            and slurm_end_time(row["end_time"]) is not None
+            and parse_iso_ts(row["end_time"]) is not None
             and row["job_state"] in (SLURM_FAILED - {"REVOKED", "SPECIAL_EXIT"}) | {"PREEMPTED"}):
-        return (row["job_state"], row["exit_code"], row["submit_time"], None), slurm_end_time(row["end_time"])
+        return row["job_state"], row["exit_code"], row["submit_time"], None
     notes.append("controller observation ignored: " + (err or "invalid row or non-failure state"))
-    return empty, None
+    return empty
 
 
 def slurm_state(unit_dir, spec, notes, record_enabled=False, observation=None):
@@ -869,13 +855,15 @@ def slurm_state(unit_dir, spec, notes, record_enabled=False, observation=None):
         return evidence
     if owned[0]:
         return evidence
-    observed, ended = (None, None, None, None), None
+    observed = (None, None, None, None)
     if observation is not None and shutil.which("scontrol"):
-        observed, ended = observed_slurm_state(observation, unit_dir, spec, declared_at, bound_at, notes)
-    exit_end = []
-    fallback = (slurm_exit_state(unit_dir, job_id, declared_at, notes, exit_end if observed[0] else None)
-                if record_enabled and not owned[0] else (None, None, None, None))
-    if observed[0] is not None and (not exit_end or ended > exit_end[0]):
+        observed = observed_slurm_state(observation, unit_dir, spec, declared_at, bound_at, notes)
+    fallback = (slurm_exit_state(unit_dir, job_id, declared_at, notes)
+                if record_enabled else (None, None, None, None))
+    if observed[0] is not None:
+        if fallback[0] == "COMPLETED":
+            notes.append("conflict: controller observation versus successful exit record")
+            return None, None, None, None
         spec["slurm_evidence_source"] = "slurmctld-observed"
         return observed
     if fallback[0] is not None:
