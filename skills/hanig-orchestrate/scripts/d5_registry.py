@@ -21,8 +21,10 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import uuid
 from contextlib import contextmanager
 
@@ -85,6 +87,11 @@ def _identity(checkout, plan_id, state_dir):
         checkout = Path(checkout).absolute()
         state, _, worktrees = CP.resolve_paths(state_dir=state_dir, cwd=checkout)
         root = CP._external_base(worktrees) / "hanig-authority" / "v1"
+        for path in (root.parent, root):
+            _directory(path)
+        if _directory(root / "plans"):
+            for path in (root / "plans").iterdir():
+                _directory(path)
         common = _git_path(checkout, "--git-common-dir")
         repo_fd = os.open(str(common), os.O_RDONLY | os.O_DIRECTORY)
         with store.cleanup(os.close, repo_fd):
@@ -165,13 +172,32 @@ def _find(entries, identity, state_fd):
     return None
 
 
-def _mkdir(path, base):
-    """Confirm owned links on every attempt, stopping at the external base."""
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for parent in path.parents:
-        store.sync_directory(parent)
-        if parent == base:
-            break
+def _directory(path):
+    info = store.present(path, str(path))
+    _require(not info or not stat.S_ISLNK(info.st_mode), str(path) + ": symlink")
+    return info
+
+
+def _mkdir(path, base, synced):
+    info = _directory(path)
+    marker = ".hanig-authority-created"
+    created = store.present(path / marker, str(path))
+    if path != base or not info or created:
+        _mkdir(path.parent, base if path != base else path.parent, synced)
+    if not info:
+        with tempfile.TemporaryDirectory(dir=path.parent) as tmp:
+            temporary = Path(tmp)
+            (temporary / marker).mkdir()
+            store.sync_directory(temporary)
+            try:
+                temporary.rename(path)
+            except OSError:
+                if not _directory(path):
+                    raise
+        created = True
+    if (path != base or created) and path.parent not in synced:
+        store.sync_directory(path.parent)
+        synced.add(path.parent)
 
 
 @contextmanager
@@ -187,7 +213,8 @@ def register(checkout, plan_id, state_dir):
     _active()
     with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd):
         base = root.parent.parent
-        _mkdir(root, base)
+        synced = set()
+        _mkdir(root, base, synced)
         with _locked(root):
             entries = _entries(root)
             existing = _find(entries, identity, state_fd)
@@ -203,7 +230,7 @@ def register(checkout, plan_id, state_dir):
                 return existing
             rid = uuid.uuid4().hex
             directory = root / "plans" / rid
-            _mkdir(directory.parent, base)
+            _mkdir(directory.parent, base, synced)
             directory.mkdir(mode=0o700)  # Never reuse a pre-existing record root.
             store.sync_directory(directory.parent)
             entry = dict(identity, registration_id=rid, record_dir=str(directory))
