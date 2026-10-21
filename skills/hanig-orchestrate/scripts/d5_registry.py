@@ -55,25 +55,28 @@ def _key(info):
     return (info.st_dev, info.st_ino)
 
 
-def _common(checkout):
+def _git(checkout, *args):
+    return subprocess.run(
+        ["git", "-C", str(checkout), *args], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+        env=CE.child_env(), timeout=30, check=True).stdout
+
+
+def _git_path(checkout, option):
     """Read one Git path without stripping path bytes."""
-    result = subprocess.run(
-        ["git", "-C", str(checkout), "rev-parse", "--path-format=absolute",
-         "--git-common-dir"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL, env=CE.child_env(), timeout=30, check=True)
-    _require(result.stdout.endswith(b"\n"), "invalid git common directory")
-    common = Path(os.fsdecode(result.stdout[:-1]))
-    _require(common.is_absolute(), "git common directory must be absolute")
-    return common
+    raw = _git(checkout, "rev-parse", "--path-format=absolute", option)
+    _require(raw.endswith(b"\n"), "invalid Git path")
+    path = Path(os.fsdecode(raw[:-1]))
+    _require(path.is_absolute(), "Git path must be absolute")
+    return path
 
 
 def _worktrees(checkout):
-    raw = subprocess.run(
-        ["git", "-C", str(checkout), "worktree", "list", "--porcelain", "-z"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-        env=CE.child_env(), timeout=30, check=True).stdout
-    return [Path(os.fsdecode(field[9:])) for field in raw.split(b"\0")
-            if field.startswith(b"worktree ")]
+    """Include the checkout omitted by separate-Git-directory listings."""
+    raw = _git(checkout, "worktree", "list", "--porcelain", "-z")
+    return [_git_path(checkout, "--show-toplevel")] + [
+        Path(os.fsdecode(field[9:])) for field in raw.split(b"\0")
+        if field.startswith(b"worktree ")]
 
 
 def _outside(path, protected):
@@ -93,7 +96,7 @@ def _identity(checkout, plan_id, state_dir):
         state, _, _ = CP.resolve_paths(state_dir=state_dir, cwd=checkout)
         worktrees = _worktrees(checkout)
         root = CP._external_base(worktrees) / "hanig-authority" / "v1"
-        common = _common(checkout)
+        common = _git_path(checkout, "--git-common-dir")
         repo_fd = os.open(str(common), os.O_RDONLY | os.O_DIRECTORY)
         with store.cleanup(os.close, repo_fd):
             repo_key = _key(os.fstat(repo_fd))
@@ -180,15 +183,11 @@ def _find(entries, identity, state_fd):
 def _mkdir(path, base, protected):
     """Confirm owned links on every attempt, stopping at the external base."""
     _outside(path, protected)
-    if path == base:
-        path.mkdir(parents=True, exist_ok=True)
-        return
-    _mkdir(path.parent, base, protected)
-    try:
-        path.mkdir(mode=0o700)
-    except FileExistsError:
-        _require(path.is_dir(), "expected directory: " + str(path))
-    store.sync_directory(path.parent)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for parent in path.parents:
+        store.sync_directory(parent)
+        if parent == base:
+            break
 
 
 @contextmanager
