@@ -1,0 +1,345 @@
+"""D5 registration against real local repositories and directory objects."""
+import copy
+import errno
+import fcntl
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
+import d5_registry as R
+import d5_authority_store as store
+from tests.test_d5_authority import MANDATE, grant
+
+
+class TestD5Registry(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.d = Path(temporary.name).resolve()
+        self.repo = self.d / "repo"
+        self.git("init", str(self.repo))
+        self.git("-C", str(self.repo), "-c", "user.name=Test", "-c",
+                 "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial")
+        self.state = self.d / "state"
+        self.state.mkdir()
+        self.base = self.d / "external"
+        self.root = self.base / "hanig-authority/v1"
+        self.patch = mock.patch.object(R.CP, "_external_base", return_value=self.base)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def git(self, *args):
+        return subprocess.run(["git"] + list(args), check=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=30).stdout
+
+    def register(self, repo=None, plan="p", state=None):
+        with mock.patch.object(R, "d5_active", return_value=True):
+            return R.register(repo or self.repo, plan, state or self.state)
+
+    def options(self):
+        record = grant()
+        return dict(issued_at=record["issued_at"], confirmed_at=record["confirmed_at"],
+                    expires_at=record["expires_at"], mandate_bytes=MANDATE,
+                    scope=record["scope"], **record["confirmation"])
+
+    def status(self, **options):
+        return R.status(self.repo, "p", self.state,
+                        **dict(dict(now=101, mandate_bytes=MANDATE), **options))
+
+    def tree(self, root=None):
+        result = {}
+        for path in sorted((root or self.d).rglob("*")):
+            st = path.lstat()
+            result[str(path)] = (st.st_ino, st.st_mode, st.st_mtime_ns,
+                                 path.read_bytes() if path.is_file() else None)
+        return result
+
+    def test_alias_and_spelling_share_registration(self):
+        first = self.register()
+        alias = self.d / "alias"
+        alias.symlink_to(self.state, target_is_directory=True)
+        spelling = str(self.state) + "/../state/."
+        before = self.tree(self.root)
+        for state in (alias, spelling):
+            self.assertEqual(self.register(state=state), first)
+            self.assertEqual(R.lookup(self.repo, "p", state), first)
+        self.assertEqual(self.tree(self.root), before)
+        self.assertEqual(first["state_key"], [self.state.stat().st_dev, self.state.stat().st_ino])
+
+    def test_linked_worktrees_share_repository_object(self):
+        linked = self.d / "linked"
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(linked))
+        before = self.tree(self.repo / ".git")
+        first = self.register()
+        self.assertEqual(self.register(repo=linked), first)
+        self.assertEqual(R.lookup(linked, "p", self.state), first)
+        common = self.repo / ".git"
+        self.assertEqual(first["repo_key"], [common.stat().st_dev, common.stat().st_ino])
+        self.assertEqual(self.tree(common), before)  # No authority or pointer in Git.
+
+    def test_conflicts_and_two_plans_in_one_repository(self):
+        first = self.register()
+        other = self.d / "other-state"
+        other.mkdir()
+        before = self.tree(self.root)
+        with self.assertRaisesRegex(R.AuthorityError, "state_key mismatch"):
+            self.register(state=other)
+        with self.assertRaisesRegex(R.AuthorityError, "already registered"):
+            self.register(plan="q")
+        self.assertEqual(self.tree(self.root), before)
+        second = self.register(plan="q", state=other)
+        self.assertEqual(first["repo_key"], second["repo_key"])
+        self.assertNotEqual(first["registration_id"], second["registration_id"])
+        self.assertEqual(R.lookup(self.repo, "q", other), second)
+
+    def test_clone_is_not_repository_identity(self):
+        first = self.register()
+        clone = self.d / "clone"
+        self.git("clone", str(self.repo), str(clone))
+        with self.assertRaisesRegex(R.AuthorityError, "already registered"):
+            self.register(repo=clone)
+        other = self.d / "clone-state"
+        other.mkdir()
+        second = self.register(repo=clone, state=other)
+        self.assertNotEqual(first["repo_key"], second["repo_key"])
+
+    def test_idempotent_overwrites_nothing(self):
+        first = self.register()
+        marker = Path(first["record_dir"]) / "retained"
+        marker.write_bytes(b"existing work")
+        before = self.tree(self.root)
+        with mock.patch.object(store, "write_bytes", side_effect=AssertionError("write")):
+            self.assertEqual(self.register(), first)
+        self.assertEqual(self.tree(self.root), before)
+
+    def test_recreated_state_refuses_lookup_and_management(self):
+        first = self.register()
+        fd = os.open(str(self.state), os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)  # Hold old inode to prevent immediate reuse.
+        self.state.rmdir()
+        self.state.mkdir()
+        self.assertNotEqual(first["state_key"], [self.state.stat().st_dev, self.state.stat().st_ino])
+        before = self.tree(self.root)
+        with mock.patch.object(R, "d5_active", return_value=True):
+            for op in (lambda: R.lookup(self.repo, "p", self.state),
+                       self.status, lambda: self.register(),
+                       lambda: R.grant(self.repo, "p", self.state, **self.options()),
+                       lambda: R.revoke(self.repo, "p", self.state, 102, "stop")):
+                with self.subTest(op=op), self.assertRaisesRegex(R.AuthorityError, "state_key mismatch"):
+                    op()
+        self.assertEqual(self.tree(self.root), before)
+
+    def test_root_and_state_must_be_external(self):
+        linked = self.d / "linked"
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(linked))
+        for worktree in (self.repo, linked):
+            with mock.patch.object(R.CP, "_external_base", return_value=worktree):
+                before = self.tree()
+                with self.assertRaisesRegex(R.AuthorityError, "authority root.*inside"):
+                    self.register()
+                self.assertEqual(self.tree(), before)
+            inside = worktree / "state"
+            inside.mkdir()
+            with self.assertRaisesRegex(R.AuthorityError, "state-dir.*inside"):
+                self.register(state=inside)
+        self.assertFalse(self.root.exists())
+
+    def test_symlinked_root_cannot_enter_worktree(self):
+        self.base.mkdir()
+        (self.base / "hanig-authority").symlink_to(self.repo, target_is_directory=True)
+        before = self.tree()
+        with self.assertRaisesRegex(R.AuthorityError, "authority root.*inside"):
+            self.register()
+        self.assertEqual(self.tree(), before)
+
+    def test_state_must_already_exist_and_be_directory(self):
+        for path in (self.d / "missing", self.d / "file"):
+            if path.name == "file":
+                path.write_text("not a directory")
+            with self.assertRaises(R.AuthorityError):
+                self.register(state=path)
+        with mock.patch.object(R, "d5_active", return_value=True):
+            with self.assertRaisesRegex(R.AuthorityError, "state_dir is required"):
+                R.register(self.repo, "p", None)
+        self.assertFalse(self.base.exists())
+
+    def test_missing_status_and_lookup_create_nothing(self):
+        before = self.tree()
+        self.assertEqual(self.status(), {"state": "inactive", "registration": None,
+                                        "record": None, "record_state": "absent"})
+        self.assertIsNone(R.lookup(self.repo, "p", self.state))
+        self.assertEqual(self.tree(), before)
+
+    def test_inactive_mutations_refuse_before_any_write(self):
+        before = self.tree()
+        self.assertFalse(R.d5_active())
+        for op in (lambda: R.register(self.repo, "p", self.state),
+                   lambda: R.grant(self.repo, "p", self.state, **self.options()),
+                   lambda: R.revoke(self.repo, "p", self.state, 102, "stop")):
+            with self.subTest(op=op), self.assertRaisesRegex(R.AuthorityError, "D5 is not active"):
+                op()
+        self.assertEqual(self.tree(), before)
+
+    def test_invalid_plan_ids(self):
+        for plan in ("..", "/", "", "a" * 65, "é", "p\n", "p/q", None, True):
+            with self.subTest(plan=plan), self.assertRaisesRegex(R.AuthorityError, "plan_id"):
+                self.register(plan=plan)
+        for plan in ("A", "a" * 64, "A._-9"):
+            state = self.d / ("state-" + plan)
+            state.mkdir()
+            self.assertEqual(self.register(plan=plan, state=state)["plan_id"], plan)
+
+    def test_plan_id_is_exact(self):
+        first = self.register(plan="P")
+        other = self.d / "other"
+        other.mkdir()
+        second = self.register(plan="p", state=other)
+        self.assertNotEqual(first["registration_id"], second["registration_id"])
+
+    def test_management_roundtrip_and_read_only_status(self):
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        before = self.tree()
+        self.assertEqual(self.status()["record_state"], "absent")
+        self.assertEqual(self.tree(), before)
+        with mock.patch.object(R, "d5_active", return_value=True):
+            first = R.grant(self.repo, "p", self.state, **self.options())
+        self.assertEqual(first["confirmation"], grant()["confirmation"])
+        self.assertEqual(first["mandate_sha256"], grant()["mandate_sha256"])
+        # Status must not create the store lock even if it is absent.
+        (directory / store.LOCK_NAME).unlink()
+        before = self.tree()
+        for options, expected in (({}, "valid"), ({"now": 86500}, "expired"),
+                                  ({"mandate_bytes": b"changed"}, "mandate_changed")):
+            result = self.status(**options)
+            self.assertEqual(result["state"], "inactive")
+            self.assertEqual(result["registration"], entry)
+            self.assertEqual(result["record"], first)
+            self.assertEqual(result["record_state"], expected)
+        self.assertEqual(self.tree(), before)
+        with mock.patch.object(R, "d5_active", return_value=True):
+            second = R.grant(self.repo, "p", self.state, **self.options())
+            self.assertNotEqual(first["grant_id"], second["grant_id"])
+            self.assertEqual(store.read(directory), second)
+            archived = directory / "superseded" / (first["grant_id"] + ".json")
+            self.assertEqual(R.authority.decode(archived.read_bytes()), first)
+            revoked = R.revoke(self.repo, "p", self.state, 102, "stop")
+        self.assertEqual(revoked["invalidation"], {"at": 102, "kind": "revoked", "reason": "stop"})
+        self.assertEqual(self.status()["record_state"], "invalidated")
+
+    def test_replacement_cannot_silently_extend_or_widen(self):
+        self.register()
+        options = self.options()
+        options["expires_at"] = 200
+        with mock.patch.object(R, "d5_active", return_value=True):
+            R.grant(self.repo, "p", self.state, **options)
+            for field in ("expires_at", "scope"):
+                changed = copy.deepcopy(options)
+                if field == "expires_at":
+                    changed[field] += 1
+                else:
+                    changed[field]["actions"].append("new")
+                before = self.tree(self.root)
+                with self.assertRaisesRegex(R.AuthorityError, "fresh confirmation"):
+                    R.grant(self.repo, "p", self.state, **changed)
+                self.assertEqual(self.tree(self.root), before)
+                changed["owner_response"] += " newly confirmed"
+                self.assertEqual(R.grant(self.repo, "p", self.state, **changed)[field], changed[field])
+                options = changed
+
+    def test_unregistered_management_refuses_without_creation(self):
+        before = self.tree()
+        with mock.patch.object(R, "d5_active", return_value=True):
+            with self.assertRaisesRegex(R.AuthorityError, "not registered"):
+                R.grant(self.repo, "p", self.state, **self.options())
+            with self.assertRaisesRegex(R.AuthorityError, "not registered"):
+                R.revoke(self.repo, "p", self.state, 102, "stop")
+        self.assertEqual(self.tree(), before)
+
+    def test_registry_strict_schema_and_duplicate_keys(self):
+        self.register()
+        path = self.root / "registry.json"
+        original = path.read_bytes()
+        valid = json.loads(original)
+        invalid = [b'{"schema_version":1,"schema_version":1,"entries":[]}', b"NaN", b"\xff"]
+        for field, value in (("schema_version", True), ("entries", {}), ("extra", 1)):
+            record = copy.deepcopy(valid)
+            record[field] = value
+            invalid.append(json.dumps(record).encode())
+        for field, value in (("state_key", [True, 1]), ("repo_key", [-1, 1]),
+                             ("registration_id", "../x"), ("record_dir", str(self.repo)),
+                             ("state_dir", "relative"), ("plan_id", ".."), ("extra", 1)):
+            record = copy.deepcopy(valid)
+            record["entries"][0][field] = value
+            invalid.append(json.dumps(record).encode())
+        duplicated = copy.deepcopy(valid)
+        duplicated["entries"] *= 2
+        invalid.append(json.dumps(duplicated).encode())
+        for raw in invalid:
+            path.write_bytes(raw)
+            with self.subTest(raw=raw), self.assertRaises(R.AuthorityError):
+                self.status()
+            self.assertEqual(path.read_bytes(), raw)
+        path.write_bytes(original)
+        self.assertEqual(self.status()["record_state"], "absent")
+
+    def test_registry_rejects_nonregular_files(self):
+        self.register()
+        path = self.root / "registry.json"
+        path.unlink()
+        target = self.d / "target"
+        target.write_text('{"schema_version":1,"entries":[]}')
+        for kind in ("link", "fifo", "directory"):
+            if kind == "link":
+                path.symlink_to(target)
+            elif kind == "fifo":
+                os.mkfifo(path)
+            else:
+                path.mkdir()
+            with self.subTest(kind=kind), self.assertRaises(R.AuthorityError):
+                self.status()
+            path.rmdir() if kind == "directory" else path.unlink()
+
+    def test_durable_write_holds_registry_lock(self):
+        write = store.write_bytes
+        def checked(path, raw):
+            with (self.root / "registry.lock").open("rb") as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            write(path, raw)
+        with mock.patch.object(store, "write_bytes", side_effect=checked) as writes:
+            self.register()
+        writes.assert_called_once()
+        self.assertEqual(writes.call_args.args[0], self.root / "registry.json")
+
+    def test_concurrent_registration_is_one_entry(self):
+        # flock on independently opened descriptors serializes even same-process writers.
+        with mock.patch.object(R, "d5_active", return_value=True):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                entries = list(pool.map(lambda _: R.register(self.repo, "p", self.state), range(4)))
+        self.assertTrue(all(entry == entries[0] for entry in entries))
+        self.assertEqual(len(json.loads((self.root / "registry.json").read_bytes())["entries"]), 1)
+
+    def test_failed_publication_retains_previous_registry(self):
+        first = self.register()
+        raw = (self.root / "registry.json").read_bytes()
+        other = self.d / "other"
+        other.mkdir()
+        with mock.patch.object(store.os, "replace", side_effect=OSError(errno.EIO, "synthetic")):
+            with self.assertRaisesRegex(R.AuthorityError, "durability is unconfirmed"):
+                self.register(plan="q", state=other)
+        self.assertEqual((self.root / "registry.json").read_bytes(), raw)
+        self.assertEqual(R.lookup(self.repo, "p", self.state), first)
+        self.assertEqual(self.register(plan="q", state=other)["plan_id"], "q")
+
+
+if __name__ == "__main__":
+    unittest.main()
