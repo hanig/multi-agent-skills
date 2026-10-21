@@ -129,8 +129,9 @@ import json, pathlib, sys
 state = json.loads(pathlib.Path(STATE).read_text())
 with pathlib.Path(LOG).open('a') as log:
     log.write(json.dumps(['scontrol'] + sys.argv[1:]) + '\n')
-assert sys.argv[1:4] == ['show', 'job', '-o']
-print(state.get('controller_output', 'JobId=321 JobName=verify JobState=COMPLETED ExitCode=0:0'))
+assert sys.argv[1:3] == ['show', 'job']
+key = 'controller_output' if '-o' in sys.argv else 'controller_multiline'
+print(state.get(key, 'JobId=321 JobName=verify JobState=COMPLETED ExitCode=0:0'))
 print(state.get('controller_error', ''), file=sys.stderr)
 raise SystemExit(state.get('controller_rc', 0))
 '''
@@ -2292,6 +2293,32 @@ else:
         state = RV.scheduler_state('321')
         self.assertEqual(state, ('COMPLETED', '0:0'))
         self.assertEqual(state.source, 'sacct')
+
+    def test_absence_on_stdout_with_stderr_warning(self):
+        self.supervisor_fixture()
+        self.configure({'321': 'COMPLETED'}, controller_rc=1, controller_error='warning',
+                       controller_output='Invalid job id specified')
+        RV.time.monotonic.side_effect = [0, 20]
+        result = RV.supervise(self.stage)
+        self.assertNotIn('error', result)
+        self.assertEqual(result['execution']['scheduler_evidence_source'], 'sacct')
+
+    def test_controller_fields_in_paths_use_grouped_output(self):
+        self.install_controller()
+        grouped = 'JobId=321 JobName=verify\n   JobState=COMPLETED Reason=None\n   Requeue=0 ExitCode=0:0\n'
+        for key in ('JobId', 'JobState', 'ExitCode'):
+            with self.subTest(key=key):
+                path = '   WorkDir=/tmp/build ' + key + '=archive\n'
+                self.configure({}, unavailable='sacct', controller_output=(grouped + path).replace('\n', ' '),
+                               controller_multiline=grouped + path)
+                state = RV.scheduler_state('321')
+                self.assertEqual(state, ('COMPLETED', '0:0'))
+                self.assertEqual(state.source, 'slurmctld')
+        self.assertEqual(self.scheduler_calls(), [call for _ in range(3) for call in (
+            ['scontrol', 'show', 'job', '-o', '321'], ['scontrol', 'show', 'job', '321'])])
+        self.configure({}, controller_output=grouped.replace('\n', ' ') + path,
+                       controller_multiline='JobId=321 JobName=verify\nJobState=COMPLETED ExitCode=0:0')
+        self.assertIsNone(RV.scheduler_state('321'))
 
     def test_controller_error_waits_until_supervision_deadline(self):
         self.supervisor_fixture()

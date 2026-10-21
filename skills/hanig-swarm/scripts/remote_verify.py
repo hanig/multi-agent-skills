@@ -606,21 +606,38 @@ def scheduler_state(job):
     try:
         if not shutil.which("scontrol"):
             raise FileNotFoundError("scontrol is not installed")
-        rc, out, err = _command(["scontrol", "show", "job", "-o", job])
+        for grouped in (False, True):
+            rc, out, err = _command(["scontrol", "show", "job"] +
+                                    ([] if grouped else ["-o"]) + [job])
+            if rc:
+                if any("Invalid job id specified" in text for text in (err, out)):
+                    break
+                return None
+            pattern = r"(?:^|\s)(JobId|JobState|ExitCode)=(\S*)"
+            pairs = re.findall(pattern, out)
+            if grouped:
+                # Native line groups separate scheduler fields from path text.
+                pairs = []
+                groups = {"JobId": "JobId", "JobState": "JobState", "Requeue": "ExitCode"}
+                for line in out.splitlines():
+                    heading = line.lstrip().split("=", 1)[0]
+                    if heading in groups:
+                        if heading == "JobId":
+                            line = line.split(" JobName=", 1)[0]
+                        found = re.findall(pattern, line)
+                        if len(found) != 1 or found[0][0] != groups[heading]:
+                            return None
+                        pairs.extend(found)
+            fields = dict(pairs)
+            if len(pairs) == 3 and set(fields) == {"JobId", "JobState", "ExitCode"}:
+                return (SchedulerState(fields["JobState"], fields["ExitCode"], "slurmctld")
+                        if fields["JobId"] == job and fields["JobState"] in TERMINAL else None)
+            if grouped:
+                return None
     except FileNotFoundError:
         pass  # Accounting-only installations retain their existing behavior.
     except (OSError, subprocess.SubprocessError):
         return None
-    else:
-        if rc == 0:
-            pairs = re.findall(r"(?:^|\s)(JobId|JobState|ExitCode)=(\S*)", out)
-            fields = dict(pairs)
-            if (len(pairs) != 3 or set(fields) != {"JobId", "JobState", "ExitCode"}
-                    or fields["JobId"] != job or fields["JobState"] not in TERMINAL):
-                return None
-            return SchedulerState(fields["JobState"], fields["ExitCode"], "slurmctld")
-        if "Invalid job id specified" not in (err or out):
-            return None
     try:
         rc, out, err = _command(["sacct", "-n", "-P", "-j", job,
                                   "--format=JobIDRaw,State%40,ExitCode"])
