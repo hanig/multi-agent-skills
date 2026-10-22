@@ -63,9 +63,9 @@ def _key(info):
 
 
 def _safe(info):
-    # Stable, same-UID infrastructure: reject writable aliases and hard links.
+    # Stable, same-UID infrastructure: private files without hard links.
     return (stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
-            info.st_nlink == 1 and not info.st_mode & 0o022)
+            info.st_nlink == 1 and not info.st_mode & 0o077)
 
 
 def _held():
@@ -110,9 +110,14 @@ class _Record:
                 info = None
             if info is not None and not _safe(info):
                 raise LockError(_UNSAFE)
-            flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
+            flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+            created = False
             try:
-                fd = os.open(name, flags, 0o600, dir_fd=self.fd)
+                try:
+                    fd = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self.fd)
+                    created = True
+                except FileExistsError:
+                    fd = os.open(name, flags, 0o600, dir_fd=self.fd)
             except PermissionError:
                 # Recover a prior/overlapping creator's restrictive-umask file.
                 # Identity stability is the declared envelope, including here:
@@ -124,10 +129,12 @@ class _Record:
                     os.chmod(name, 0o600, dir_fd=self.fd)
                 fd = os.open(name, flags, 0o600, dir_fd=self.fd)
             try:
+                if created:
+                    os.fchmod(fd, 0o600)
                 info = os.fstat(fd)
                 if not _safe(info):
                     raise LockError(_UNSAFE)
-                if info.st_mode & 0o600 != 0o600:
+                if not created and info.st_mode & 0o600 != 0o600:
                     os.fchmod(fd, 0o600)
                 return fd
             except BaseException:

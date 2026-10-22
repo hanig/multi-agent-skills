@@ -98,8 +98,11 @@ class TestD5Locks(unittest.TestCase):
         self.assertEqual([row[0] for row in lock_opens],
                          ["authority.drain.lock", "authority.start.lock",
                           "authority.lock", "authority.drain.lock"])
-        for _, flags, mode, dir_fd, _ in lock_opens:
-            self.assertEqual(flags, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW)
+        for index, (_, flags, mode, dir_fd, _) in enumerate(lock_opens):
+            expected = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+            if index < 3:
+                expected |= os.O_CREAT | os.O_EXCL
+            self.assertEqual(flags, expected)
             self.assertEqual(mode, 0o600)
             self.assertEqual(dir_fd, pin_open[4])
         self.assertEqual([m for m in modes if not m & locks.fcntl.LOCK_NB],
@@ -170,6 +173,98 @@ class TestD5Locks(unittest.TestCase):
         stdout, stderr = proc.communicate(timeout=10)
         self.assertEqual(proc.returncode, 0, stderr)
         self.assertEqual(stdout, b"permissions repaired\n")
+
+    def test_new_modes_before_flock_under_umasks(self):
+        real_flock = locks.fcntl.flock
+
+        def checked(fd, operation):
+            self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o600)
+            return real_flock(fd, operation)
+
+        for mask in (0o000, 0o022, 0o077, 0o277, 0o777):
+            with self.subTest(umask=oct(mask)), locks.pin(self.directory) as record:
+                saved = os.umask(mask)
+                try:
+                    with mock.patch.object(locks.fcntl, "flock", side_effect=checked), \
+                            mock.patch.object(os, "fchmod", wraps=os.fchmod) as chmod:
+                        with record.drain(), record.start(), record.state():
+                            self.assertEqual(chmod.call_count, 3)
+                        # Reopening safe existing locks must not chmod them.
+                        with record.drain(), record.start(), record.state():
+                            self.assertEqual(chmod.call_count, 3)
+                finally:
+                    os.umask(saved)
+                for name in locks._NAMES.values():
+                    path = self.directory / name
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                    path.unlink()  # fixture reset between masks
+
+    def test_existing_group_or_other_permissions_refused_without_repair(self):
+        for rank, name in locks._NAMES.items():
+            for mode in (0o644, 0o640, 0o620, 0o610, 0o604, 0o602, 0o601, 0o040):
+                with self.subTest(rank=rank, mode=oct(mode)):
+                    path = self.directory / name
+                    path.write_bytes(b"unchanged")
+                    path.chmod(mode)
+                    inode = path.stat().st_ino
+                    try:
+                        with locks.pin(self.directory) as record, \
+                                mock.patch.object(locks.fcntl, "flock", side_effect=AssertionError("flock")), \
+                                mock.patch.object(os, "chmod", side_effect=AssertionError("chmod")), \
+                                mock.patch.object(os, "fchmod", side_effect=AssertionError("fchmod")):
+                            guard = (record.drain, record.start, record.state)[rank]
+                            with self.refused(locks._UNSAFE), guard():
+                                self.fail("nonprivate lock entered")
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
+                        self.assertEqual(path.stat().st_ino, inode)
+                    finally:
+                        path.chmod(0o600)
+                    self.assertEqual(path.read_bytes(), b"unchanged")
+                    path.unlink()
+
+    def test_new_nonprivate_mode_repaired_before_check_and_flock(self):
+        real_open, real_fchmod = os.open, os.fchmod
+        real_flock = locks.fcntl.flock
+        created = []
+
+        def opening(path, flags, mode=0o777, *, dir_fd=None):
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            if flags & os.O_CREAT:
+                self.assertTrue(flags & os.O_EXCL)
+                real_fchmod(fd, 0o644)  # synthetic inherited-ACL mode
+                created.append(path)
+            return fd
+
+        def flock(fd, operation):
+            self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o600)
+            return real_flock(fd, operation)
+
+        with mock.patch.object(os, "open", side_effect=opening), \
+                mock.patch.object(locks.fcntl, "flock", side_effect=flock):
+            with locks.pin(self.directory) as record:
+                with record.drain(), record.start(), record.state():
+                    pass
+        self.assertCountEqual(created, locks._NAMES.values())
+        for name in created:
+            self.assertEqual(stat.S_IMODE((self.directory / name).stat().st_mode), 0o600)
+
+    def test_existing_nonprivate_inherited_drain_uses_reference_refusal(self):
+        path = self.directory / "authority.drain.lock"
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            for mode in (0o644, 0o640, 0o620, 0o610, 0o604, 0o602, 0o601):
+                with self.subTest(mode=oct(mode)):
+                    os.fchmod(fd, mode)
+                    locks.fcntl.flock(fd, locks.fcntl.LOCK_SH)
+                    with locks.pin(self.directory) as record, \
+                            mock.patch.object(locks.fcntl, "flock", side_effect=AssertionError("flock")), \
+                            mock.patch.object(os, "fchmod", side_effect=AssertionError("fchmod")), \
+                            self.refused(locks._REFERENCE), record.drain(inherited_fd=fd):
+                        self.fail("nonprivate inherited drain entered")
+                    self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), mode)
+                    self.assertFalse(self.available(path.name))
+        finally:
+            os.close(fd)
 
     def test_G6_unrelated_permission_error_does_not_change_mode(self):
         with locks.pin(self.directory) as record:
