@@ -358,5 +358,68 @@ class TestInstall(unittest.TestCase):
         self.assertEqual(store.read(directory), grant())
 
 
+    def test_relative_directory_remains_bound_after_wait(self):
+        # R3-REBOUND-DIRECTORY: changing cwd cannot redirect a pinned install.
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                first, second = self.root / (kind + "-a"), self.root / (kind + "-b")
+                first.mkdir()
+                second.mkdir()
+                directory = self.directory(first.name + "/record", kind)
+                other = self.directory(second.name + "/record", kind)
+                prior = Path.cwd()
+                try:
+                    os.chdir(first)
+                    with self.waiter(lambda: self.call(kind, Path("record")), directory) as (results, errors):
+                        os.chdir(second)
+                finally:
+                    os.chdir(prior)
+                self.assertEqual(errors, [])
+                self.assertEqual(len(results), 1)
+                self.assertTrue((directory / store.RECORD_NAME).exists())
+                self.assertEqual(store.read(directory), results[0])
+                if kind == "initial":
+                    self.assertFalse((other / store.RECORD_NAME).exists())
+                else:
+                    self.assertEqual(store.read(other), grant())
+
+    def test_relative_mandate_remains_bound_after_wait(self):
+        # R3-REBOUND-MANDATE: reread the intended file, not a new cwd's file.
+        directory = self.directory("claim-relative", "claim")
+        first, second = self.root / "mandate-a", self.root / "mandate-b"
+        first.mkdir()
+        second.mkdir()
+        (first / "mandate.md").write_bytes(MANDATE)
+        (second / "mandate.md").write_bytes(b"unrelated policy")
+        prior = Path.cwd()
+        try:
+            os.chdir(first)
+            with self.waiter(lambda: install.claim_custody(directory, mandate_path=b"mandate.md"), directory) as (results, errors):
+                os.chdir(second)
+        finally:
+            os.chdir(prior)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["custody"]["session_id"], "native")
+        self.assertIsNone(store.read(directory)["invalidation"])
+
+    def test_locator_components_are_not_normalized(self):
+        # R3-NORMALIZE-LOCATOR: link/.. resolves through the filesystem.
+        nested = self.root / "nested"
+        nested.mkdir()
+        (nested / "child").mkdir()
+        intended = self.directory("nested/record")
+        other = self.directory("record")
+        (self.root / "link").symlink_to(nested / "child", target_is_directory=True)
+        prior = Path.cwd()
+        try:
+            os.chdir(self.root)
+            self.call("initial", "link/../record")
+        finally:
+            os.chdir(prior)
+        self.assertEqual(store.read(intended), grant())
+        self.assertFalse((other / store.RECORD_NAME).exists())
+
+
 if __name__ == "__main__":
     unittest.main()
