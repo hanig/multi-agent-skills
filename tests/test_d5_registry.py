@@ -1082,6 +1082,38 @@ class TestD5Registry(unittest.TestCase):
             self.assertEqual(self.tree(), before)
             self.assertEqual(self.register(), entry)  # Operator recovery retains D.
 
+    def test_review_round1_lookup_walk_is_first_record_access(self):
+        # Preserved contract counterexample: the Git envelope also stats D.
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
+        later = self.d / "zz-later"
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(later))
+        listed = R._worktrees(later)
+        self.assertLess(listed.index(directory), listed.index(later))
+        events = []
+        real_stat, real_entries, real_walk = Path.stat, R._entries, R._record_key
+        def path_stat(path, *args, **kwargs):
+            if path == directory:
+                events.append("D.stat")
+            return real_stat(path, *args, **kwargs)
+        def entries(root):
+            events.append("registry-read")
+            return real_entries(root)
+        def walk(root, rid):
+            events.append("tamper-walk")
+            return real_walk(root, rid)
+        before = self.tree()
+        with mock.patch.object(Path, "stat", path_stat), \
+             mock.patch.object(R, "_entries", side_effect=entries), \
+             mock.patch.object(R, "_record_key", side_effect=walk):
+            with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
+                R.lookup(later, "p", self.state)
+        self.assertEqual(self.tree(), before)
+        self.assertLess(events.index("registry-read"), events.index("tamper-walk"))
+        self.assertNotIn("D.stat", events[:events.index("registry-read")],
+                         "Git envelope accesses D before the registry read and walk")
+
 
 if __name__ == "__main__":
     unittest.main()
