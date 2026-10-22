@@ -11,6 +11,11 @@ Non-claims
 - Does not decide whether a transport actually submitted.
 - Does not perform remote reconciliation or guarantee exactly-once execution.
 - Does not protect against hostile same-process Python.
+- A guard entered and exited normally inside a caller's finally block does not
+  preserve an unrelated caller exception that is unwinding. A cleanup OSError
+  is raised as before, with the caller's exception as its __context__. Detecting
+  this case would require ambient exception state, which would also suppress
+  cleanup errors in ordinary handled-exception blocks.
 
 The helper owns admission/DRAIN. Keep secrets out of argv, environment and logs.
 Hostile same-UID filesystem writers are excluded. Retry unconfirmed writes with

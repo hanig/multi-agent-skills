@@ -10,6 +10,11 @@ Non-claims
 ----------
 - Does not validate authority.
 - Does not change store callers or prove anything about external locking.
+- A guard entered and exited normally inside a caller's finally block does not
+  preserve an unrelated caller exception that is unwinding. A cleanup OSError
+  is raised as before, with the caller's exception as its __context__. Detecting
+  this case would require ambient exception state, which would also suppress
+  cleanup errors in ordinary handled-exception blocks.
 
 The caller resolves D through the registry's safe record-directory contract.
 pin() pins that directory, not authority. Future operational entry points must

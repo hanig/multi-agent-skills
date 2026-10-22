@@ -466,16 +466,30 @@ class TestEffectCleanup(unittest.TestCase):
 
         def fdopen(*args):
             handle = real_fdopen(*args)
-            original_close = handle.close
-            def closing():
-                original_close()
-                calls.append("handle.close")
-                if cleanup_fails:
-                    raise cleanup
-            handle.close = closing
-            if site == "write" and primary is not None:
-                handle.write = mock.Mock(side_effect=primary)
-            return handle
+
+            class FileFault:
+                # Delegate real I/O without assigning methods on a built-in file.
+                def __getattr__(self, name):
+                    return getattr(handle, name)
+
+                def close(self):
+                    handle.close()
+                    calls.append("handle.close")
+                    if cleanup_fails:
+                        raise cleanup
+
+                def write(self, data):
+                    if site == "write" and primary is not None:
+                        raise primary
+                    return handle.write(data)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    self.close()
+
+            return FileFault()
 
         with E._access(self.directory, create=True) as (record, fd):
             name = "fixture.json"
