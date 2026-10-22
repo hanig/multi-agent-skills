@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
 import d5_authority as authority
 import d5_authority_store as store
@@ -319,6 +320,17 @@ class TestD5Control(unittest.TestCase):
                 check.assert_not_called()
             self.assertEqual(self.path.read_bytes(), before)
             self.assertEqual(self.probe(), "available")
+
+    def test_standalone_read_error_regression(self):
+        # R2-STANDALONE-IMPORT: the reported file command must reach its test,
+        # including outside the repository and without an ambient PYTHONPATH.
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+            "TestD5Control.test_unreadable_mandate_does_not_call_store"],
+            cwd=self.root, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
 
     def test_inactive_control_has_no_protocol_io(self):
         # R2-BYPASS-INACTIVE: forbid work at lookup/pin AND filesystem boundaries.
