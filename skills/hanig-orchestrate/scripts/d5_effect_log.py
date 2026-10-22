@@ -134,7 +134,7 @@ def _safe(fd, directory=False):
     info = os.fstat(fd)
     kind = stat.S_ISDIR if directory else stat.S_ISREG
     _require(kind(info.st_mode) and info.st_uid == os.geteuid() and
-             not info.st_mode & 0o022 and (directory or info.st_nlink == 1))
+             not info.st_mode & 0o077 and (directory or info.st_nlink == 1))
 
 
 @contextmanager
