@@ -28,6 +28,27 @@ ANCHOR = ProcessIdentity(42, 9000001)
 FS_PREFIX = "record: filesystem operation failed; durability is unconfirmed:"
 
 
+def legacy_store():
+    source = subprocess.check_output(["git", "show",
+        "bfed06136d9291d8e7727c58b7642c65c4d1c103:"
+        "skills/hanig-orchestrate/scripts/d5_authority_store.py"], cwd=str(ROOT))
+    old = types.ModuleType("pre_u3b_store")
+    exec(compile(source, "pre_u3b_store.py", "exec"), old.__dict__)
+    return old
+
+
+def files(directory):
+    # Exclude exactly the two root-level permanent U3a lock files (C3(ii)).
+    result = {}
+    for root, _, names, fd in os.fwalk(directory):
+        for name in names:
+            key = str(Path(os.path.relpath(root, directory)) / name)
+            if key not in (START, DRAIN):
+                with os.fdopen(os.open(name, os.O_RDONLY, dir_fd=fd), "rb") as handle:
+                    result[key] = handle.read()
+    return result
+
+
 def operation(d, name):
     if name == "create":
         return store.create(d, held())
@@ -424,12 +445,7 @@ class TestD5StoreGate(unittest.TestCase):
                 self.assertIs(caught.exception.__cause__, primary)
 
     def test_pre_u3b_differential_records_results_and_errors(self):
-        # The recorded base predates this integration. CI fetches full history.
-        source = subprocess.check_output([
-            "git", "show", "bfed06136d9291d8e7727c58b7642c65c4d1c103:"
-            "skills/hanig-orchestrate/scripts/d5_authority_store.py"], cwd=str(ROOT))
-        old = types.ModuleType("pre_u3b_store")
-        exec(compile(source, "pre_u3b_store.py", "exec"), old.__dict__)
+        old = legacy_store()
         def transcript(module):
             with tempfile.TemporaryDirectory() as directory:
                 d = Path(directory)
@@ -456,12 +472,13 @@ class TestD5StoreGate(unittest.TestCase):
                         outcome = ("return", module.encode(value) if isinstance(value, dict) else value)
                     except store.AuthorityError as exc:
                         self.assertNotIsInstance(exc.__cause__, OSError)
-                        outcome = (type(exc), str(exc))
-                    records = {str(p.relative_to(d)): p.read_bytes() for p in d.rglob("*.json")}
+                        outcome = (type(exc),)
+                    records = (files(d) if outcome[0] != "return" else
+                               {str(p.relative_to(d)): p.read_bytes() for p in d.rglob("*.json")})
                     result.append((name, outcome, records))
                 return result
         self.assertEqual(transcript(old), transcript(store))
-        # Same path, no D: pin-first changes its spelling, not the FS contract.
+        # Same missing D: both refuse, irrespective of error text.
         for name in WRITERS + ("read",):
             errors = []
             for module in (old, store):
@@ -469,20 +486,56 @@ class TestD5StoreGate(unittest.TestCase):
                         self.assertRaises(store.AuthorityError) as caught:
                     operation(self.d / "missing", name)
                 error = caught.exception
-                self.assertTrue(str(error).startswith(FS_PREFIX))
                 self.assertIsInstance(error.__cause__, OSError)
-                errors.append((type(error), str(error).split(": [Errno", 1)[0],
-                               error.__cause__.errno))
+                errors.append((type(error), error.__cause__.errno))
             self.assertEqual(errors[0], errors[1], name)
-            self.assertEqual(errors[0][2], errno.ENOENT)
+            self.assertEqual(errors[0][1], errno.ENOENT)
         # C3 declared delta: 0400 locks are excluded from identity comparison.
         # U3a repairs owner read/write permissions before the store operation.
         d = self.seed("permissions")
         (d / STATE).chmod(0o400)
-        with self.assertRaises(store.AuthorityError) as caught:
-            old.revoke(d, 102, "stop")
-        self.assertEqual(caught.exception.__cause__.errno, errno.EACCES)
+        self.legacy_permissions(d, old)
+
+    def legacy_permissions(self, d, old):
+        if os.geteuid() != 0:
+            with self.assertRaises(store.AuthorityError) as caught:
+                old.revoke(d, 102, "stop")
+            self.assertEqual(caught.exception.__cause__.errno, errno.EACCES)
+        else:
+            # Root may open a 0400 lock: legacy revoke legitimately succeeds.
+            result = old.revoke(d, 102, "stop")
+            self.assertEqual(result["invalidation"]["kind"], "revoked")
+            self.assertEqual(old.read(d), result)
         self.assertEqual((d / STATE).stat().st_mode & 0o777, 0o400)
+
+    def test_C3_refused_files_match_legacy(self):
+        old = legacy_store()
+        for trigger in ("reason", "missing", "mandate", "sync", "archive"):
+            snapshots = []
+            for module in (old, store):
+                with self.subTest(trigger=trigger, module=module.__name__), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    d = Path(tmp)
+                    if trigger != "missing":
+                        old.create(d, held())
+                    with ExitStack() as stack:
+                        if trigger in ("sync", "archive"):
+                            real = module._sync_directory
+                            def sync(path):
+                                if trigger == "sync" or path.name == "superseded":
+                                    raise OSError(errno.EIO, "synthetic directory sync")
+                                real(path)
+                            stack.enter_context(mock.patch.object(module, "_sync_directory", sync))
+                        with self.assertRaises(store.AuthorityError):
+                            if trigger == "mandate":
+                                module.claim(d, 103, b"changed", "next",
+                                             ProcessIdentity(43, 9000002), lambda _: "dead")
+                            elif trigger == "archive":
+                                module.replace(d, grant("b" * 32))
+                            else:
+                                module.revoke(d, 103, "" if trigger == "reason" else "stop")
+                    snapshots.append(files(d))
+            self.assertEqual(snapshots[0], snapshots[1], trigger)
 
     def test_C3_declared_delta_0400_lock_is_repaired_before_revoke(self):
         d = self.seed("permissions")
@@ -505,6 +558,21 @@ class TestD5StoreGate(unittest.TestCase):
                 "^record: changed during liveness observation$"):
             store.claim(d, 103, MANDATE, "outer", ProcessIdentity(44, 9000003), probe)
 
+    def test_callback_bytes_and_removal_are_refused(self):
+        for remove in (False, True):
+            d = self.seed("bytes-" + str(remove))
+            path = d / store.RECORD_NAME
+            raw = path.read_bytes()
+            def probe(_):
+                if remove:
+                    path.unlink()
+                else:
+                    path.write_bytes(raw + b" \n")  # Same inode and decoded record.
+                return "dead"
+            with self.subTest(remove=remove), self.assertRaisesRegex(store.AuthorityError,
+                    "^record: changed during liveness observation$"):
+                store.claim(d, 103, MANDATE, "outer", ProcessIdentity(44, 9000003), probe)
+
     def test_review_privileged_open_keeps_differential_valid(self):
         # Emulate privileged access without elevation. STATE fds serve flock,
         # not writes, so a read-only descriptor supplies the required access.
@@ -517,15 +585,14 @@ class TestD5StoreGate(unittest.TestCase):
                         and os.stat(file).st_mode & 0o777 == 0o400):
                     return real(file, os.O_RDONLY | os.O_CLOEXEC)
                 raise
-        with mock.patch.object(os, "open", side_effect=privileged):
-            self.test_pre_u3b_differential_records_results_and_errors()
+        d = self.seed("privileged")
+        (d / STATE).chmod(0o400)
+        with mock.patch.object(os, "open", side_effect=privileged), \
+                mock.patch.object(os, "geteuid", return_value=0):
+            self.legacy_permissions(d, legacy_store())
 
-    def test_review_long_path_error_prefix_matches_legacy(self):
-        old = types.ModuleType("pre_u3b_store")
-        source = subprocess.check_output(["git", "show",
-            "bfed06136d9291d8e7727c58b7642c65c4d1c103:"
-            "skills/hanig-orchestrate/scripts/d5_authority_store.py"], cwd=str(ROOT))
-        exec(compile(source, "pre_u3b_store.py", "exec"), old.__dict__)
+    def test_review_long_path_refusal_matches_legacy(self):
+        old = legacy_store()
         d = self.d.resolve()
         target = os.pathconf(d, "PC_PATH_MAX") - 6
         while target - len(str(d)) > 202:
@@ -538,8 +605,7 @@ class TestD5StoreGate(unittest.TestCase):
             with self.assertRaises(store.AuthorityError) as caught:
                 module.create(d, held())
             error = caught.exception
-            errors.append((type(error), str(error).split(": [Errno", 1)[0],
-                           error.__cause__.errno))
+            errors.append((type(error), error.__cause__.errno, files(d)))
         self.assertEqual(errors[0], errors[1])
 
     def test_threads_share_store_start_guard(self):
