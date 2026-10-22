@@ -192,8 +192,10 @@ class _Record:
             try:
                 info = os.fstat(inherited_fd)
                 expected = os.stat(_NAMES[0], dir_fd=self.fd, follow_symlinks=False)
-                if not _safe(info) or _key(info) != _key(expected):
+                if _key(info) != _key(expected):
                     raise LockError(_REFERENCE)
+                if not _safe(info):
+                    raise LockError(_UNSAFE)
             except OSError as exc:
                 raise LockError(_REFERENCE) from exc
         source = prior[3] if prior is not None else inherited_fd

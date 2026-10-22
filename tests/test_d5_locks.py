@@ -222,6 +222,24 @@ class TestD5Locks(unittest.TestCase):
                     self.assertEqual(path.read_bytes(), b"unchanged")
                     path.unlink()
 
+    def test_existing_nonprivate_inherited_drain_uses_unsafe_refusal(self):
+        path = self.directory / "authority.drain.lock"
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            for mode in (0o644, 0o640, 0o620, 0o610, 0o604, 0o602, 0o601):
+                with self.subTest(mode=oct(mode)):
+                    os.fchmod(fd, mode)
+                    locks.fcntl.flock(fd, locks.fcntl.LOCK_SH)
+                    with locks.pin(self.directory) as record, \
+                            mock.patch.object(locks.fcntl, "flock", side_effect=AssertionError("flock")), \
+                            mock.patch.object(os, "fchmod", side_effect=AssertionError("fchmod")), \
+                            self.refused(locks._UNSAFE), record.drain(inherited_fd=fd):
+                        self.fail("nonprivate inherited drain entered")
+                    self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), mode)
+                    self.assertFalse(self.available(path.name))
+        finally:
+            os.close(fd)
+
     def test_G6_unrelated_permission_error_does_not_change_mode(self):
         with locks.pin(self.directory) as record:
             with record.state():
