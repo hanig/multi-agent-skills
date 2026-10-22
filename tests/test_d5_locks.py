@@ -521,6 +521,28 @@ class TestCleanup(unittest.TestCase):
             with self.subTest(trigger=trigger):
                 self.check_site("pin", trigger)
 
+    def test_caller_finally_cleanup_preserves_pending_exception(self):
+        # Reproduced review finding; intentionally red in the recovery branch.
+        primary = ValueError("primary")
+        cause = LookupError("original cause")
+        primary.__cause__ = cause
+        real_close = os.close
+
+        def close(fd):
+            real_close(fd)
+            raise OSError(errno.EIO, "cleanup EIO")
+
+        with self.assertRaises(BaseException) as caught:
+            try:
+                raise primary
+            finally:
+                with mock.patch.object(os, "close", side_effect=close):
+                    with locks.pin(self.directory):
+                        pass
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(str(caught.exception), "primary")
+        self.assertIs(caught.exception.__cause__, cause)
+
     def test_post_open_cleanup(self):
         real_close = os.close
         def close(fd):
