@@ -1,5 +1,7 @@
 """U3b store integration with real locks and deterministic pipe ordering."""
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+import ast
+import errno
 import os
 from pathlib import Path
 import select
@@ -7,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from unittest import mock
 
@@ -22,6 +25,7 @@ STATE = "authority.lock"
 DRAIN = "authority.drain.lock"
 WRITERS = ("create", "check", "revoke", "relinquish", "claim", "replace")
 ANCHOR = ProcessIdentity(42, 9000001)
+FS_PREFIX = "record: filesystem operation failed; durability is unconfirmed:"
 
 
 def operation(d, name):
@@ -301,6 +305,161 @@ class TestD5StoreGate(unittest.TestCase):
                     store.claim(d, 103, MANDATE, "outer",
                                 ProcessIdentity(44, 9000003), probe)
                 self.assertEqual(store.read(d), observed[0])
+
+    def test_read_only_liveness_succeeds(self):
+        d = self.seed("claim")
+        observed = []
+        def probe(identity):
+            observed.append((identity, store.read(d)))
+            return "dead"
+        result = store.claim(d, 103, MANDATE, "outer",
+                             ProcessIdentity(44, 9000003), probe)
+        self.assertEqual(observed, [(ANCHOR, held())])
+        self.assertEqual(result["custody"]["generation"], 2)
+        self.assertEqual(store.read(d), result)
+
+    def test_host_liveness_has_no_store_mutator_calls(self):
+        # Inspect the whole adapter, including liveness's local callees.
+        source = (ROOT / "skills/hanig-orchestrate/scripts/d5_host.py").read_text()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = [n.name for n in node.names] + [getattr(node, "module", "") or ""]
+                self.assertFalse(any("d5_authority_store" in name for name in names))
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "id", getattr(node.func, "attr", ""))
+                self.assertNotIn(name, WRITERS)
+
+    def test_fake_lock_refusals_and_filesystem_causes(self):
+        messages = ("D5 lock refused: unsafe lock file",
+                    "D5 lock refused: safe locking unavailable",
+                    "D5 lock refused: acquisition order",
+                    "D5 lock refused: cross-record nesting",
+                    "D5 custody change refused: caller holds shared drain",
+                    "D5 lock refused: closed record",
+                    "D5 lock refused: drain mode change",
+                    "D5 lock refused: invalid shared drain reference")
+        for name in WRITERS + ("read",):
+            d = self.seed(name)
+            stages = ["pin", "state"]
+            if name != "read":
+                stages.append("start")
+            if name in ("claim", "replace"):
+                stages.append("drain")
+            if name == "create":
+                stages.append("_open")
+            for stage in stages:
+                for message in messages:
+                    for caused in (False, True):
+                        with self.subTest(name=name, stage=stage, message=message, caused=caused):
+                            fault = OSError(errno.EACCES, "synthetic lock open")
+                            refusal = locks.LockError(message)
+                            def fail():
+                                if caused:
+                                    raise refusal from fault
+                                raise refusal
+                            @contextmanager
+                            def guard(*args, **kwargs):
+                                fail()
+                                yield
+                            fake = types.SimpleNamespace(LockError=locks.LockError, pin=guard)
+                            if stage == "pin":
+                                patch = mock.patch.object(store, "locks", fake)
+                            else:
+                                patch = mock.patch.object(locks._Record, stage,
+                                                          lambda *a, **k: fail()) if stage == "_open" else \
+                                    mock.patch.object(locks._Record, stage, guard)
+                            with patch, self.assertRaises(store.AuthorityError) as caught:
+                                operation(d, name)
+                            error = caught.exception
+                            if caused:
+                                self.assertEqual(str(error), FS_PREFIX + " " + str(fault))
+                                self.assertIs(error.__cause__, fault)
+                            else:
+                                self.assertEqual(str(error), message)
+                                self.assertIs(error.__cause__, refusal)
+
+    def test_lock_refusal_survives_descriptor_close_failure(self):
+        for name in WRITERS + ("read",):
+            d = self.seed(name)
+            primary = locks.LockError("D5 lock refused: unsafe lock file")
+            secondary = OSError(errno.EIO, "synthetic close failure")
+            close = os.close
+            def closing(fd):
+                close(fd)
+                raise secondary
+            with self.subTest(name=name), \
+                    mock.patch.object(locks._Record, "_open", side_effect=primary), \
+                    mock.patch.object(os, "close", side_effect=closing), \
+                    self.assertRaises(store.AuthorityError) as caught:
+                operation(d, name)
+            self.assertEqual(str(caught.exception), str(primary))
+            self.assertIs(caught.exception.__cause__, primary)
+            self.assertEqual(primary.cleanup_errors, (secondary,))
+
+    def test_symlinked_record_directory_is_refused(self):
+        for name in WRITERS + ("read",):
+            d = self.seed(name)
+            alias = self.d / (name + "-alias")
+            alias.symlink_to(d, target_is_directory=True)
+            before = {p.name: p.read_bytes() for p in d.iterdir()}
+            with self.subTest(name=name), self.assertRaises(store.AuthorityError) as caught:
+                operation(alias, name)
+            self.assertTrue(str(caught.exception).startswith(FS_PREFIX))
+            self.assertIsInstance(caught.exception.__cause__, OSError)
+            self.assertEqual({p.name: p.read_bytes() for p in d.iterdir()}, before)
+
+    def test_pre_u3b_differential_records_results_and_errors(self):
+        # The recorded base predates this integration. CI fetches full history.
+        source = subprocess.check_output([
+            "git", "show", "bfed06136d9291d8e7727c58b7642c65c4d1c103:"
+            "skills/hanig-orchestrate/scripts/d5_authority_store.py"], cwd=str(ROOT))
+        old = types.ModuleType("pre_u3b_store")
+        exec(compile(source, "pre_u3b_store.py", "exec"), old.__dict__)
+        def transcript(module):
+            with tempfile.TemporaryDirectory() as directory:
+                d = Path(directory)
+                fresh = grant("c" * 32)
+                fresh["confirmation"]["owner_response"] = "fresh consent"
+                successor = ProcessIdentity(43, 9000002)
+                calls = [("create", (held(),)), ("create", (held(),)),
+                         ("read", ()), ("check", (102, MANDATE)),
+                         ("check", (True, MANDATE)), ("revoke", (102, "")),
+                         ("claim", (102, MANDATE, "next", successor, lambda _: "alive")),
+                         ("relinquish", (102, "native", ANCHOR)),
+                         ("claim", (103, MANDATE, "next", successor, lambda _: "dead")),
+                         ("claim", (104, MANDATE, "next", successor, lambda _: "dead")),
+                         ("replace", (grant("b" * 32),)),
+                         ("revoke", (105, "stop")), ("revoke", (106, "again")),
+                         ("check", (107, MANDATE)), ("replace", (fresh,)),
+                         ("check", (fresh["expires_at"], MANDATE)),
+                         ("check", (108, b"changed")), ("check", (109, MANDATE)),
+                         ("claim", (110, MANDATE, "next", successor, lambda _: "dead"))]
+                result = []
+                for name, args in calls:
+                    try:
+                        value = getattr(module, name)(d, *args)
+                        outcome = ("return", module.encode(value) if isinstance(value, dict) else value)
+                    except store.AuthorityError as exc:
+                        self.assertNotIsInstance(exc.__cause__, OSError)
+                        outcome = (type(exc), str(exc))
+                    records = {str(p.relative_to(d)): p.read_bytes() for p in d.rglob("*.json")}
+                    result.append((name, outcome, records))
+                return result
+        self.assertEqual(transcript(old), transcript(store))
+        # Same path, no D: pin-first changes its spelling, not the FS contract.
+        for name in WRITERS + ("read",):
+            errors = []
+            for module in (old, store):
+                with mock.patch.dict(operation.__globals__, store=module), \
+                        self.assertRaises(store.AuthorityError) as caught:
+                    operation(self.d / "missing", name)
+                error = caught.exception
+                self.assertTrue(str(error).startswith(FS_PREFIX))
+                self.assertIsInstance(error.__cause__, OSError)
+                errors.append((type(error), str(error).split(": [Errno", 1)[0],
+                               error.__cause__.errno))
+            self.assertEqual(errors[0], errors[1], name)
+            self.assertEqual(errors[0][2], errno.ENOENT)
 
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
