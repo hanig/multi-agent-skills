@@ -902,6 +902,45 @@ with tempfile.TemporaryDirectory() as left, tempfile.TemporaryDirectory() as rig
                     finally:
                         d.chmod(0o700)
 
+    def test_review_read_with_two_descriptor_slots_matches_legacy(self):
+        script = '''
+import resource
+from tests.test_d5_store_gate import *
+old = legacy_store()
+with tempfile.TemporaryDirectory() as tmp:
+    d = Path(tmp)
+    expected = store.create(d, held())
+    raw = (d / store.RECORD_NAME).read_bytes()
+    saved = resource.getrlimit(resource.RLIMIT_NOFILE)
+    slots = [os.open(os.devnull, os.O_RDONLY) for _ in range(2)]
+    limit = max(slots) + 1
+    for fd in slots:
+        os.close(fd)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (limit, saved[1]))
+    try:
+        assert old.read(d) == expected
+        assert store.read(d) == expected
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, saved)
+        assert (d / store.RECORD_NAME).read_bytes() == raw
+'''
+        result = subprocess.run([sys.executable, "-c", script], cwd=str(ROOT),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_review_symlink_with_invalid_record_keeps_C2c(self):
+        link = self.d / "link"
+        target = self.d / "target"
+        target.mkdir(mode=0o700)
+        link.symlink_to(target, target_is_directory=True)
+        for name in ("create", "replace"):
+            with self.subTest(name=name):
+                with self.assertRaises(store.AuthorityError) as caught:
+                    getattr(store, name)(link, {})
+                self.assertEqual(list(target.iterdir()), [])
+                self.assertTrue(str(caught.exception).startswith(FS_PREFIX))
+                self.assertIsInstance(caught.exception.__cause__, OSError)
+
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
         started, finished = threading.Event(), threading.Event()

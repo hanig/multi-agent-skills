@@ -1,7 +1,6 @@
 # D5 U3b store integration test index
 
-Names below are methods in `test_d5_store_gate.py` unless a module is named.
-The frozen contract is E/C0–C4 with C2-FS and three declared divergences.
+Methods are in `test_d5_store_gate.py` unless a module is named.
 
 | Group / name fragment | Contract and mutation |
 | --- | --- |
@@ -19,12 +18,9 @@ The frozen contract is E/C0–C4 with C2-FS and three declared divergences.
 | `C2FS_denied_lock_creation` | C2-FS: original acquisition denial; FALLBACK-ENOENT |
 | `lock_refusal_survives`, `post_open_error`, `test_d5_authority_store.py` cleanup/durability tests | C4 and C2-FS: refusal/cause survives cleanup |
 | `test_d5_locks.py::test_DISCARD_CLEANUP_ERROR_preserves_post_open_refusal` | C4: suppressed diagnostics retained; DISCARD-CLEANUP-ERROR |
+| `review_read_with_two_descriptor_slots`, `review_symlink_with_invalid_record` | Preserved failing C3(i) and C2(c) regressions; NOT READY |
 
-Outside-E coverage is deliberate: permission/foreign-owner/nondirectory
-fixtures pin C0's refusal. Directory swaps and metadata changes in the pin
-tests require closed OOE categories 1/2; OD14 explicitly requests that guard.
-`review_C0_precedes_unavailable` is OOE category 3; its historical name is kept,
-but OD16 makes refusal ordering non-contractual. Callback writes are unsupported
-(category 2) and exercise the explicitly retained observation guard.
-Other lock, authority-store, registry, custody and lease tests retain their
-existing contract coverage; they are not new U3b guarantees.
+Outside E: permission/foreign-owner/nondirectory fixtures pin C0.
+Pin swaps/metadata changes require OOE categories 1/2 (OD14).
+`review_C0_precedes_unavailable` is category 3: OD16 accepts either refusal.
+Callback writes exercise the retained unsupported-callback guard.
