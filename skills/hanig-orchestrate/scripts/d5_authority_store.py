@@ -5,6 +5,10 @@ Supported envelope and accepted limits
 Exclusive drain installation is completed in U3h; no claim of completed
 takeover protection in this unit. The named store calls share U3a's local,
 stable-identity, same-record nesting envelope. No production activation.
+D must be a directory owned by the effective UID with owner read, write and
+search permission (st_mode & 0o700 == 0o700). The registry creates D with
+mode 0700. The store checks this envelope before opening lock files; symlinked
+D retains the safe-opening refusal.
 A liveness callback that writes its own record is unsupported. claim refuses
 with `record: changed during liveness observation`.
 
@@ -65,9 +69,24 @@ def _cleanup(action, *args):
         action(*args)
 
 
+def _check_directory(directory):
+    try:
+        info = os.lstat(directory)
+    except OSError as exc:
+        raise AuthorityError("record: filesystem operation failed; "
+                             "durability is unconfirmed: {}".format(exc)) from exc
+    # Leave symlinks to pin's existing O_NOFOLLOW refusal (C2(c)).
+    if not stat.S_ISLNK(info.st_mode):
+        _require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
+                 info.st_mode & 0o700 == 0o700, "record",
+                 "directory must be owned by the caller and grant its owner "
+                 "read, write and search permission")
+
+
 @contextmanager
 def _locked(directory, *, start=False, drain=False, initialize=False):
     directory = Path(directory)
+    _check_directory(directory)
     try:
         # Preserve legacy pathname failures before creating permanent locks.
         try:
@@ -156,6 +175,7 @@ write_bytes = _write
 
 
 def create(directory, record):
+    _check_directory(directory)
     validate(record)
     raw = encode(record)
     with _locked(directory, start=True, initialize=True) as directory:
@@ -240,6 +260,7 @@ def relinquish(directory, now, session_id, anchor):
 
 
 def replace(directory, new):
+    _check_directory(directory)
     raw = encode(new)
     new = decode(raw)
     with _locked(directory, start=True, drain=True) as directory:

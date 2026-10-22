@@ -608,18 +608,85 @@ class TestD5StoreGate(unittest.TestCase):
             errors.append((type(error), error.__cause__.errno, files(d)))
         self.assertEqual(errors[0], errors[1])
 
-    def test_review_directory_modes(self):
-        for mode in (0o500, 0o300):
-            d = self.seed(str(mode))
-            if mode == 0o500: (d / START).unlink()
-            try:
-                d.chmod(mode)
-                with self.subTest(mode=mode):
-                    try: store.check(d, 102, MANDATE)
-                    except store.AuthorityError as e:
-                        self.assertEqual(e.__cause__.errno, errno.EACCES)
-                        raise
-            finally: d.chmod(0o700)
+    def test_C0_permission_matrix(self):
+        message = ("record: directory must be owned by the caller and grant its "
+                   "owner read, write and search permission")
+        old = legacy_store()
+        for mode in (0o700, 0o500, 0o300):
+            for name in WRITERS + ("read",):
+                snapshots = []
+                for module in ((old, store) if mode == 0o700 else (store,)):
+                    with self.subTest(mode=oct(mode), name=name, module=module.__name__), \
+                            tempfile.TemporaryDirectory() as tmp:
+                        d = Path(tmp)
+                        path = d / store.RECORD_NAME
+                        raw = store.encode(held())
+                        path.write_bytes(raw)
+                        d.chmod(mode)
+                        try:
+                            with mock.patch.dict(operation.__globals__, store=module):
+                                if mode == 0o700:
+                                    try:
+                                        value = operation(d, name)
+                                        outcome = ("return", module.encode(value)
+                                                   if isinstance(value, dict) else value)
+                                    except store.AuthorityError as exc:
+                                        outcome = (type(exc),)
+                                    snapshots.append((outcome, files(d)))
+                                else:
+                                    with mock.patch.object(locks, "pin") as pin, \
+                                            self.assertRaises(store.AuthorityError) as caught:
+                                        operation(d, name)
+                                    self.assertEqual(str(caught.exception), message)
+                                    pin.assert_not_called()
+                                    self.assertEqual(path.read_bytes(), raw)
+                        finally:
+                            d.chmod(0o700)
+                        if mode != 0o700:
+                            self.assertEqual(list(d.iterdir()), [path])
+                if mode == 0o700:
+                    self.assertEqual(snapshots[0], snapshots[1])
+
+    def test_C0_foreign_owner_and_nondirectory(self):
+        real = os.lstat
+        for name in WRITERS + ("read",):
+            for kind in ("owner", "file"):
+                with self.subTest(name=name, kind=kind), tempfile.TemporaryDirectory() as tmp:
+                    d = Path(tmp) / "record"
+                    if kind == "file":
+                        d.write_bytes(b"unchanged")
+                    else:
+                        d.mkdir(mode=0o700)
+                        (d / store.RECORD_NAME).write_bytes(store.encode(held()))
+                    before = d.read_bytes() if kind == "file" else files(d)
+                    def lookup(path, *args, **kwargs):
+                        info = real(path, *args, **kwargs)
+                        if Path(path) == d and kind == "owner":
+                            return types.SimpleNamespace(st_mode=info.st_mode,
+                                                         st_uid=os.geteuid() + 1)
+                        return info
+                    with mock.patch.object(os, "lstat", side_effect=lookup), \
+                            mock.patch.object(locks, "pin") as pin, \
+                            self.assertRaises(store.AuthorityError) as caught:
+                        operation(d, name)
+                    self.assertEqual(str(caught.exception),
+                        "record: directory must be owned by the caller and grant its "
+                        "owner read, write and search permission")
+                    pin.assert_not_called()
+                    self.assertEqual(d.read_bytes() if kind == "file" else files(d), before)
+
+    def test_C0_precedes_create_replace_argument_validation(self):
+        self.d.chmod(0o500)
+        try:
+            for name in ("create", "replace"):
+                with self.subTest(name=name), self.assertRaises(store.AuthorityError) as caught:
+                    getattr(store, name)(self.d, {})
+                self.assertEqual(str(caught.exception),
+                    "record: directory must be owned by the caller and grant its "
+                    "owner read, write and search permission")
+        finally:
+            self.d.chmod(0o700)
+        self.assertEqual(list(self.d.iterdir()), [])
 
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
