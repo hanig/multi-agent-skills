@@ -228,6 +228,8 @@ def claim(directory, now, mandate_bytes, session_id, anchor, liveness):
             identity = ProcessIdentity(custody["anchor_pid"], custody["anchor_start_us"])
             if (session_id, anchor) != (custody["session_id"], identity):
                 holder = observe_liveness(identity, liveness)
+                _require(_load(directory / RECORD_NAME)[0] == record,
+                         "record", "changed during liveness observation")
         updated = claimed(record, session_id, anchor.pid, anchor.start_us, now, holder)
         if updated != record:
             _write(directory / RECORD_NAME, encode(updated))
