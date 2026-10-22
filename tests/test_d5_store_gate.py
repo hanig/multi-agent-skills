@@ -221,6 +221,24 @@ class TestD5StoreGate(unittest.TestCase):
             self.finish(proc)
         self.assertEqual(store.read(directory), held())
 
+    def test_initial_drain_inode_keeps_refused_replacement_nonmutating(self):
+        directory = self.seed("replacement")
+
+        def snapshot():
+            return {str(p.relative_to(directory)):
+                    (p.stat().st_ino, p.stat().st_mode, p.stat().st_mtime_ns,
+                     p.read_bytes() if p.is_file() else None)
+                    for p in [directory] + list(directory.rglob("*"))}
+
+        before = snapshot()
+        replacement = grant("b" * 32)
+        replacement["issued_at"] += 1
+        replacement["expires_at"] += 1
+        with self.assertRaisesRegex(store.AuthorityError, "extension requires fresh confirmation"):
+            store.replace(directory, replacement)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual((directory / DRAIN).stat().st_mode & 0o777, 0o600)
+
     def test_claim_replace_wait_for_drain_without_start_or_state(self):
         for name in ("claim", "replace"):
             with self.subTest(name=name):
