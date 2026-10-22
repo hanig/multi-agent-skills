@@ -608,6 +608,19 @@ class TestD5StoreGate(unittest.TestCase):
             errors.append((type(error), error.__cause__.errno, files(d)))
         self.assertEqual(errors[0], errors[1])
 
+    def test_review_directory_modes(self):
+        for mode in (0o500, 0o300):
+            d = self.seed(str(mode))
+            if mode == 0o500: (d / START).unlink()
+            try:
+                d.chmod(mode)
+                with self.subTest(mode=mode):
+                    try: store.check(d, 102, MANDATE)
+                    except store.AuthorityError as e:
+                        self.assertEqual(e.__cause__.errno, errno.EACCES)
+                        raise
+            finally: d.chmod(0o700)
+
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
         started, finished = threading.Event(), threading.Event()
