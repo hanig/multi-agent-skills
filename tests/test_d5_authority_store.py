@@ -245,9 +245,10 @@ class TestD5AuthorityStore(unittest.TestCase):
                             self.eq(A.create(d, grant()), grant())
 
     def test_durability_faults(self):
-        steps = ("lock_open", "flock", "mkstemp", "fdopen", "write", "flush",
+        steps = ("pin_open", "start_open", "lock_open", "flock", "mkstemp", "fdopen", "write", "flush",
                  "file_fsync", "file_close", "replace", "replace_after",
-                 "directory_open", "directory_fsync", "directory_close", "lock_close")
+                 "directory_open", "directory_fsync", "directory_close", "lock_close",
+                 "start_close", "pin_close")
         for operation in ("create", "check", "revoke"):
             for step in steps:
                 with self.subTest(operation=operation, step=step), tempfile.TemporaryDirectory() as d:
@@ -264,12 +265,16 @@ class TestD5AuthorityStore(unittest.TestCase):
                     real_open, real_close = os.open, os.close
                     descriptors = {}
                     def opening(path, flags, *args, **kwargs):
-                        kind = "lock" if Path(path).name == A.LOCK_NAME else "directory"
-                        if step == kind + "_open" and (kind == "lock" or Path(path) == Path(d)):
+                        # Pinning D and syncing D are separate descriptor lifetimes.
+                        kind = ("pin" if flags & os.O_DIRECTORY else
+                                "lock" if Path(path).name == A.LOCK_NAME else
+                                "start" if Path(path).name == "authority.start.lock" else "directory")
+                        target = kind != "directory" or Path(path) == Path(d)
+                        if step == kind + "_open" and target:
                             calls.append(step)
                             raise fault
                         fd = real_open(path, flags, *args, **kwargs)
-                        if kind == "lock" or Path(path) == Path(d):
+                        if target:
                             descriptors[fd] = kind
                         return fd
                     def closing(fd):
@@ -323,7 +328,8 @@ class TestD5AuthorityStore(unittest.TestCase):
                                 raise fault
                             return fsync(fd)
                         effect = sync
-                    elif step.endswith("_open") or step in ("directory_close", "lock_close"):
+                    elif step.endswith("_open") or step in (
+                            "directory_close", "lock_close", "start_close", "pin_close"):
                         name = "fstat"  # open/close hooks below inject these faults.
                         effect = os.fstat
                     effect = effect or injected(getattr(owner, name))
@@ -340,7 +346,8 @@ class TestD5AuthorityStore(unittest.TestCase):
                     self.assertIs(caught.exception.__cause__, fault)
                     self.eq(calls, [step])
                     after = step in ("replace", "replace_after", "directory_open",
-                                     "directory_fsync", "directory_close", "lock_close")
+                                     "directory_fsync", "directory_close", "lock_close",
+                                     "start_close", "pin_close")
                     if after:
                         self.assertIn("durability is unconfirmed", str(caught.exception))
                         visible = A.read(d) if current.exists() else None

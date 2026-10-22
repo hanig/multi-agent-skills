@@ -1,4 +1,13 @@
-"""Inert D5 record I/O. Keep authority.lock permanent.
+"""Inert D5 record I/O. Keep the D5 lock files permanent.
+
+Supported envelope and accepted limits
+-------------------------------------
+Exclusive drain installation is completed in U3h; no claim of completed
+takeover protection in this unit. The named store calls share U3a's local,
+stable-identity, same-record nesting envelope. No production activation.
+
+Does not serialize arbitrary mandate-file editors.
+Does not claim all repository writers use these entry points.
 
 No authority decision is made on unknown filesystem state: a lookup or
 durability failure refuses. At or after os.replace, durability is unconfirmed
@@ -13,9 +22,10 @@ import fcntl
 import os
 import stat
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 
+import d5_locks as locks
 from d5_authority import (AuthorityError, validate, encode, decode, evaluate,
                           revoked, claimed, relinquished, replacement_allowed)
 from d5_host import ProcessIdentity
@@ -54,14 +64,32 @@ def _cleanup(action, *args):
 
 
 @contextmanager
-def _locked(directory):
+def _preserving(guard):
+    """Release a lock context without replacing the store's primary error."""
+    value = guard.__enter__()
+    with _cleanup(guard.__exit__, None, None, None):
+        yield value
+
+
+@contextmanager
+def _locked(directory, *, start=False, drain=False):
     directory = Path(directory)
     try:
-        fd = os.open(str(directory / LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
-        with _cleanup(os.close, fd):
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        with ExitStack() as stack:
+            record = stack.enter_context(_preserving(locks.pin(directory)))
+            if drain:
+                stack.enter_context(_preserving(record.drain(shared=False)))
+            if start:
+                stack.enter_context(_preserving(record.start()))
+            stack.enter_context(_preserving(record.state()))
             yield directory
-    except OSError as exc:
+    except (OSError, locks.LockError) as exc:
+        # The lock manager wraps open failures. Keep the store's public
+        # filesystem refusal and original OSError cause for these failures.
+        if isinstance(exc, locks.LockError):
+            if not isinstance(exc.__cause__, OSError):
+                raise
+            exc = exc.__cause__
         raise AuthorityError("record: filesystem operation failed; "
                              "durability is unconfirmed: {}".format(exc)) from exc
 
@@ -126,7 +154,7 @@ write_bytes = _write
 def create(directory, record):
     validate(record)
     raw = encode(record)
-    with _locked(directory) as directory:
+    with _locked(directory, start=True) as directory:
         _require(not _present(directory / RECORD_NAME, "record"),
                  "record", "already exists")
         _unused_id(directory, record)
@@ -140,7 +168,7 @@ def read(directory):
 
 
 def check(directory, now, mandate_bytes):
-    with _locked(directory) as directory:
+    with _locked(directory, start=True) as directory:
         record, _ = _load(directory / RECORD_NAME)
         state, invalidation = evaluate(record, now, mandate_bytes)
         if state == "mandate_changed":
@@ -150,7 +178,7 @@ def check(directory, now, mandate_bytes):
 
 
 def revoke(directory, now, reason):
-    with _locked(directory) as directory:
+    with _locked(directory, start=True) as directory:
         record, raw = _load(directory / RECORD_NAME)
         updated = revoked(record, now, reason)
         _write(directory / RECORD_NAME, encode(updated) if updated != record else raw)
@@ -168,7 +196,7 @@ def observe_liveness(anchor, liveness):
 
 def claim(directory, now, mandate_bytes, session_id, anchor, liveness):
     """Evaluate and claim under the permanent record lock; persist invalidation."""
-    with _locked(directory) as directory:
+    with _locked(directory, start=True, drain=True) as directory:
         record, _ = _load(directory / RECORD_NAME)
         state, invalidation = evaluate(record, now, mandate_bytes)
         if state == "mandate_changed":
@@ -189,7 +217,7 @@ def claim(directory, now, mandate_bytes, session_id, anchor, liveness):
 
 def relinquish(directory, now, session_id, anchor):
     """Retain the exact holder and its first relinquishment under the lock."""
-    with _locked(directory) as directory:
+    with _locked(directory, start=True) as directory:
         record, _ = _load(directory / RECORD_NAME)
         updated = relinquished(record, session_id, anchor.pid, anchor.start_us, now)
         if updated != record:
@@ -200,7 +228,7 @@ def relinquish(directory, now, session_id, anchor):
 def replace(directory, new):
     raw = encode(new)
     new = decode(raw)
-    with _locked(directory) as directory:
+    with _locked(directory, start=True, drain=True) as directory:
         old, old_raw = _load(directory / RECORD_NAME)
         if new["custody"] is None:
             new["custody"] = old["custody"]
