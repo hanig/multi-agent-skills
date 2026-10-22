@@ -100,7 +100,7 @@ class TestCompletion(unittest.TestCase):
         saved = self.snapshot()
         for candidate in variants:
             with self.subTest(candidate=type(candidate).__name__), self.refuse(C.MISMATCH):
-                C.bind(candidate)
+                C.bind(candidate).complete(self.outcome)
             self.assertEqual(self.snapshot(), saved)
         # Recheck immutable data at accounting, not merely when binding.
         path = self.path(receipt)
@@ -150,6 +150,9 @@ class TestCompletion(unittest.TestCase):
         receipt, attempt = self.receipt(), self.prepare()
         capability, uncertainty = C.bind(receipt), C.bind(attempt)
         store.revoke(self.directory, record["expires_at"] + 1, "revoked after submission")
+        self.assertEqual(capability.complete(self.outcome), self.outcome)
+        receipt = self.receipt()
+        capability = C.bind(receipt)
         successor = copy.deepcopy(record)
         successor["grant_id"] = "e" * 32
         successor["confirmation"]["owner_response"] = "fresh consent"
