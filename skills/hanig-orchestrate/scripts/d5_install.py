@@ -41,7 +41,8 @@ def _anchor():
 
 def _bound(path, cwd):
     """Bind a locator to entry cwd without normalizing filesystem components."""
-    return os.path.join(cwd if isinstance(path, bytes) else os.fsdecode(cwd), path)
+    # The store consumes text locators; fsdecode preserves filesystem bytes.
+    return os.path.join(os.fsdecode(cwd), os.fsdecode(path))
 
 
 @contextmanager
