@@ -3,6 +3,8 @@
 Ordering uses pipes/events or lock-entry hooks. Timeouts only fail tests and
 reap fixture processes: they never release or steal an operational lock.
 """
+from contextlib import ExitStack
+import errno
 import os
 from pathlib import Path
 import select
@@ -459,6 +461,99 @@ class TestD5Locks(unittest.TestCase):
                 thread.join(10)
                 self.assertFalse(thread.is_alive(), "thread watchdog")
                 self.assertEqual(results, [True])
+
+
+
+class TestCleanup(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.directory = Path(temp.name)
+
+    def check_site(self, site, trigger):
+        primary = (OSError(errno.EIO, "flock primary") if trigger == "flock" else
+                   KeyboardInterrupt("caller primary"))
+        cause = ValueError("primary cause")
+        primary.__cause__ = cause
+        cleanup = OSError(errno.EIO, "close cleanup")
+        real_close = os.close
+
+        def close(fd):
+            real_close(fd)  # Inject the error after releasing the fixture fd.
+            raise cleanup
+
+        with ExitStack() as stack:
+            record = stack.enter_context(locks.pin(self.directory)) if site != "pin" else None
+            guard = locks.pin(self.directory) if record is None else getattr(record, site)()
+            with mock.patch.object(os, "close", side_effect=close) as closing:
+                if trigger == "flock":
+                    stack.enter_context(mock.patch.object(locks.fcntl, "flock", side_effect=primary))
+                with self.assertRaises(BaseException) as caught:
+                    # An already handled caller exception is not unwinding this guard.
+                    try:
+                        raise ValueError("ambient handled exception")
+                    except ValueError:
+                        with guard:
+                            if trigger == "body":
+                                raise primary
+                closing.assert_called_once()
+            expected = cleanup if trigger == "none" else primary
+            self.assertIs(caught.exception, expected)
+            self.assertEqual(str(caught.exception), str(expected))
+            self.assertIs(caught.exception.__cause__, None if trigger == "none" else cause)
+        self.assertEqual(locks._held(), [])
+        if record is not None:
+            self.assertIsNone(record.fd)
+
+    def test_exclusive_cleanup(self):
+        for site in ("start", "state"):
+            for trigger in ("body", "flock", "none"):
+                with self.subTest(site=site, trigger=trigger):
+                    self.check_site(site, trigger)
+
+    def test_drain_cleanup(self):
+        for trigger in ("body", "flock", "none"):
+            with self.subTest(trigger=trigger):
+                self.check_site("drain", trigger)
+
+    def test_pin_cleanup(self):
+        for trigger in ("body", "none"):
+            with self.subTest(trigger=trigger):
+                self.check_site("pin", trigger)
+
+    def test_post_open_cleanup(self):
+        real_close = os.close
+        def close(fd):
+            real_close(fd)
+            raise OSError(errno.EIO, "close cleanup")
+
+        with locks.pin(self.directory) as record:
+            # New file: _safe is first consulted after open/fstat.
+            with mock.patch.object(locks, "_safe", return_value=False), \
+                    mock.patch.object(os, "close", side_effect=close) as closing, \
+                    self.assertRaises(locks.LockError) as caught:
+                record._open(2)
+            closing.assert_called_once()
+            self.assertEqual(str(caught.exception), locks._UNSAFE)
+            self.assertIsNone(caught.exception.__cause__)
+
+    def test_open_primary_oserror_keeps_original_wrapping(self):
+        primary = OSError(errno.EIO, "fstat primary")
+        primary.__cause__ = ValueError("source cause")
+        real_close = os.close
+        def close(fd):
+            real_close(fd)
+            raise OSError(errno.EIO, "close cleanup")
+
+        with locks.pin(self.directory) as record:
+            with mock.patch.object(os, "fstat", side_effect=primary), \
+                    mock.patch.object(os, "close", side_effect=close) as closing, \
+                    self.assertRaises(locks.LockError) as caught:
+                record._open(2)
+            closing.assert_called_once()
+            self.assertEqual(str(caught.exception), locks._UNSAFE)
+            self.assertIs(caught.exception.__cause__, primary)
+            self.assertEqual(str(primary.__cause__), "source cause")
 
 
 if __name__ == "__main__":
