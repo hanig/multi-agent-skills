@@ -72,7 +72,7 @@ def _preserving(guard):
 
 
 @contextmanager
-def _locked(directory, *, start=False, drain=False):
+def _locked(directory, *, start=False, drain=False, initialize=False):
     directory = Path(directory)
     try:
         with ExitStack() as stack:
@@ -82,6 +82,11 @@ def _locked(directory, *, start=False, drain=False):
             if start:
                 stack.enter_context(_preserving(record.start()))
             stack.enter_context(_preserving(record.state()))
+            if initialize:
+                # Create the permanent drain inode before initial publication.
+                # A later refused replacement must not change the directory.
+                # This uses U3a's safe opener without acquiring a drain lock.
+                os.close(record._open(0))
             yield directory
     except (OSError, locks.LockError) as exc:
         # The lock manager wraps open failures. Keep the store's public
@@ -154,7 +159,7 @@ write_bytes = _write
 def create(directory, record):
     validate(record)
     raw = encode(record)
-    with _locked(directory, start=True) as directory:
+    with _locked(directory, start=True, initialize=True) as directory:
         _require(not _present(directory / RECORD_NAME, "record"),
                  "record", "already exists")
         _unused_id(directory, record)
