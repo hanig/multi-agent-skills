@@ -798,6 +798,58 @@ with tempfile.TemporaryDirectory() as left, tempfile.TemporaryDirectory() as rig
                                             "^record: changed during liveness observation$"):
                     store.claim(d, 103, MANDATE, "next", ProcessIdentity(43, 9000002), probe)
 
+    def test_review_swapped_foreign_directory_is_refused(self):
+        # Preservation regression: a swap violates the stable-identity limit.
+        # Synthesize foreign ownership; never chown another user's data.
+        d, incoming, saved = (self.d / name for name in ("D", "incoming", "saved"))
+        for path in (d, incoming):
+            path.mkdir(mode=0o700)
+            store.create(path, held())
+        incoming.chmod(0o777)
+        info = incoming.stat()
+        key = info.st_dev, info.st_ino
+        lstat, fstat = os.lstat, os.fstat
+        swapped = []
+
+        def foreign(info):
+            if (info.st_dev, info.st_ino) == key:
+                fields = {k: getattr(info, k) for k in dir(info) if k.startswith("st_")}
+                fields["st_uid"] = os.geteuid() + 1
+                return types.SimpleNamespace(**fields)
+            return info
+
+        def swap(path, *args, **kwargs):
+            info = lstat(path, *args, **kwargs)
+            if Path(path) == d and not swapped:
+                d.rename(saved)
+                incoming.rename(d)
+                swapped.append(True)
+            return foreign(info)
+
+        before = (d / store.RECORD_NAME).read_bytes()
+        with mock.patch.object(os, "lstat", side_effect=swap), \
+                mock.patch.object(os, "fstat", side_effect=lambda fd: foreign(fstat(fd))):
+            with self.assertRaisesRegex(store.AuthorityError,
+                    "^record: directory must be owned by the caller and grant its "
+                    "owner read, write and search permission$"):
+                store.revoke(d, 102, "stop")
+        self.assertEqual((saved / store.RECORD_NAME).read_bytes(), before)
+        self.assertEqual((d / store.RECORD_NAME).read_bytes(), before)
+
+    def test_review_C0_precedes_unavailable_facilities(self):
+        # Preservation regression for the reported competing refusal sources.
+        self.d.chmod(0o500)
+        try:
+            with mock.patch.object(store, "_facilities", side_effect=locks.LockError(
+                    "D5 lock refused: safe locking unavailable")):
+                with self.assertRaisesRegex(store.AuthorityError,
+                        "^record: directory must be owned by the caller and grant its "
+                        "owner read, write and search permission$"):
+                    store.read(self.d)
+            self.assertEqual(list(self.d.iterdir()), [])
+        finally:
+            self.d.chmod(0o700)
+
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
         started, finished = threading.Event(), threading.Event()
