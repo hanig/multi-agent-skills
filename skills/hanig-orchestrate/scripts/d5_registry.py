@@ -2,13 +2,19 @@
 
 Local filesystem, trusted same-UID writers. Filesystem objects identify a
 repository and state directory; paths are locators, never identity. Atomic
-registry snapshots permit read-only lookup without creating a lock.
+registry snapshots permit nonmutating lookup without creating a lock.
 The permanent registry lock serializes registration writes.
 No custody, enforcement, migration or protection from outside-lock writers.
 
 Registration checks containment by object identity. Both operations require
-Git 2.36 or later and a standard repository layout. Lookup-time tamper checks
-are U1b-1b (ARC-2793); this module remains inert until activation.
+Git 2.36 or later and a standard repository layout. Lookup and idempotent
+registration check owned directories for Git entries and record identity;
+this module remains inert until activation.
+
+Registry schema 2 includes record_key. Fact: register has refused while D5
+is inactive since U1b-1 merged (PR 267), and D5 has never been active.
+Existing schema-1 files were written by tests or by hand; none can hold a grant.
+Non-claim: a schema-1 registry is not migrated.
 
 Non-claims: path-string equivalence; equivalence across clones or copies;
 persistence across inode recreation; protection against malicious same-UID
@@ -16,12 +22,21 @@ replacement; TOCTOU against a writer outside the lock.
 - **Bind mounts or other aliases** of an operated worktree's descendants. The supported host is macOS, without bind mounts.
 - **Recreated directories whose `(st_dev, st_ino)` the filesystem reuses.**
 - **A race against a concurrent same-UID writer.**
-- Containment created after registration. That is U1b-1b's lookup-time check.
+- Substitution between the directory walk and a later use of the record root.
 - **A separate Git directory named `.git`.** Git reports its parent as the main worktree and records the original checkout nowhere, so it is indistinguishable from a standard repository.
-- **An unlisted alias.** Containment does not cover any checkout that reaches the common directory through a `.git` file but is absent from Git's worktree list.
+- **An unlisted alias.** Containment does not cover a checkout that reaches the common directory through a `.git` file but is absent from Git's worktree list.
 
 Non-claim: if an earlier failed call created B itself, a later retry does not re-confirm B's link in its parent. The external base is coordinator infrastructure (`~/.local/state`) that normally pre-exists.
+
+Tamper-walk non-claims:
+- The envelope gate (U1b-1c) may stat D before the walk.
+- A concurrent same-UID substitution between two `lstat` calls (TOCTOU).
+- Components above R are not checked by the walk.
+- Identity equality does not detect a recreated directory that the filesystem gives the same `(st_dev, st_ino)` (inode reuse).
+- Registration needs read permission on R and `plans` for the OD4 directory fsyncs.
+- The new-registration path, which creates D and then takes `record_key`, is outside C6 and C7.
 """
+import errno
 import fcntl
 import json
 import os
@@ -45,7 +60,7 @@ import child_environment as CE
 
 AuthorityError = authority.AuthorityError
 _ENTRY_FIELDS = {"registration_id", "repo_key", "plan_id", "state_key",
-                 "checkout", "git_common_dir", "state_dir", "record_dir"}
+                 "checkout", "git_common_dir", "state_dir", "record_dir", "record_key"}
 
 
 def d5_active():
@@ -197,8 +212,12 @@ def _entries(root):
         raise AuthorityError("registry: invalid JSON: {}".format(exc)) from exc
     _require(type(value) is dict and set(value) == {"schema_version", "entries"},
              "invalid registry fields")
-    _require(type(value["schema_version"]) is int and value["schema_version"] == 1,
-             "invalid schema_version")
+    version = value["schema_version"]
+    _require(type(version) is int, "invalid schema_version")
+    _require(version != 1, "unsupported registry schema 1, written before tamper checks; "
+             "D5 was never active, so it holds no grants: remove registry.json "
+             "and register again")
+    _require(version == 2, "invalid schema_version")
     entries = value["entries"]
     _require(type(entries) is list, "entries must be a list")
     ids, plans, states = set(), set(), set()
@@ -209,7 +228,7 @@ def _entries(root):
         _require(type(rid) is str and re.fullmatch(r"[0-9a-f]{32}", rid) is not None,
                  "invalid registration_id")
         _plan_id(entry["plan_id"])
-        for field in ("repo_key", "state_key"):
+        for field in ("repo_key", "state_key", "record_key"):
             key = entry[field]
             _require(type(key) is list and len(key) == 2 and
                      all(type(n) is int and n >= 0 for n in key), "invalid " + field)
@@ -228,18 +247,38 @@ def _entries(root):
     return entries
 
 
-def _find(entries, identity, state_fd):
+def _find(root, entries, identity, state_fd):
     for entry in entries:
         if (entry["repo_key"], entry["plan_id"]) == (identity["repo_key"], identity["plan_id"]):
             # Re-verify the open object, never the caller's or stored path spelling.
             info = os.fstat(state_fd)
             _require(entry["state_key"] == [info.st_dev, info.st_ino],
                      "state_key mismatch: state directory replaced or conflicting")
-            _directory(Path(entry["record_dir"]))
+            _check_record(root, entry)
             return entry
     _require(not any(e["state_key"] == identity["state_key"] for e in entries),
              "state_key already registered to another plan")
     return None
+
+
+def _record_key(root, registration_id):
+    """Check R/P/D top-down by no-follow lstat; open and create nothing."""
+    for path in (root, root / "plans", root / "plans" / registration_id):
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "Not a directory", str(path))
+        try:
+            os.lstat(path / ".git")
+        except FileNotFoundError:
+            pass
+        else:
+            raise AuthorityError("authority storage became a Git worktree")
+    return list(_key(info))
+
+
+def _check_record(root, entry):
+    _require(_record_key(root, entry["registration_id"]) == entry["record_key"],
+             "record_key mismatch: record directory replaced")
 
 
 def _directory(path):
@@ -275,7 +314,7 @@ def register(checkout, plan_id, state_dir):
             root, identity, state_fd, protected):
         # OD6: R/P checks precede the registry read and this registration's D
         # check. Preflight D before even the infrastructure's first mkdir.
-        existing = _find(_entries(root), identity, state_fd)
+        existing = _find(root, _entries(root), identity, state_fd)
         rid = existing["registration_id"] if existing else uuid.uuid4().hex
         directory = root / "plans" / rid
         info = _directory(directory) if existing is None else None
@@ -289,12 +328,13 @@ def register(checkout, plan_id, state_dir):
         with _locked(root):
             # Another registration may have published during preflight.
             entries = _entries(root)
-            existing = _find(entries, identity, state_fd)
+            existing = _find(root, entries, identity, state_fd)
             plans = root / "plans"
             if existing is None:
                 plans.mkdir(mode=0o700, exist_ok=True)
                 _require(not _directory(directory), str(directory) + ": already exists")
                 directory.mkdir(mode=0o700)  # Never reuse a record root.
+                record_key = _record_key(root, rid)
             # OD4: confirm the fixed chain on every call. R is synced once below:
             # by the atomic registry write, or explicitly on idempotent retry.
             for path in (base, root.parent, plans):
@@ -305,8 +345,9 @@ def register(checkout, plan_id, state_dir):
                     os.fsync(fd)
                 store.sync_directory(root)
                 return existing
-            entry = dict(identity, registration_id=rid, record_dir=str(directory))
-            raw = (json.dumps({"schema_version": 1, "entries": entries + [entry]},
+            entry = dict(identity, registration_id=rid, record_dir=str(directory),
+                         record_key=record_key)
+            raw = (json.dumps({"schema_version": 2, "entries": entries + [entry]},
                               sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
             store.write_bytes(root / "registry.json", raw)
             return entry
@@ -315,4 +356,4 @@ def register(checkout, plan_id, state_dir):
 def lookup(checkout, plan_id, state_dir):
     """Read an atomic registry snapshot; absent registration returns None."""
     with _identity(checkout, plan_id, state_dir) as (root, identity, state_fd, _):
-        return _find(_entries(root), identity, state_fd)
+        return _find(root, _entries(root), identity, state_fd)

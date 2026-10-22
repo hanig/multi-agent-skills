@@ -1,6 +1,6 @@
 """D5 registration against real local repositories and directory objects."""
 import copy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import errno
 import fcntl
 import json
@@ -18,6 +18,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
 import d5_registry as R
+import d5_lease as lease
 import d5_authority_store as store
 
 
@@ -286,12 +287,17 @@ class TestD5Registry(unittest.TestCase):
                     if Path(candidate) == directory:
                         reads.assert_called_once_with(self.root / "registry.json")
                     return present(candidate, field)
-                def opened(candidate, *args):
-                    candidate = Path(candidate)
+                def opened(candidate, flags, **kwargs):
                     self.assertEqual(path, directory)  # R/P still refuse all opens.
-                    self.assertNotEqual(candidate, directory)
-                    self.assertNotIn(directory, candidate.parents)
-                    return os.open(str(candidate), *args)
+                    self.assertFalse(flags & os.O_CREAT)
+                    if candidate == entry["registration_id"]:
+                        reads.assert_called_once_with(self.root / "registry.json")
+                        self.assertEqual(flags, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                        self.assertIn("dir_fd", kwargs)
+                    else:
+                        self.assertNotEqual(Path(candidate), directory)
+                        self.assertNotIn(directory, Path(candidate).parents)
+                    return os.open(str(candidate), flags, **kwargs)
                 with mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops, \
                      mock.patch.object(store, "present", side_effect=checked), \
                      mock.patch.object(store, "read_bytes", wraps=store.read_bytes) as reads, \
@@ -299,7 +305,8 @@ class TestD5Registry(unittest.TestCase):
                     ops.open = opened
                     for call in (self.register, lambda: R.lookup(self.repo, "p", self.state)):
                         reads.reset_mock()
-                        with self.assertRaisesRegex(R.AuthorityError, str(path)):
+                        message = str(path) if path != directory else "filesystem/git operation failed"
+                        with self.assertRaisesRegex(R.AuthorityError, message):
                             call()
             finally:
                 path.unlink()
@@ -379,7 +386,7 @@ class TestD5Registry(unittest.TestCase):
         path = self.root / "registry.json"
         original = path.read_bytes()
         valid = json.loads(original)
-        invalid = [b'{"schema_version":1,"schema_version":1,"entries":[]}', b"NaN", b"\xff"]
+        invalid = [b'{"schema_version":2,"schema_version":2,"entries":[]}', b"NaN", b"\xff"]
         for field, value in (("schema_version", True), ("entries", {}), ("extra", 1)):
             record = copy.deepcopy(valid)
             record[field] = value
@@ -406,7 +413,7 @@ class TestD5Registry(unittest.TestCase):
         path = self.root / "registry.json"
         path.unlink()
         target = self.d / "target"
-        target.write_text('{"schema_version":1,"entries":[]}')
+        target.write_text('{"schema_version":2,"entries":[]}')
         for kind in ("link", "fifo", "directory"):
             if kind == "link":
                 path.symlink_to(target)
@@ -761,15 +768,14 @@ class TestD5Registry(unittest.TestCase):
         first = self.register(repo=linked)
         self.assertEqual(R.lookup(linked, "p", self.state), first)
 
-    def test_record_worktree_refuses_before_first_mkdir_but_lookup_is_unchanged(self):
+    def test_record_worktree_refuses_before_first_mkdir_and_on_lookup(self):
         entry = self.register()
         directory = Path(entry["record_dir"])
         self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
+        self.assertEqual(entry["record_key"], list(R._key(directory.stat())))
         before = self.tree()
         with mock.patch.object(Path, "mkdir", side_effect=AssertionError("mkdir")):
-            with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
-                self.register()
-        self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+            self.assert_tamper_refused("authority storage became a Git worktree")
         self.assertEqual(self.tree(), before)
 
     def test_candidate_record_worktree_refuses_before_first_mkdir(self):
@@ -792,6 +798,479 @@ class TestD5Registry(unittest.TestCase):
         self.disable_maintenance(self.d)
         entry = self.register()
         self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+
+
+    def assert_tamper_refused(self, message):
+        for call in (lambda: R.lookup(self.repo, "p", self.state), self.register):
+            with self.subTest(operation=call), \
+                 mock.patch.object(os, "fsync", side_effect=AssertionError("fsync before check")):
+                before = len(os.listdir("/dev/fd"))
+                with self.assertRaisesRegex(R.AuthorityError, message):
+                    call()
+                self.assertEqual(len(os.listdir("/dev/fd")), before, "fd leak on refusal")
+
+    def test_git_entry_at_each_owned_level(self):
+        entry = self.register()
+        for directory in (self.root, self.root / "plans", Path(entry["record_dir"])):
+            for kind in ("file", "directory", "dangling symlink"):
+                marker = directory / ".git"
+                if kind == "file":
+                    marker.write_text("gitdir: unused\n")
+                elif kind == "directory":
+                    marker.mkdir()
+                else:
+                    marker.symlink_to(self.d / "missing")
+                try:
+                    with self.subTest(level=directory, kind=kind):
+                        self.assert_tamper_refused("authority storage became a Git worktree")
+                finally:
+                    marker.rmdir() if kind == "directory" else marker.unlink()
+
+    def test_record_recreated_refuses(self):
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)  # Pin the old inode; reuse is a non-claim.
+        directory.rmdir()
+        directory.mkdir()
+        self.assertNotEqual(entry["record_key"], list(R._key(directory.stat())))
+        self.assert_tamper_refused("record_key mismatch: record directory replaced")
+
+    def test_record_symlink_to_same_inode_refuses(self):
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        moved = self.d / "moved"
+        directory.rename(moved)
+        directory.symlink_to(moved, target_is_directory=True)
+        self.assertEqual(entry["record_key"], list(R._key(directory.stat())))
+        self.assertFalse((moved / ".git").exists())
+        self.assert_tamper_refused("filesystem/git operation failed")
+
+    def test_walk_itself_refuses_symlinks_at_every_level(self):
+        entry = self.register()
+        for path in (self.root, self.root / "plans", Path(entry["record_dir"])):
+            moved = self.d / "moved"
+            path.rename(moved)
+            path.symlink_to(moved, target_is_directory=True)
+            try:
+                before = len(os.listdir("/dev/fd"))
+                with self.subTest(level=path), self.assertRaises(OSError):
+                    R._record_key(self.root, entry["registration_id"])
+                self.assertEqual(len(os.listdir("/dev/fd")), before)
+            finally:
+                path.unlink()
+                moved.rename(path)
+
+    def test_walk_opens_nothing_and_leaks_no_fds_on_each_lstat_failure(self):
+        entry = self.register()
+        real_lstat = os.lstat
+        for failed_call in range(6):  # Directory and .git at every level.
+            calls = []
+            def probe(path):
+                calls.append(path)
+                if len(calls) == failed_call + 1:
+                    raise PermissionError(errno.EACCES, "synthetic walk failure")
+                return real_lstat(path)
+            before = len(os.listdir("/dev/fd"))
+            with self.subTest(failed_call=failed_call), \
+                 mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops:
+                ops.open = mock.Mock(side_effect=AssertionError("walk opened a directory"))
+                ops.lstat = probe
+                with self.assertRaises(PermissionError):
+                    R._record_key(self.root, entry["registration_id"])
+                self.assertEqual(len(calls), failed_call + 1)
+                ops.open.assert_not_called()
+            self.assertEqual(len(os.listdir("/dev/fd")), before)
+
+    def test_walk_rejects_non_directory_at_every_level(self):
+        entry = self.register()
+        for path in (self.root, self.root / "plans", Path(entry["record_dir"])):
+            moved = self.d / "moved"
+            path.rename(moved)
+            path.write_bytes(b"not a directory")
+            try:
+                with self.subTest(level=path), self.assertRaises(NotADirectoryError):
+                    R._record_key(self.root, entry["registration_id"])
+            finally:
+                path.unlink()
+                moved.rename(path)
+
+    @contextmanager
+    def walk_io(self, probe):
+        """Intercept filesystem entry points while the real walk executes."""
+        with ExitStack() as stack:
+            for name in ("open", "scandir", "listdir", "stat"):
+                stack.enter_context(mock.patch.object(
+                    os, name, side_effect=AssertionError("walk called " + name)))
+            stack.enter_context(mock.patch("builtins.open", side_effect=AssertionError("open")))
+            stack.enter_context(mock.patch.object(Path, "open", side_effect=AssertionError("Path.open")))
+            stack.enter_context(mock.patch.object(os, "lstat", side_effect=probe))
+            yield
+
+    def test_adversarial_walk_trace_and_refusals(self):
+        entry = self.register()
+        levels = (self.root, self.root / "plans", Path(entry["record_dir"]))
+        paths = [p for level in levels for p in (level, level / ".git")]
+        real_lstat = os.lstat
+        # Each case supplies one altered lstat result, or one failed probe.
+        cases = [("healthy", None, None, None, 6)]
+        for i, level in enumerate(levels):
+            cases.append(("symlink", level, SimpleNamespace(st_mode=0o120777),
+                          NotADirectoryError, 2 * i + 1))
+            for mode in (0o100600, 0o040700, 0o120777):
+                cases.append(("git", level / ".git", SimpleNamespace(st_mode=mode),
+                              R.AuthorityError, 2 * i + 2))
+        for field in ("st_dev", "st_ino"):
+            info = real_lstat(levels[-1])
+            changed = SimpleNamespace(st_mode=info.st_mode, st_dev=info.st_dev, st_ino=info.st_ino)
+            setattr(changed, field, getattr(changed, field) + 1)
+            cases.append((field, levels[-1], changed, R.AuthorityError, 6))
+        for i, path in enumerate(paths):
+            codes = (errno.EACCES, errno.EIO, errno.ENOTDIR)
+            if path in levels:
+                codes += (errno.ENOENT,)
+            for code in codes:
+                cases.append(("error", path, OSError(code, "synthetic lstat failure"),
+                              OSError, i + 1))
+        for label, altered, result, error, count in cases:
+            calls = []
+            def probe(path):
+                calls.append(path)
+                if path == altered:
+                    if isinstance(result, OSError):
+                        raise result
+                    return result
+                return real_lstat(path)
+            with self.subTest(case=label, path=altered, result=result), self.walk_io(probe):
+                if error is None:
+                    R._check_record(self.root, entry)
+                else:
+                    with self.assertRaises(error) as caught:
+                        R._check_record(self.root, entry)
+                    if label == "git":
+                        self.assertEqual(str(caught.exception), "authority storage became a Git worktree")
+                    if label in ("st_dev", "st_ino"):
+                        self.assertIn("record_key mismatch", str(caught.exception))
+            self.assertEqual(calls, paths[:count])
+
+    def test_record_key_schema_is_strict_and_new_registry_is_version_two(self):
+        entry = self.register()
+        path = self.root / "registry.json"
+        original = path.read_bytes()
+        valid = json.loads(original)
+        self.assertEqual(valid["schema_version"], 2)
+        self.assertEqual(entry["record_key"], list(R._key(Path(entry["record_dir"]).stat())))
+        for key in (None, [], [1], [1, 2, 3], [True, 1], [-1, 1], [1, "2"], {"dev": 1}):
+            value = copy.deepcopy(valid)
+            value["entries"][0]["record_key"] = key
+            path.write_text(json.dumps(value))
+            with self.subTest(key=key):
+                self.assert_tamper_refused("invalid record_key")
+        value = copy.deepcopy(valid)
+        del value["entries"][0]["record_key"]
+        path.write_text(json.dumps(value))
+        self.assert_tamper_refused("invalid entry fields")
+        path.write_bytes(original)
+        self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+
+    def test_walk_after_read_before_use_and_initial_key_from_lstat(self):
+        events, probes, keys = [], [], []
+        real_open, real_lstat, real_fsync = os.open, os.lstat, os.fsync
+        real_entries, real_walk = R._entries, R._record_key
+        real_sync, real_mkdir = store.sync_directory, Path.mkdir
+        real_write, real_stat = store.write_bytes, Path.stat
+        walking, phase = False, None
+        def entries(root):
+            result = real_entries(root)
+            events.append("read")
+            if phase == "published" and events == ["read"]:
+                return []  # Another registration publishes before the locked read.
+            return result
+        def walk(root, rid):
+            nonlocal walking
+            self.assertEqual(events[-1], "mkdir" if phase == "new" else "read")
+            walking = True
+            try:
+                result = real_walk(root, rid)
+            finally:
+                walking = False
+            events.append("walk")
+            return result
+        def opened(path, flags, *args, **kwargs):
+            self.assertFalse(walking, "tamper walk opened a directory")
+            self.assertNotEqual(Path(path).parent, self.root / "plans", "D opened")
+            return real_open(path, flags, *args, **kwargs)
+        def fsync(fd):
+            if phase in ("lookup", "idempotent", "published"):
+                self.assertEqual(events[-1], "walk", "fsync preceded tamper walk")
+            return real_fsync(fd)
+        def lstat(path):
+            if walking:
+                probes.append(path)
+            info = real_lstat(path)
+            if walking and path.parent == self.root / "plans":
+                keys.append(list(R._key(info)))
+            return info
+        def path_stat(path, *args, **kwargs):
+            if path.parent == self.root / "plans":
+                self.assertNotEqual(phase, "lookup", "lookup used D outside walk")
+                if phase in ("idempotent", "published"):
+                    self.assertEqual(events[-1], "walk", "D use preceded tamper walk")
+            return real_stat(path, *args, **kwargs)
+        def mkdir(path, *args, **kwargs):
+            real_mkdir(path, *args, **kwargs)
+            if path.parent == self.root / "plans":
+                events.append("mkdir")
+        def sync(path):
+            if path in self.chain() or path.parent == self.root / "plans":
+                self.assertEqual(events[-1], "walk", "fsync preceded tamper walk")
+                self.assertNotEqual(path.parent, self.root / "plans", "D synced")
+            elif path == self.base.parent:
+                self.assertEqual(phase, "new")
+                self.assertNotIn("walk", events)
+                events.append("base-sync")
+            real_sync(path)
+        def write(path, raw):
+            self.assertEqual(events[-1], "walk")
+            self.assertEqual(json.loads(raw)["entries"][0]["record_key"], keys[-1])
+            real_write(path, raw)
+        with mock.patch.object(R, "_entries", side_effect=entries), \
+             mock.patch.object(R, "_record_key", side_effect=walk), \
+             mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops, \
+             mock.patch.object(Path, "mkdir", mkdir), \
+             mock.patch.object(Path, "stat", path_stat), \
+             mock.patch.object(store, "write_bytes", side_effect=write), \
+             mock.patch.object(store, "sync_directory", side_effect=sync):
+            ops.open, ops.lstat, ops.fsync = opened, lstat, fsync
+            for phase, call in (("new", self.register),
+                                ("lookup", lambda: R.lookup(self.repo, "p", self.state)),
+                                ("idempotent", self.register),
+                                ("published", self.register)):
+                events.clear()
+                probes.clear()
+                keys.clear()
+                before = len(os.listdir("/dev/fd"))
+                entry = call()
+                expected = {"new": ["read", "base-sync", "read", "mkdir", "walk"],
+                            "lookup": ["read", "walk"],
+                            "idempotent": ["read", "walk", "read", "walk"],
+                            "published": ["read", "read", "walk"]}
+                self.assertEqual(events, expected[phase])
+                count = 2 if phase == "idempotent" else 1
+                self.assertEqual(keys, [entry["record_key"]] * count)
+                paths = (self.root, self.root / "plans", Path(entry["record_dir"]))
+                self.assertEqual(probes, [p for d in paths for p in (d, d / ".git")] * count)
+                self.assertEqual(len(os.listdir("/dev/fd")), before)
+
+    def test_lookup_and_lease_status_create_nothing_and_inherit_refusal(self):
+        entry = self.register()
+        before = self.tree()
+        real_open = os.open
+        def opened(path, flags, *args, **kwargs):
+            self.assertFalse(flags & os.O_CREAT)
+            return real_open(path, flags, *args, **kwargs)
+        with mock.patch.object(os, "open", side_effect=opened):
+            self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+            self.assertEqual(lease.status(self.repo, "p", self.state, now=150,
+                                          mandate_bytes=b"mandate")["registration"], entry)
+        self.assertEqual(self.tree(), before)
+        (Path(entry["record_dir"]) / ".git").write_text("gitdir: unused\n")
+        before = self.tree()
+        calls = [lambda: lease.status(self.repo, "p", self.state, now=150, mandate_bytes=b"mandate"),
+                 lambda: lease.revoke(self.repo, "p", self.state, 150, "stop"),
+                 lambda: lease.grant(self.repo, "p", self.state, issued_at=100,
+                                     confirmed_at=101, expires_at=200, mandate_bytes=b"mandate",
+                                     scope={"plans": ["p"], "repositories": ["repo"],
+                                            "actions": ["review"], "trackers": []},
+                                     owner_response="confirmed", displayed_bounds="bounded")]
+        with mock.patch.object(R, "d5_active", return_value=True), \
+             mock.patch.object(os, "open", side_effect=opened):
+            for call in calls:
+                with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
+                    call()
+        self.assertEqual(self.tree(), before)
+
+
+    @unittest.skipIf(os.geteuid() == 0, "requires non-root permission enforcement")
+    def test_review_round2_searchable_nonlistable_record_lookup(self):
+        # Preserved permission counterexample, repaired by the OD1 no-open walk.
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        original_mode = directory.stat().st_mode & 0o777
+        directory.chmod(0o300)
+        try:
+            self.assertEqual(list(R._key(directory.stat())), entry["record_key"])
+            self.assertFalse((directory / ".git").exists())
+            self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+        finally:
+            directory.chmod(original_mode)
+
+    @unittest.skipIf(os.geteuid() == 0, "requires non-root permission enforcement")
+    def test_search_only_levels_keep_lookup_and_required_durability(self):
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        sentinel = directory / "work"
+        sentinel.write_bytes(b"preserved work")
+        registry = (self.root / "registry.json").read_bytes()
+        real_sync, real_open = store.sync_directory, os.open
+        for level in (directory, self.root / "plans", self.root):
+            original_mode = level.stat().st_mode & 0o777
+            before = self.tree()
+            opened = []
+            def open_fd(path, *args, **kwargs):
+                opened.append(Path(path))
+                return real_open(path, *args, **kwargs)
+            level.chmod(0o300)
+            try:
+                with self.subTest(level=level), mock.patch.object(os, "open", side_effect=open_fd):
+                    # Real permissions, real fsyncs: no permission or durability mocks.
+                    self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+                    self.assertEqual(lease.status(self.repo, "p", self.state, now=150,
+                                                  mandate_bytes=b"mandate")["registration"], entry)
+                    self.assertNotIn(level, opened, "lookup/status opened restricted level")
+                    with mock.patch.object(store, "sync_directory", wraps=real_sync) as sync:
+                        if level == directory:
+                            self.assertEqual(self.register(), entry)
+                            self.assertEqual([c.args[0] for c in sync.call_args_list],
+                                             [self.base, self.root.parent, self.root / "plans", self.root])
+                        else:
+                            with self.assertRaisesRegex(R.AuthorityError, "durability is unconfirmed") as cm:
+                                self.register()
+                            self.assertIsInstance(cm.exception.__cause__, PermissionError)
+                            self.assertEqual(cm.exception.__cause__.errno, errno.EACCES)
+                            self.assertEqual(sync.call_args.args[0], level)
+                    self.assertNotIn(directory, opened, "registration opened D")
+                    self.assertEqual(list(R._key(directory.lstat())), entry["record_key"])
+                    self.assertEqual((self.root / "registry.json").read_bytes(), registry)
+                    self.assertEqual(sentinel.read_bytes(), b"preserved work")
+            finally:
+                level.chmod(original_mode)
+            self.assertEqual(self.tree(), before)
+            self.assertEqual(self.register(), entry)  # Operator recovery retains D.
+
+    def test_review_round1_lookup_walk_after_envelope_stat_is_read_only(self):
+        # Exercise a converted D from a later listed checkout without
+        # constraining the separate envelope gate's filesystem probes.
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
+        later = self.d / "zz-later"
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(later))
+        listed = R._worktrees(later)
+        self.assertLess(listed.index(directory), listed.index(later))
+        events = []
+        real_entries, real_walk, real_lstat = R._entries, R._record_key, os.lstat
+        def entries(root):
+            result = real_entries(root)
+            events.append("registry-read")
+            return result
+        def walk(root, rid):
+            events.append("tamper-walk")
+            with self.walk_io(real_lstat):
+                return real_walk(root, rid)
+        before = self.tree()
+        fds = len(os.listdir("/dev/fd"))
+        with mock.patch.object(R, "_entries", side_effect=entries), \
+             mock.patch.object(R, "_record_key", side_effect=walk):
+            with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
+                R.lookup(later, "p", self.state)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(len(os.listdir("/dev/fd")), fds)
+        self.assertLess(events.index("registry-read"), events.index("tamper-walk"))
+
+    def test_final_converted_record_refuses_without_walk_open(self):
+        # Unit-owned behavior, independent of the envelope's traversal.
+        directory = Path(self.register()["record_dir"])
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
+        real_walk, real_lstat = R._record_key, os.lstat
+        def walk(root, rid):
+            with self.walk_io(real_lstat):
+                return real_walk(root, rid)
+        before = self.tree()
+        with mock.patch.object(R, "_record_key", side_effect=walk) as checked:
+            with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
+                R.lookup(self.repo, "p", self.state)
+        self.assertEqual(self.tree(), before)
+        checked.assert_called_once()
+
+    def test_c6_unregistered_lookup_returns_none_without_walk(self):
+        # These absent/unmatched entries have no state ownership conflict.
+        other = self.d / "unregistered-state"
+        other.mkdir()
+        for registered in (False, True):
+            if registered:
+                self.register()
+            before = self.tree()
+            with self.subTest(registry_exists=registered), \
+                 mock.patch.object(R, "_entries", wraps=R._entries) as read, \
+                 mock.patch.object(R, "_record_key", wraps=R._record_key) as walk:
+                self.assertIsNone(R.lookup(self.repo, "unregistered", other))
+                read.assert_called_once()
+                walk.assert_not_called()
+            self.assertEqual(self.tree(), before)
+
+    def test_c6_state_conflicts_refuse_without_walk(self):
+        self.register()
+        other = self.d / "other-state"
+        other.mkdir()
+        for plan, state, message in (
+                ("p", other, "registry: state_key mismatch: state directory replaced or conflicting"),
+                ("unregistered", self.state, "registry: state_key already registered to another plan")):
+            for operation in (R.lookup, R.register):
+                before = self.tree()
+                with self.subTest(plan=plan, operation=operation.__name__), \
+                     mock.patch.object(R, "d5_active", return_value=True), \
+                     mock.patch.object(R, "_entries", wraps=R._entries) as read, \
+                     mock.patch.object(R, "_record_key", wraps=R._record_key) as walk:
+                    with self.assertRaises(R.AuthorityError) as caught:
+                        operation(self.repo, plan, state)
+                    self.assertEqual(str(caught.exception), message)
+                    read.assert_called_once()
+                    walk.assert_not_called()
+                self.assertEqual(self.tree(), before)
+
+    def test_schema_one_refuses_without_migration_or_mutation(self):
+        entry = self.register()
+        (Path(entry["record_dir"]) / "retained").write_bytes(b"existing work")
+        path = self.root / "registry.json"
+        original = json.loads(path.read_bytes())
+        message = ("registry: unsupported registry schema 1, written before tamper checks; "
+                   "D5 was never active, so it holds no grants: remove registry.json "
+                   "and register again")
+        for fields in ("with-key", "without-key", "empty"):
+            value = copy.deepcopy(original)
+            value["schema_version"] = 1
+            if fields == "without-key":
+                del value["entries"][0]["record_key"]
+            elif fields == "empty":
+                value["entries"] = []
+            path.write_text(json.dumps(value))
+            for call in (lambda: R.lookup(self.repo, "p", self.state), self.register):
+                before = self.tree(self.root)
+                with self.subTest(fields=fields, operation=call), \
+                     mock.patch.object(R, "_record_key", wraps=R._record_key) as walk:
+                    try:
+                        with self.assertRaises(R.AuthorityError) as caught:
+                            call()
+                        self.assertEqual(str(caught.exception), message)
+                        walk.assert_not_called()
+                    finally:
+                        self.assertEqual(self.tree(self.root), before)
+
+    def test_other_schema_versions_keep_existing_refusal(self):
+        self.register()
+        path = self.root / "registry.json"
+        value = json.loads(path.read_bytes())
+        for version in (None, True, False, 0, -1, 3, 1.0, 2.0, "1", "2", [], {}):
+            value["schema_version"] = version
+            path.write_text(json.dumps(value))
+            for call in (lambda: R.lookup(self.repo, "p", self.state), self.register):
+                before = self.tree(self.root)
+                with self.subTest(version=version, operation=call):
+                    with self.assertRaises(R.AuthorityError) as caught:
+                        call()
+                    self.assertEqual(str(caught.exception), "registry: invalid schema_version")
+                    self.assertEqual(self.tree(self.root), before)
 
 
 if __name__ == "__main__":
