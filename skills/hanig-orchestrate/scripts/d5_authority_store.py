@@ -69,6 +69,11 @@ def _cleanup(action, *args):
 def _locked(directory, *, start=False, drain=False, initialize=False):
     directory = Path(directory)
     try:
+        # Preserve legacy pathname failures before creating permanent locks.
+        try:
+            os.lstat(directory / LOCK_NAME)
+        except FileNotFoundError:
+            pass
         with ExitStack() as stack:
             record = stack.enter_context(locks.pin(directory))
             if drain:
@@ -207,9 +212,17 @@ def claim(directory, now, mandate_bytes, session_id, anchor, liveness):
         if custody is not None:
             identity = ProcessIdentity(custody["anchor_pid"], custody["anchor_start_us"])
             if (session_id, anchor) != (custody["session_id"], identity):
-                holder = observe_liveness(identity, liveness)
-                _require(_load(directory / RECORD_NAME)[0] == record,
-                         "record", "changed during liveness observation")
+                path = directory / RECORD_NAME
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+                # Keep the old inode alive so a write/restore cannot reuse it.
+                with _file(fd, "rb") as handle:
+                    before = os.fstat(fd)
+                    raw = handle.read()
+                    holder = observe_liveness(identity, liveness)
+                    after = _present(path, "record")
+                    _require(after and (before.st_dev, before.st_ino) ==
+                             (after.st_dev, after.st_ino) and read_bytes(path) == raw,
+                             "record", "changed during liveness observation")
         updated = claimed(record, session_id, anchor.pid, anchor.start_us, now, holder)
         if updated != record:
             _write(directory / RECORD_NAME, encode(updated))
