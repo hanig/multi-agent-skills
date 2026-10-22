@@ -31,7 +31,7 @@ from contextlib import contextmanager, ExitStack
 from pathlib import Path
 
 import d5_locks as locks
-from d5_locks import fcntl
+from d5_locks import fcntl, _facilities
 from d5_authority import (AuthorityError, validate, encode, decode, evaluate,
                           revoked, claimed, relinquished, replacement_allowed)
 from d5_host import ProcessIdentity
@@ -70,6 +70,10 @@ def _cleanup(action, *args):
 
 
 def _check_directory(directory):
+    try:
+        _facilities()
+    except locks.LockError as exc:
+        raise AuthorityError(str(exc)) from exc
     try:
         info = os.lstat(directory)
     except OSError as exc:
