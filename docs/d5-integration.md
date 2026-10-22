@@ -1,6 +1,6 @@
 <!-- docs-truth:status -->
 Status: live
-Date: 2026-10-21
+Date: 2026-10-22
 Title: D5 integration preparation
 Purpose: Record inactive integration, registration, lease management and host contracts.
 
@@ -17,7 +17,8 @@ internals block dependents.
 | Ancestry | Pid/ppid/start only; leaf first to topmost reachable; three-record and captured fixtures | Not atomic |
 | Hops | parent.start_time <= child.start_time; equality allowed; inversion suggests PID reuse | Nothing beyond a break is trusted |
 | Identity | (pid, kernel microsecond start time); reuse differs | EPERM/failure unknown, never dead |
-| Native ID | session_id alone reads CLAUDE_CODE_SESSION_ID (D5-OD4 custody half) | No custody established |
+| Native ID | session_id alone reads CLAUDE_CODE_SESSION_ID; required, no fallback; every verify_anchor rechecks ID and identity | No custody established |
+| Anchor | CLAUDE_PID: strict ASCII PID, strict ancestor, same real UID; identity from ancestry. Liveness: same start alive, changed start or ESRCH dead, otherwise unknown | Trusted same-UID environment can be forged; zombies count as alive; ancestry is not atomic |
 | Inactivity | Scope/merge refusal | No import scanner |
 | Mandate | U8 baseline below | No Markdown parser |
 
