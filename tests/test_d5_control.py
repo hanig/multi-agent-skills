@@ -161,11 +161,15 @@ class TestD5Control(unittest.TestCase):
                 self.addCleanup(pinned._record.entry.guards.__setitem__, 1, guard)
                 with mock.patch.dict(pinned._record.entry.guards, {1: ObservedGuard()}), \
                         mock.patch.object(store, name, side_effect=entered):
-                    with pinned.start():
-                        thread, results = self.launch(call)
-                        self.assertTrue(attempted.wait(10), "acquisition watchdog")
-                        self.assertEqual(trace, ["blocked"])
-                    self.joined(thread, results)
+                    thread, results = None, None
+                    try:
+                        with pinned.start():
+                            thread, results = self.launch(call)
+                            self.assertTrue(attempted.wait(10), "acquisition watchdog")
+                            self.assertEqual(trace, ["blocked"])
+                    finally:
+                        if thread is not None:
+                            self.joined(thread, results)
             self.assertEqual(trace, ["blocked", "store"])
 
     def test_revoke_records_during_protected_response_wait(self):
@@ -259,6 +263,14 @@ class TestD5Control(unittest.TestCase):
         # R2-FOLLOW-SYMLINK / R2-NONREGULAR. The FIFO also pins NONBLOCK.
         other = self.root / "old.md"
         other.write_bytes(MANDATE)
+        opening = os.open
+
+        def checked_open(path, flags, *args, **kwargs):
+            if Path(path) == self.mandate:
+                # R2-BLOCK-FIFO: fail before a mutated blocking open can hang.
+                self.assertTrue(flags & os.O_NONBLOCK)
+            return opening(path, flags, *args, **kwargs)
+
         for kind in ("missing", "symlink", "directory", "fifo"):
             self.mandate.unlink()
             if kind == "symlink":
@@ -269,7 +281,8 @@ class TestD5Control(unittest.TestCase):
                 os.mkfifo(self.mandate)
             before = self.path.read_bytes()
             try:
-                with self.subTest(kind=kind), mock.patch.object(store, "check") as check:
+                with self.subTest(kind=kind), mock.patch.object(store, "check") as check, \
+                        mock.patch.object(os, "open", side_effect=checked_open):
                     with self.assertRaises((OSError, authority.AuthorityError)):
                         control.record_mandate_invalidation(*self.args, now=150)
                     check.assert_not_called()
