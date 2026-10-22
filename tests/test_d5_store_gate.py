@@ -688,6 +688,30 @@ class TestD5StoreGate(unittest.TestCase):
             self.d.chmod(0o700)
         self.assertEqual(list(self.d.iterdir()), [])
 
+    def test_C2FS_denied_lock_creation_preserves_original_error(self):
+        opening = os.open
+        for name in WRITERS + ("read",):
+            stages = [STATE] if name == "read" else [START, STATE]
+            if name in ("create", "claim", "replace"):
+                stages.append(DRAIN)
+            for lock in stages:
+                with self.subTest(name=name, lock=lock), tempfile.TemporaryDirectory() as tmp:
+                    d = Path(tmp)
+                    d.chmod(0o700)
+                    raw = store.encode(held())
+                    (d / store.RECORD_NAME).write_bytes(raw)
+                    denied = PermissionError(errno.EACCES, "synthetic lock creation denial")
+                    def fail(path, *args, **kwargs):
+                        if path == lock:
+                            raise denied
+                        return opening(path, *args, **kwargs)
+                    with mock.patch.object(os, "open", side_effect=fail), \
+                            self.assertRaises(store.AuthorityError) as caught:
+                        operation(d, name)
+                    self.assertEqual((d / store.RECORD_NAME).read_bytes(), raw)
+                    self.assertIs(caught.exception.__cause__, denied)
+                    self.assertEqual(str(caught.exception), FS_PREFIX + " " + str(denied))
+
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
         started, finished = threading.Event(), threading.Event()
