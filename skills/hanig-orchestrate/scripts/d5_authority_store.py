@@ -5,6 +5,8 @@ Supported envelope and accepted limits
 Exclusive drain installation is completed in U3h; no claim of completed
 takeover protection in this unit. The named store calls share U3a's local,
 stable-identity, same-record nesting envelope. No production activation.
+A liveness callback that writes its own record is unsupported. claim refuses
+with `record: changed during liveness observation`.
 
 Does not serialize arbitrary mandate-file editors.
 Does not claim all repository writers use these entry points.
