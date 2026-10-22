@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import signal
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -217,6 +218,7 @@ class TestEffectLog(unittest.TestCase):
         raw = path.read_bytes()
         outside = self.d / "outside"
         outside.write_bytes(raw)
+        outside.chmod(0o600)
         for variant in ("symlink", "fifo", "hardlink", "writable"):
             path.unlink()
             if variant == "symlink":
@@ -232,6 +234,7 @@ class TestEffectLog(unittest.TestCase):
                 self.denied(E.complete, receipt, self.ok)
         path.unlink()
         path.write_bytes(raw)
+        path.chmod(0o600)
         self.eq(outside.read_bytes(), raw)
         directory = path.parent
         moved = self.d / "moved"
@@ -239,13 +242,15 @@ class TestEffectLog(unittest.TestCase):
         directory.symlink_to(moved, target_is_directory=True)
         self.denied(E.complete, receipt, self.ok)
         directory.unlink()
-        directory.mkdir()
+        directory.mkdir(mode=0o700)
         path.write_bytes(raw)
+        path.chmod(0o600)
         self.denied(E.complete, receipt, self.ok)
         other = self.d / "different-record"
-        other.mkdir()
-        (other / E.DIRECTORY).mkdir()
+        other.mkdir(mode=0o700)
+        (other / E.DIRECTORY).mkdir(mode=0o700)
         (other / E.DIRECTORY / path.name).write_bytes(raw)
+        (other / E.DIRECTORY / path.name).chmod(0o600)
         self.denied(E.complete, replace(receipt, _directory=str(other)), self.ok)
 
     def test_E1_serialization(self):
@@ -330,6 +335,49 @@ class TestEffectLog(unittest.TestCase):
         finally:
             os.umask(saved)
         self.eq(self.path(receipt).stat().st_mode & 0o777, 0o600)
+
+    def test_created_modes_under_umasks(self):
+        for mask in (0o000, 0o022, 0o077, 0o277, 0o777):
+            with self.subTest(umask=oct(mask)), tempfile.TemporaryDirectory() as directory:
+                self.reg["record_dir"] = directory
+                saved = os.umask(mask)
+                try:
+                    intent = self.prepare()
+                    effects = Path(directory) / E.DIRECTORY
+                    path = effects / (intent.effect_id + ".json")
+                    self.eq(stat.S_IMODE(effects.stat().st_mode), 0o700)
+                    self.eq(stat.S_IMODE(path.stat().st_mode), 0o600)
+                    receipt = E._classify(intent, "submitted")
+                    self.eq(stat.S_IMODE(path.stat().st_mode), 0o600)
+                    E.complete(receipt, self.ok)
+                    self.eq(stat.S_IMODE(path.stat().st_mode), 0o600)
+                    self.eq(list(effects.glob(".effect-*")), [])
+                finally:
+                    os.umask(saved)
+
+    def test_existing_nonprivate_files_and_directories_refused(self):
+        receipt = self.receipt()
+        path = self.path(receipt)
+        raw = path.read_bytes()
+        for target, owner in ((path, 0o600), (path.parent, 0o700), (self.d, 0o700)):
+            for bits in (0o044, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001):
+                with self.subTest(target=target.name, bits=oct(bits)):
+                    mode = owner | bits
+                    target.chmod(mode)
+                    inode = target.stat().st_ino
+                    try:
+                        self.denied(E.complete, receipt, self.ok)
+                        if target != path:
+                            self.denied(self.prepare)
+                            self.denied(E.unresolved, *self.args)
+                        else:
+                            self.eq(E.unresolved(*self.args), [{"file": path.name,
+                                "error": E.INVALID, "reconciliation_required": True}])
+                        self.eq(stat.S_IMODE(target.stat().st_mode), mode)
+                        self.eq(target.stat().st_ino, inode)
+                        self.eq(path.read_bytes(), raw)
+                    finally:
+                        target.chmod(owner)
 
 
     def test_E5_torn_intent(self):
