@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import weakref
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,8 +24,15 @@ import d5_locks as locks
 PEER = ROOT / "tests/fixtures/d5/lock_peer.py"
 
 
+def isolate_pool(case):
+    patch = mock.patch.object(locks, "_pool", weakref.WeakValueDictionary())
+    patch.start()
+    case.addCleanup(patch.stop)
+
+
 class TestD5Locks(unittest.TestCase):
     def setUp(self):
+        isolate_pool(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
@@ -444,6 +452,7 @@ class TestD5Locks(unittest.TestCase):
                     def __exit__(self, *args):
                         guard.release()
 
+                self.addCleanup(a.entry.guards.__setitem__, rank, guard)
                 a.entry.guards[rank] = Gate()
 
                 def contender():
@@ -466,6 +475,7 @@ class TestD5Locks(unittest.TestCase):
 
 class TestCleanup(unittest.TestCase):
     def setUp(self):
+        isolate_pool(self)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.directory = Path(temp.name)
@@ -581,6 +591,121 @@ class TestCleanup(unittest.TestCase):
             self.assertEqual(str(caught.exception), locks._UNSAFE)
             self.assertIs(caught.exception.__cause__, primary)
             self.assertEqual(str(primary.__cause__), "source cause")
+
+
+class TestCleanupErrors(unittest.TestCase):
+    """DISCARD-CLEANUP-ERROR: each consumer must retain its secondary error."""
+    def setUp(self):
+        isolate_pool(self)
+
+    def test_readonly_cleanup_errors_preserves_primary(self):
+        # ARC-3635-OD2: failed annotation drops the secondary, never the primary.
+        class Primary(RuntimeError):
+            @property
+            def cleanup_errors(self):
+                return ()
+
+        self.check_annotation(Primary, "dropped")
+
+    def test_slots_cleanup_errors_preserves_primary(self):
+        class Primary(RuntimeError):
+            __slots__ = ("code",)
+
+        # BaseException still supplies __dict__; slots alone allow annotation.
+        self.check_annotation(Primary, "attached")
+
+    def test_setattr_cleanup_errors_preserves_primary(self):
+        class Primary(RuntimeError):
+            def __setattr__(self, name, value):
+                if name == "cleanup_errors":
+                    raise AttributeError("diagnostics are read-only")
+                super().__setattr__(name, value)
+
+        self.check_annotation(Primary, "dropped")
+
+    def test_getter_cleanup_errors_preserves_primary(self):
+        class Primary(RuntimeError):
+            @property
+            def cleanup_errors(self):
+                raise ValueError("diagnostics are unreadable")
+
+        self.check_annotation(Primary, "unreadable")
+
+    def check_annotation(self, kind, annotation):
+        with tempfile.TemporaryDirectory() as directory:
+            for site in ("pin", "start", "state", "drain", "_open"):
+                with self.subTest(site=site), ExitStack() as stack:
+                    record = (None if site == "pin" else
+                              stack.enter_context(locks.pin(directory)))
+                    primary, secondary = kind("primary"), OSError("secondary")
+                    cause = ValueError("cause")
+                    primary.__cause__ = cause
+                    real_close = os.close
+
+                    def close(fd):
+                        real_close(fd)
+                        raise secondary
+
+                    with mock.patch.object(os, "close", side_effect=close) as closing:
+                        with self.assertRaises(BaseException) as caught:
+                            if site == "_open":
+                                with mock.patch.object(os, "fstat", side_effect=primary):
+                                    record._open(1)
+                            else:
+                                guard = (locks.pin(directory) if record is None
+                                         else getattr(record, site)())
+                                with guard:
+                                    raise primary
+                        closing.assert_called_once()
+                    self.assertIs(caught.exception, primary)
+                    self.assertIs(type(caught.exception), kind)
+                    self.assertEqual(str(caught.exception), "primary")
+                    self.assertIs(caught.exception.__cause__, cause)
+                    if annotation == "attached":
+                        self.assertEqual(caught.exception.cleanup_errors, (secondary,))
+                    elif annotation == "dropped":
+                        self.assertEqual(getattr(caught.exception, "cleanup_errors", ()), ())
+                    else:
+                        with self.assertRaisesRegex(ValueError, "diagnostics are unreadable"):
+                            _ = caught.exception.cleanup_errors
+
+    def test_cleanup_preserves_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for site in ("pin", "start", "state", "drain", "_open"):
+                for kind in (ValueError, OSError, KeyboardInterrupt):
+                    with self.subTest(site=site, kind=kind), ExitStack() as stack:
+                        record = (None if site == "pin" else
+                                  stack.enter_context(locks.pin(directory)))
+                        primary, secondary = kind("primary"), OSError("secondary")
+                        cause, previous = ValueError("cause"), OSError("previous")
+                        primary.__cause__ = cause
+                        primary.cleanup_errors = (previous,)
+                        real_close = os.close
+
+                        def close(fd):
+                            real_close(fd)
+                            raise secondary
+
+                        with mock.patch.object(os, "close", side_effect=close) as closing:
+                            with self.assertRaises(BaseException) as caught:
+                                if site == "_open":
+                                    with mock.patch.object(os, "fstat", side_effect=primary):
+                                        record._open(1)
+                                else:
+                                    guard = (locks.pin(directory) if record is None
+                                             else getattr(record, site)())
+                                    with guard:
+                                        raise primary
+                            closing.assert_called_once()
+                        observed = caught.exception
+                        if site == "_open" and kind is OSError:
+                            self.assertIsInstance(observed, locks.LockError)
+                            self.assertEqual(str(observed), locks._UNSAFE)
+                            observed = observed.__cause__
+                        self.assertIs(observed, primary)
+                        self.assertEqual(str(observed), "primary")
+                        self.assertIs(observed.__cause__, cause)
+                        self.assertEqual(observed.cleanup_errors, (previous, secondary))
 
 
 if __name__ == "__main__":

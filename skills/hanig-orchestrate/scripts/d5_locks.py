@@ -88,11 +88,14 @@ def _cleanup(action, *args, **kwargs):
     """
     try:
         yield
-    except BaseException:
+    except BaseException as primary:
         try:
             action(*args, **kwargs)
-        except OSError:
-            pass
+        except OSError as secondary:
+            try:
+                primary.cleanup_errors = getattr(primary, "cleanup_errors", ()) + (secondary,)
+            except Exception:
+                pass
         raise
     else:
         action(*args, **kwargs)
@@ -161,11 +164,14 @@ class _Record:
                 if not created and info.st_mode & 0o600 != 0o600:
                     os.fchmod(fd, 0o600)
                 return fd
-            except BaseException:
+            except BaseException as primary:
                 try:
                     os.close(fd)
-                except OSError:
-                    pass
+                except OSError as secondary:
+                    try:
+                        primary.cleanup_errors = getattr(primary, "cleanup_errors", ()) + (secondary,)
+                    except Exception:
+                        pass
                 raise
         except OSError as exc:
             raise LockError(_UNSAFE) from exc
