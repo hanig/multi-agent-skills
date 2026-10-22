@@ -2,7 +2,7 @@
 Status: live
 Date: 2026-10-22
 Title: D5 integration preparation
-Purpose: Record inactive integration, registration, lease management and host contracts.
+Purpose: Record inactive integration, registration, lease, custody and host contracts.
 
 **D5 is inactive; preparation only.** [Manifest](../tests/fixtures/d5/integration-manifest.json)
 classes cite handlers: reads=read_only, files/state=local_mutation,
@@ -89,5 +89,26 @@ containment and the Git/layout gates belong to U1b-1c (ARC-2794); tamper checks
 belong to U1b-1b (ARC-2793), both before activation. No claim of path-string or
 cross-clone equivalence, persistence across inode recreation, protection from
 malicious same-UID replacement, or TOCTOU against outside-lock writers.
-Cryptographic owner authentication, custody, enforcement, a CLI and activation
-remain later units. D5 stays inactive.
+`d5_custody.py` adds inert `claim`, `relinquish` and diagnostic `status` APIs,
+with no CLI or production caller. Claim and relinquish require activation,
+registration and a verified native session anchor; an Unknown anchor refuses
+with its reason and has no fallback. Under the permanent record lock, claim
+evaluates the grant and durably invalidates a changed mandate before refusing.
+Only a valid grant can be claimed. Initial custody has generation 1; the exact
+same session ID and process incarnation continue without a write. A different
+session or anchor requires the stored holder's death and increments generation
+without a new grant or owner confirmation. Liveness is three-valued: alive,
+dead or unknown; exceptions and unexpected results count as unknown. A zombie
+anchor counts as alive, and persistent anchors may delay rollover.
+
+Relinquishment retains the holder and its first relinquishment timestamp,
+disables that holder's further claims, and permits no live handoff. Grant
+replacement carries custody unchanged, including relinquishment; caller-supplied
+custody that differs refuses. There is no TTL, heartbeat or time-based takeover.
+Custody status reads bytes and decodes without locking, evaluation or writes,
+even while inactive. Its activation state, registration, custody, holder
+liveness and caller identity match are diagnostic, never authorization. A match
+can remain true for a relinquished holder or an invalidated or expired grant.
+
+Cryptographic owner authentication, enforcement, a CLI and activation remain
+later units. D5 stays inactive.

@@ -17,7 +17,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from d5_authority import (AuthorityError, validate, encode, decode, evaluate,
-                          revoked, replacement_allowed)
+                          revoked, claimed, relinquished, replacement_allowed)
+from d5_host import ProcessIdentity
 
 RECORD_NAME = "authority.json"
 LOCK_NAME = "authority.lock"
@@ -156,12 +157,55 @@ def revoke(directory, now, reason):
         return updated
 
 
+def observe_liveness(anchor, liveness):
+    """Inspection failures and unexpected results never establish death."""
+    try:
+        result = liveness(anchor)
+    except Exception:
+        return "unknown"
+    return result if type(result) is str and result in ("alive", "dead", "unknown") else "unknown"
+
+
+def claim(directory, now, mandate_bytes, session_id, anchor, liveness):
+    """Evaluate and claim under the permanent record lock; persist invalidation."""
+    with _locked(directory) as directory:
+        record, _ = _load(directory / RECORD_NAME)
+        state, invalidation = evaluate(record, now, mandate_bytes)
+        if state == "mandate_changed":
+            record["invalidation"] = invalidation
+            _write(directory / RECORD_NAME, encode(record))
+        _require(state == "valid", "record", state)
+        custody = record["custody"]
+        holder = "unknown"
+        if custody is not None:
+            identity = ProcessIdentity(custody["anchor_pid"], custody["anchor_start_us"])
+            if (session_id, anchor) != (custody["session_id"], identity):
+                holder = observe_liveness(identity, liveness)
+        updated = claimed(record, session_id, anchor.pid, anchor.start_us, now, holder)
+        if updated != record:
+            _write(directory / RECORD_NAME, encode(updated))
+        return updated
+
+
+def relinquish(directory, now, session_id, anchor):
+    """Retain the exact holder and its first relinquishment under the lock."""
+    with _locked(directory) as directory:
+        record, _ = _load(directory / RECORD_NAME)
+        updated = relinquished(record, session_id, anchor.pid, anchor.start_us, now)
+        if updated != record:
+            _write(directory / RECORD_NAME, encode(updated))
+        return updated
+
+
 def replace(directory, new):
     raw = encode(new)
     new = decode(raw)
     with _locked(directory) as directory:
         old, old_raw = _load(directory / RECORD_NAME)
+        if new["custody"] is None:
+            new["custody"] = old["custody"]
         replacement_allowed(old, new)
+        raw = encode(new)
         _unused_id(directory, new)
         archive = directory / "superseded"
         try:
