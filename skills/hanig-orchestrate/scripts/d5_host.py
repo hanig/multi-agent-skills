@@ -2,9 +2,13 @@
 
 Records contain only pid, ppid and kernel start time. session_id alone reads
 CLAUDE_CODE_SESSION_ID, the other D5-OD4 custody half. No custody is established.
+CLAUDE_PID declares the native session-lifetime anchor; no names/argv are read.
+Non-claims: trusted same-UID processes can forge the environment; ancestry is
+not atomic; zombies with the same identity count as alive. PID reuse between
+an identity read and a kill probe is caught only through start_us.
 """
 import ctypes as C
-import os, struct, sys
+import os, re, struct, sys
 from typing import NamedTuple
 
 class Unknown(NamedTuple):
@@ -43,10 +47,13 @@ def _sysctl(mib, capacity=None):
   raise ValueError("sysctl overflow")
  return data.raw[:size.value]
 
-def _read(pid):
+def _measured_platform():
+ return sys.platform=="darwin" and (os.uname().release, os.uname().machine)==("25.5.0", "arm64")
+
+def _kernel_record(pid):
  if type(pid) is not int or not 0<pid<2 ** 31:
   return Unknown("invalid pid")
- if sys.platform!="darwin" or (os.uname().release, os.uname().machine)!=("25.5.0", "arm64"):
+ if not _measured_platform():
   return Unknown("unmeasured platform")
  raw=_sysctl((1, 14, 1, pid), 648)  # KERN_PROC_PID
  if len(raw)!=648:
@@ -56,7 +63,21 @@ def _read(pid):
  ppid=struct.unpack_from("<i", raw, 560)[0]
  if found_pid!=pid or sec<=0 or not 0<=usec<1000000 or ppid<0:
   return Unknown("invalid kernel identity")
- return ProcessRecord(pid, ppid, sec*1000000+usec)
+ # Measured 2026-10-22: e_pcred.p_ruid, uint32 at 392; self=501, pid 1=0.
+ uid=struct.unpack_from("<I", raw, 392)[0]
+ return ProcessRecord(pid, ppid, sec*1000000+usec), uid
+
+def _read(pid):
+ result=_kernel_record(pid)
+ return result if isinstance(result, Unknown) else result[0]
+
+def process_uid(pid):
+ """Real UID from the same validated KERN_PROC_PID layout, or Unknown."""
+ try:
+  result=_kernel_record(pid)
+  return result if isinstance(result, Unknown) else result[1]
+ except (OSError, ValueError, AttributeError, struct.error) as exc:
+  return Unknown("inspection failed: {}".format(type(exc).__name__))
 
 def _inspect(pid):
  try:
@@ -92,3 +113,52 @@ def ancestry(pid):
  if not chain or any(_inspect(rec.pid)!=rec for rec in chain):
   return Unknown("missing or changed ancestry")
  return tuple(chain)
+
+def session_anchor():
+ """Native session ID and declared same-UID strict ancestor, or Unknown."""
+ if not _measured_platform():
+  return Unknown("unmeasured platform")
+ native=session_id()
+ if not native:
+  return Unknown("missing native session ID")
+ declared=os.environ.get("CLAUDE_PID", "")
+ if not re.fullmatch(r"[1-9][0-9]{0,9}", declared) or int(declared)>=2 ** 31:
+  return Unknown("invalid CLAUDE_PID")
+ pid=int(declared)
+ caller=os.getpid()
+ if pid==caller:
+  return Unknown("anchor is caller")
+ chain=ancestry(caller)
+ if isinstance(chain, Unknown):
+  return chain
+ for rec in chain[1:]:
+  if rec.pid==pid:
+   if process_uid(pid)!=os.getuid():
+    return Unknown("anchor UID unknown or different")
+   return native, ProcessIdentity(rec.pid, rec.start_us)
+ return Unknown("anchor is not a strict ancestor")
+
+def verify_anchor(native, identity):
+ """Reinspect the current session and ancestry on every call; never cache."""
+ return session_anchor()==(native, identity)
+
+def liveness(identity):
+ """Alive/dead/unknown for an incarnation; only reuse or ESRCH proves death."""
+ if not _measured_platform():
+  return "unknown"
+ if (not isinstance(identity, ProcessIdentity) or type(identity.pid) is not int
+     or not 0<identity.pid<2 ** 31 or type(identity.start_us) is not int
+     or identity.start_us<=0):
+  return "unknown"
+ current=process_identity(identity.pid)
+ if current==identity:
+  return "alive"
+ if isinstance(current, ProcessIdentity) and current.start_us!=identity.start_us:
+  return "dead"
+ try:
+  os.kill(identity.pid, 0)
+ except ProcessLookupError:
+  return "dead"
+ except OSError:
+  return "unknown"
+ return "unknown"
