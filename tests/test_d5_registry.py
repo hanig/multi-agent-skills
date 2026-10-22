@@ -983,6 +983,8 @@ class TestD5Registry(unittest.TestCase):
         def entries(root):
             result = real_entries(root)
             events.append("read")
+            if phase == "published" and events == ["read"]:
+                return []  # Another registration publishes before the locked read.
             return result
         def walk(root, rid):
             nonlocal walking
@@ -999,7 +1001,7 @@ class TestD5Registry(unittest.TestCase):
             self.assertNotEqual(Path(path).parent, self.root / "plans", "D opened")
             return real_open(path, flags, *args, **kwargs)
         def fsync(fd):
-            if phase in ("lookup", "idempotent"):
+            if phase in ("lookup", "idempotent", "published"):
                 self.assertEqual(events[-1], "walk", "fsync preceded tamper walk")
             return real_fsync(fd)
         def lstat(path):
@@ -1012,7 +1014,7 @@ class TestD5Registry(unittest.TestCase):
         def path_stat(path, *args, **kwargs):
             if path.parent == self.root / "plans":
                 self.assertNotEqual(phase, "lookup", "lookup used D outside walk")
-                if phase == "idempotent":
+                if phase in ("idempotent", "published"):
                     self.assertEqual(events[-1], "walk", "D use preceded tamper walk")
             return real_stat(path, *args, **kwargs)
         def mkdir(path, *args, **kwargs):
@@ -1042,7 +1044,8 @@ class TestD5Registry(unittest.TestCase):
             ops.open, ops.lstat, ops.fsync = opened, lstat, fsync
             for phase, call in (("new", self.register),
                                 ("lookup", lambda: R.lookup(self.repo, "p", self.state)),
-                                ("idempotent", self.register)):
+                                ("idempotent", self.register),
+                                ("published", self.register)):
                 events.clear()
                 probes.clear()
                 keys.clear()
@@ -1050,7 +1053,8 @@ class TestD5Registry(unittest.TestCase):
                 entry = call()
                 expected = {"new": ["read", "base-sync", "read", "mkdir", "walk"],
                             "lookup": ["read", "walk"],
-                            "idempotent": ["read", "walk", "read", "walk"]}
+                            "idempotent": ["read", "walk", "read", "walk"],
+                            "published": ["read", "read", "walk"]}
                 self.assertEqual(events, expected[phase])
                 count = 2 if phase == "idempotent" else 1
                 self.assertEqual(keys, [entry["record_key"]] * count)
@@ -1190,7 +1194,7 @@ class TestD5Registry(unittest.TestCase):
         checked.assert_called_once()
 
     def test_c6_unregistered_lookup_returns_none_without_walk(self):
-        # C6 covers a matching entry; these absent/unmatched paths need no walk.
+        # These absent/unmatched entries have no state ownership conflict.
         other = self.d / "unregistered-state"
         other.mkdir()
         for registered in (False, True):
@@ -1204,6 +1208,26 @@ class TestD5Registry(unittest.TestCase):
                 read.assert_called_once()
                 walk.assert_not_called()
             self.assertEqual(self.tree(), before)
+
+    def test_c6_state_conflicts_refuse_without_walk(self):
+        self.register()
+        other = self.d / "other-state"
+        other.mkdir()
+        for plan, state, message in (
+                ("p", other, "registry: state_key mismatch: state directory replaced or conflicting"),
+                ("unregistered", self.state, "registry: state_key already registered to another plan")):
+            for operation in (R.lookup, R.register):
+                before = self.tree()
+                with self.subTest(plan=plan, operation=operation.__name__), \
+                     mock.patch.object(R, "d5_active", return_value=True), \
+                     mock.patch.object(R, "_entries", wraps=R._entries) as read, \
+                     mock.patch.object(R, "_record_key", wraps=R._record_key) as walk:
+                    with self.assertRaises(R.AuthorityError) as caught:
+                        operation(self.repo, plan, state)
+                    self.assertEqual(str(caught.exception), message)
+                    read.assert_called_once()
+                    walk.assert_not_called()
+                self.assertEqual(self.tree(), before)
 
     def test_schema_one_refuses_without_migration_or_mutation(self):
         entry = self.register()
