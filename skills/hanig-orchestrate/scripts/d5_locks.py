@@ -110,11 +110,24 @@ class _Record:
                 info = None
             if info is not None and not _safe(info):
                 raise LockError(_UNSAFE)
-            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
-                         0o600, dir_fd=self.fd)
+            flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
             try:
-                if not _safe(os.fstat(fd)):
+                fd = os.open(name, flags, 0o600, dir_fd=self.fd)
+            except PermissionError:
+                # Recover a prior/overlapping creator's restrictive-umask file.
+                # Identity stability is the declared envelope, including here:
+                # repair owner permissions in pinned D, never replace the file.
+                info = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+                if not _safe(info) or info.st_mode & 0o600 == 0o600:
+                    raise
+                os.chmod(name, 0o600, dir_fd=self.fd)
+                fd = os.open(name, flags, 0o600, dir_fd=self.fd)
+            try:
+                info = os.fstat(fd)
+                if not _safe(info):
                     raise LockError(_UNSAFE)
+                if info.st_mode & 0o600 != 0o600:
+                    os.fchmod(fd, 0o600)
                 return fd
             except BaseException:
                 os.close(fd)

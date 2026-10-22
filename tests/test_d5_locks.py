@@ -3,7 +3,6 @@
 Ordering uses pipes/events or lock-entry hooks. Timeouts only fail tests and
 reap fixture processes: they never release or steal an operational lock.
 """
-from contextlib import contextmanager
 import os
 from pathlib import Path
 import select
@@ -166,6 +165,21 @@ class TestD5Locks(unittest.TestCase):
                         self.refused(locks._UNSAFE), record.state():
                     self.fail("unsafe opened descriptor entered")
 
+    def test_R1_umask_new_persisted_and_overlapping_creators(self):
+        proc = self.peer("permissions")
+        stdout, stderr = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stdout, b"permissions repaired\n")
+
+    def test_G6_unrelated_permission_error_does_not_change_mode(self):
+        with locks.pin(self.directory) as record:
+            with record.state():
+                pass
+            with mock.patch.object(os, "open", side_effect=PermissionError("fixture")), \
+                    mock.patch.object(os, "chmod", side_effect=AssertionError("chmod")), \
+                    self.refused(locks._UNSAFE), record.state():
+                self.fail("unrelated permission error hidden")
+
     def test_L2_upgrade_refused_without_flock(self):
         with locks.pin(self.directory) as record:
             with record.drain() as fd:
@@ -227,11 +241,12 @@ class TestD5Locks(unittest.TestCase):
             with record.drain() as original:
                 delegated = os.dup(original)
             try:
-                with mock.patch.object(locks.fcntl, "flock", side_effect=AssertionError("conversion")):
-                    with record.drain(inherited_fd=delegated) as imported:
-                        self.assertNotEqual(imported, delegated)
-                        with self.refused(locks._UPGRADE), record.drain(shared=False):
-                            self.fail("import upgrade")
+                with record.state():
+                    with mock.patch.object(locks.fcntl, "flock", side_effect=AssertionError("conversion")):
+                        with record.drain(inherited_fd=delegated) as imported:
+                            self.assertNotEqual(imported, delegated)
+                            with self.refused(locks._UPGRADE), record.drain(shared=False):
+                                self.fail("import upgrade")
             finally:
                 os.close(delegated)
 
@@ -323,34 +338,16 @@ class TestD5Locks(unittest.TestCase):
                 guard = a.entry.guards[rank]
                 results = []
 
-                @contextmanager
-                def instrumented():
-                    if threading.current_thread() is not threading.main_thread():
-                        attempted.set()
-                    with guard:
-                        yield
-
-                class Probe:
+                class Gate:
                     def __enter__(self):
-                        self.context = instrumented()
-                        return self.context.__enter__()
+                        if threading.current_thread() is not threading.main_thread():
+                            attempted.set()
+                        guard.acquire()
 
                     def __exit__(self, *args):
-                        return self.context.__exit__(*args)
+                        guard.release()
 
-                # Use a fresh context per thread; the real RLock is shared.
-                class Factory:
-                    def __init__(self):
-                        self.local = threading.local()
-
-                    def __enter__(self):
-                        self.local.probe = Probe()
-                        return self.local.probe.__enter__()
-
-                    def __exit__(self, *args):
-                        return self.local.probe.__exit__(*args)
-
-                a.entry.guards[rank] = Factory()
+                a.entry.guards[rank] = Gate()
 
                 def contender():
                     try:

@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import sys
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] /
                        "skills/hanig-orchestrate/scripts"))
@@ -26,6 +27,37 @@ def main():
                         with again.drain(), again.start(), again.state():
                             pass
             print(calls, flush=True)
+        elif action == "permissions":
+            old_mask = os.umask(0o277)
+            try:
+                for case in ("new", "persisted", "concurrent"):
+                    for rank, name in locks._NAMES.items():
+                        path = Path(directory) / name
+                        if case == "persisted":
+                            path.chmod(0o400)  # prior implementation's durable residue
+                        elif path.exists():
+                            path.unlink()  # fixture setup only
+                        inode = path.stat().st_ino if path.exists() else None
+                        real_open = os.open
+                        pending = [case == "concurrent"]
+
+                        def opening(*args, **kwargs):
+                            if pending and pending.pop():
+                                # Another creator publishes 0400 after our stat.
+                                os.close(real_open(*args, **kwargs))
+                            return real_open(*args, **kwargs)
+
+                        with mock.patch.object(os, "open", side_effect=opening):
+                            guard = (record.drain, record.start, record.state)[rank]
+                            with guard():
+                                assert path.stat().st_mode & 0o777 == 0o600, case
+                                if inode is not None:
+                                    assert path.stat().st_ino == inode
+                            with guard():
+                                pass
+            finally:
+                os.umask(old_mask)
+            print("permissions repaired", flush=True)
         elif action == "inherited":
             inherited = int(sys.argv[3])
 
