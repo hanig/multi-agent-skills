@@ -492,6 +492,56 @@ class TestD5StoreGate(unittest.TestCase):
         self.assertEqual(store.read(d), result)
         self.assertEqual((d / STATE).stat().st_mode & 0o777, 0o600)
 
+    def test_review_callback_restore_is_refused(self):
+        d = self.seed("claim")
+        raw = (d / store.RECORD_NAME).read_bytes()
+        def probe(_):
+            changed = store.decode(raw)
+            changed["confirmation"]["owner_response"] += " transient"
+            store.write_bytes(d / store.RECORD_NAME, store.encode(changed))
+            store.write_bytes(d / store.RECORD_NAME, raw)
+            return "dead"
+        with self.assertRaisesRegex(store.AuthorityError,
+                "^record: changed during liveness observation$"):
+            store.claim(d, 103, MANDATE, "outer", ProcessIdentity(44, 9000003), probe)
+
+    def test_review_privileged_open_keeps_differential_valid(self):
+        # Emulate privileged access without elevation. STATE fds serve flock,
+        # not writes, so a read-only descriptor supplies the required access.
+        real = os.open
+        def privileged(file, flags, *args, **kwargs):
+            try:
+                return real(file, flags, *args, **kwargs)
+            except PermissionError:
+                if (not kwargs.get("dir_fd") and str(file).endswith("/authority.lock")
+                        and os.stat(file).st_mode & 0o777 == 0o400):
+                    return real(file, os.O_RDONLY | os.O_CLOEXEC)
+                raise
+        with mock.patch.object(os, "open", side_effect=privileged):
+            self.test_pre_u3b_differential_records_results_and_errors()
+
+    def test_review_long_path_error_prefix_matches_legacy(self):
+        old = types.ModuleType("pre_u3b_store")
+        source = subprocess.check_output(["git", "show",
+            "bfed06136d9291d8e7727c58b7642c65c4d1c103:"
+            "skills/hanig-orchestrate/scripts/d5_authority_store.py"], cwd=str(ROOT))
+        exec(compile(source, "pre_u3b_store.py", "exec"), old.__dict__)
+        d = self.d.resolve()
+        target = os.pathconf(d, "PC_PATH_MAX") - 6
+        while target - len(str(d)) > 202:
+            d = d / ("x" * 200)
+            d.mkdir()
+        d = d / ("x" * (target - len(str(d)) - 1))
+        d.mkdir()
+        errors = []
+        for module in (old, store):
+            with self.assertRaises(store.AuthorityError) as caught:
+                module.create(d, held())
+            error = caught.exception
+            errors.append((type(error), str(error).split(": [Errno", 1)[0],
+                           error.__cause__.errno))
+        self.assertEqual(errors[0], errors[1])
+
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
         started, finished = threading.Event(), threading.Event()
