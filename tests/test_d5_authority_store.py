@@ -507,6 +507,13 @@ class TestD5AuthorityStore(unittest.TestCase):
                     A.read(self.d)
         self.assertIs(caught.exception.__cause__, primary)
         self.assertFalse(hasattr(primary, "cleanup_errors"))
+
+        lock = self.d / A.LOCK_NAME
+        lock.unlink()
+        lock.symlink_to(self.path)
+        with self.assertRaisesRegex(A.AuthorityError, "^D5 lock refused: unsafe lock file$") as caught:
+            A.read(self.d)
+        self.assertIsInstance(caught.exception.__cause__, A.locks.LockError)
         # pin() deliberately wraps this error with an explicit LockError cause.
         with mock.patch.object(A.os, "open", side_effect=primary):
             with self.assertRaises(A.AuthorityError) as caught:
@@ -529,7 +536,7 @@ import d5_authority_store as store
 with mock.patch.object(os, "open", side_effect=AssertionError("filesystem")):
     try:
         store.read("unused")
-    except store.locks.LockError as exc:
+    except store.AuthorityError as exc:
         assert str(exc) == "D5 lock refused: safe locking unavailable", str(exc)
     else:
         raise AssertionError("accepted missing fcntl")
