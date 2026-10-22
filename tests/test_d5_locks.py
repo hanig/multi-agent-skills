@@ -501,6 +501,8 @@ class TestCleanup(unittest.TestCase):
             self.assertIs(caught.exception, expected)
             self.assertEqual(str(caught.exception), str(expected))
             self.assertIs(caught.exception.__cause__, None if trigger == "none" else cause)
+            if trigger != "none":
+                self.assertEqual(primary.cleanup_errors, (cleanup,))
         self.assertEqual(locks._held(), [])
         if record is not None:
             self.assertIsNone(record.fd)
@@ -550,9 +552,10 @@ class TestCleanup(unittest.TestCase):
 
     def test_post_open_cleanup(self):
         real_close = os.close
+        cleanup = OSError(errno.EIO, "close cleanup")
         def close(fd):
             real_close(fd)
-            raise OSError(errno.EIO, "close cleanup")
+            raise cleanup
 
         with locks.pin(self.directory) as record:
             # New file: _safe is first consulted after open/fstat.
@@ -563,6 +566,30 @@ class TestCleanup(unittest.TestCase):
             closing.assert_called_once()
             self.assertEqual(str(caught.exception), locks._UNSAFE)
             self.assertIsNone(caught.exception.__cause__)
+            self.assertEqual(caught.exception.cleanup_errors, (cleanup,))
+
+    def test_DISCARD_CLEANUP_ERROR_preserves_post_open_refusal(self):
+        primary = locks.LockError(locks._UNSAFE)
+        cause = ValueError("verification cause")
+        primary.__cause__ = cause
+        earlier = OSError(errno.EINTR, "earlier cleanup")
+        primary.cleanup_errors = (earlier,)
+        secondary = OSError(errno.EIO, "close cleanup")
+        real_close = os.close
+
+        def close(fd):
+            real_close(fd)
+            raise secondary
+
+        with locks.pin(self.directory) as record:
+            with mock.patch.object(locks, "_safe", side_effect=primary), \
+                    mock.patch.object(os, "close", side_effect=close), \
+                    self.assertRaises(locks.LockError) as caught:
+                record._open(2)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(str(caught.exception), locks._UNSAFE)
+        self.assertIs(caught.exception.__cause__, cause)
+        self.assertEqual(primary.cleanup_errors, (earlier, secondary))
 
     def test_open_primary_oserror_keeps_original_wrapping(self):
         primary = OSError(errno.EIO, "fstat primary")
