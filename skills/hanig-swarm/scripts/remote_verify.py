@@ -616,16 +616,13 @@ def controller_state(job):
 
 
 def scheduler_state(job):
-    state = controller_state(job)
-    if state is not None:
-        return state
     try:
         rc, out, err = _command(["sacct", "-n", "-P", "-j", job,
                                   "--format=JobIDRaw,State%40,ExitCode"])
     except (OSError, subprocess.SubprocessError):
-        return None
+        return controller_state(job)
     if rc:
-        return None
+        return controller_state(job)
     matches = [line.split("|") for line in out.splitlines()
                if line.split("|", 1)[0] == job]
     if len(matches) != 1 or len(matches[0]) < 3:

@@ -2269,6 +2269,83 @@ else:
             job_id='321', sacct_state='COMPLETED', sacct_exit_code='0:0',
             scheduler_evidence_source='slurmctld'))
 
+    def test_healthy_accounting_never_queries_controller(self):
+        argv = ['sacct', '-n', '-P', '-j', '321', '--format=JobIDRaw,State%40,ExitCode']
+        rows = [('', None), ('321|RUNNING|0:0\n', None), ('321|COMPLETING|0:0\n', None),
+                ('321|COMPLETED\n', None), ('garbage\n', None), ('322|COMPLETED|0:0\n', None),
+                ('321|COMPLETED|0:0\n' * 2, None), ('321|COMPLETED|\n', ('COMPLETED', '')),
+                ('321|CANCELLED+ by 1000|0:15\n', ('CANCELLED', '0:15'))]
+        rows += [('321|' + state + '|0:0\n', (state, '0:0')) for state in RV.TERMINAL]
+        for output, expected in rows:
+            with self.subTest(output=output), mock.patch.object(RV, '_command',
+                    return_value=(0, output, '')) as calls, mock.patch.object(
+                    RV, 'controller_state') as controller:
+                state = RV.scheduler_state('321')
+                self.assertEqual(state, expected)
+                self.assertEqual(getattr(state, 'source', None), 'sacct' if expected else None)
+                self.assertEqual(calls.call_args_list, [mock.call(argv)])
+                controller.assert_not_called()
+
+    def test_accounting_errors_alone_enable_controller(self):
+        sacct = ['sacct', '-n', '-P', '-j', '321', '--format=JobIDRaw,State%40,ExitCode']
+        squeue = ['squeue', '-h', '-t', 'all', '--jobs=321', '-o', '%T']
+        errors = [(1, '', 'Connection timed out'), OSError('absent'),
+                  subprocess.SubprocessError('failed'), subprocess.TimeoutExpired('sacct', 60)]
+        for error in errors:
+            for reading in ((0, 'COMPLETED\n', ''), (1, 'COMPLETED\n', 'unavailable'),
+                            (1, '', 'Invalid job id specified'), (0, 'RUNNING\n', '')):
+                with self.subTest(error=error, reading=reading), mock.patch.object(
+                        RV.shutil, 'which', return_value='/fixture/squeue'), mock.patch.object(
+                        RV, '_command', side_effect=[error, reading]) as calls:
+                    state = RV.scheduler_state('321')
+                    expected = ('COMPLETED', '0:0') if reading == (0, 'COMPLETED\n', '') else None
+                    self.assertEqual(state, expected)
+                    self.assertEqual(getattr(state, 'source', None), 'slurmctld' if expected else None)
+                    self.assertEqual(calls.call_args_list, [mock.call(sacct), mock.call(squeue)])
+
+    def test_healthy_accounting_preserves_supervision_deadline(self):
+        # Predecessor round 1: a job finishes at 2.5s within its 3s deadline.
+        # A 2s controller query used to displace accounting's terminal snapshot.
+        self.supervisor_fixture()
+        self.request['timeout'] = 3
+        RV.publish(self.stage / 'request.json', self.request)
+        def observe(controller):
+            (self.stage / 'result.json').unlink(missing_ok=True)
+            seconds, events = [0.0], []
+            def advance(duration):
+                seconds[0] += duration
+                if seconds[0] >= 2.5 and not (self.stage / 'result.json').exists():
+                    RV.publish(self.stage / 'result.json',
+                               {'execution': {}, 'outcomes': [{'exit_code': 0}]})
+            def query(argv, **kwargs):
+                started = seconds[0]
+                state = 'COMPLETED' if started >= 2.5 else 'RUNNING'
+                events.append((argv, started, state))
+                if argv[0] == 'sbatch':
+                    return 0, '321\n', ''
+                if argv[0] == 'squeue':
+                    advance(2)
+                    return 0, state + '\n', ''
+                self.assertEqual(argv[0], 'sacct')
+                advance(1)
+                return 0, '321|' + state + '|0:0\n', ''
+            self.sleep.reset_mock()
+            self.sleep.side_effect = advance
+            RV.time.monotonic.side_effect = lambda: seconds[0]
+            with mock.patch.object(RV, '_command', side_effect=query), mock.patch.object(
+                    RV.shutil, 'which', return_value='/fixture/squeue' if controller else None):
+                result = RV.supervise(self.stage)
+            return result, seconds[0], self.sleep.call_args_list, events
+        baseline = observe(False)
+        actual = observe(True)
+        self.assertNotIn('error', baseline[0])
+        self.assertEqual(baseline[0]['execution']['sacct_state'], 'COMPLETED')
+        self.assertEqual(baseline[0]['execution']['sacct_exit_code'], '0:0')
+        self.assertNotIn('error', actual[0])
+        self.assertEqual(actual, baseline)
+        self.assertEqual(actual[1:3], (4.0, [mock.call(2)]))
+        self.assertEqual([event[0][0] for event in actual[3]], ['sbatch', 'sacct', 'sacct'])
+
     def test_controller_completes_supervision_during_accounting_outage(self):
         self.supervisor_fixture()
         self.configure({'321': 'COMPLETED'}, unavailable='sacct')
@@ -2282,20 +2359,26 @@ else:
         self.assertEqual((self.stage / 'job-id').read_text(), '321')
         self.assertEqual(RV.time.monotonic.call_count, 1)
         self.sleep.assert_not_called()
-        self.assertEqual(self.scheduler_calls(), [['squeue', '-h', '-t', 'all', '--jobs=321', '-o', '%T']])
+        self.assertEqual(self.scheduler_calls(), [
+            ['sacct', '-n', '-P', '-j', '321', '--format=JobIDRaw,State%40,ExitCode'],
+            ['squeue', '-h', '-t', 'all', '--jobs=321', '-o', '%T']])
 
     def test_controller_absence_falls_back_to_accounting(self):
         self.install_controller()
         self.configure({'321': 'COMPLETED'}, controller_rc=1,
                        controller_error='slurm_load_jobs error: Invalid job id specified')
         self.assert_accounting()
-        self.assertEqual([c[0] for c in self.scheduler_calls()], ['sacct', 'squeue', 'sacct'])
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['sacct', 'sacct'])
 
     def test_missing_controller_keeps_accounting_only_behavior(self):
         (self.bin / 'squeue').unlink()
         self.configure({'321': 'COMPLETED'})
         with mock.patch.object(RV, '_command', wraps=RV._command) as calls:
             self.assert_accounting()
+        self.assertEqual([c.args[0][0] for c in calls.call_args_list], ['sacct', 'sacct'])
+        self.configure({'321': 'COMPLETED'}, unavailable='sacct')
+        with mock.patch.object(RV, '_command', wraps=RV._command) as calls:
+            self.assert_accounting(None)
         self.assertEqual([c.args[0][0] for c in calls.call_args_list], ['sacct', 'sacct'])
 
     def test_absence_on_stdout_with_stderr_warning(self):
@@ -2336,8 +2419,9 @@ else:
             def __eq__(self, other):
                 raise Unexpected()
         cases += [(RV.shutil, 'which', Unexpected()), (RV, '_command', Uncomparable())]
-        for status in ('RUNNING', 'FAILED', 'COMPLETED'):
-            self.configure({'321': status}, controller_rc=1, controller_error='Connection timed out')
+        for status in ('RUNNING', 'FAILED', 'COMPLETED', None):
+            self.configure({'321': status}, unavailable='sacct' if status is None else None,
+                           controller_rc=1, controller_error='Connection timed out')
             for target, attribute, error in cases:
                 def query(argv, **kwargs):
                     if argv[0] == 'squeue' and error is not None:
@@ -2349,7 +2433,7 @@ else:
                     with mock.patch.object(target, attribute,
                             side_effect=query if target is RV else error):
                         result = self.assert_accounting(
-                            None if status == 'RUNNING' else (status, '0:0'), supervise=True)
+                            None if status in ('RUNNING', None) else (status, '0:0'), supervise=True)
                     if status == 'COMPLETED':
                         self.assertNotIn('error', result)
                         self.assertEqual(result['execution']['sacct_state'], 'COMPLETED')
@@ -2366,10 +2450,13 @@ else:
                     ("sys.stdout.write('COMPLETED\\n')\n" if stream == 'stderr' else '') +
                     'sys.' + stream + ".buffer.write(b'\\xff')\n")
                 self.assert_accounting(('FAILED', '0:0'))
+                self.configure({'321': 'FAILED'}, unavailable='sacct')
+                self.assert_accounting(None)
+                self.configure({'321': 'FAILED'})
 
     def test_controller_interrupts_propagate(self):
         self.install_controller()
-        self.configure({'321': 'COMPLETED'})
+        self.configure({'321': 'COMPLETED'}, unavailable='sacct')
         command = RV._command
         for error in (KeyboardInterrupt, SystemExit):
             def query(argv, **kwargs):
@@ -2391,28 +2478,31 @@ else:
         self.assertIsNone(result['execution']['sacct_state'])
         self.assertIsNone(result['execution']['scheduler_evidence_source'])
         self.sleep.assert_called_once_with(2)
-        self.assertEqual([c[0] for c in self.scheduler_calls()], ['squeue', 'sacct'] * 3)
+        self.assertEqual([c[0] for c in self.scheduler_calls()], ['sacct', 'squeue'] * 3)
         self.assert_accounting(None, supervise=True)
 
     def test_controller_requires_exact_completed_line(self):
         self.supervisor_fixture()
         outputs = ['FAILED\n', 'TIMEOUT\n', 'CANCELLED\n', 'COMPLETING\n', 'RUNNING\n',
                    'COMPLETED', 'COMPLETED ', ' COMPLETED', 'COMPLETED \n', ' COMPLETED\n',
-                   'COMPLETED\nCOMPLETED\n', 'CD\n', '', 'No jobs in the system\n']
+                   'COMPLETED\nCOMPLETED\n', 'CD\n', '', 'No jobs in the system\n',
+                   'JobId=321 JobState=COMPLETED ExitCode=\n']
         outputs += [state + '\n' for state in RV.TERMINAL if state != 'COMPLETED']
         for output in outputs:
-            for status in ('COMPLETED', 'RUNNING', 'FAILED'):
+            for status in ('COMPLETED', 'RUNNING', 'FAILED', None):
                 with self.subTest(output=output, accounting=status):
-                    self.configure({'321': status}, controller_output=output)
-                    self.assert_accounting(None if status == 'RUNNING' else (status, '0:0'),
+                    self.configure({'321': status}, controller_output=output,
+                                   unavailable='sacct' if status is None else None)
+                    self.assert_accounting(None if status in ('RUNNING', None) else (status, '0:0'),
                                            supervise=True)
 
     def test_controller_and_accounting_share_value_domain(self):
         self.install_controller()
-        self.configure({'321': 'COMPLETED'})
+        self.configure({'321': 'COMPLETED'}, unavailable='sacct')
         state = RV.scheduler_state('321')
         self.assertEqual(state, ('COMPLETED', '0:0'))
         self.assertEqual(state.source, 'slurmctld')
+        self.configure({'321': 'COMPLETED'})
         with mock.patch.object(RV.shutil, 'which', return_value=None):
             accounting = RV.scheduler_state('321')
         self.assertEqual(accounting.source, 'sacct')
