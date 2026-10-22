@@ -18,7 +18,6 @@ A visible replacement has already passed
 replacement_allowed. It carries either fresh owner consent, or re-used consent
 that extends neither expiry nor scope.
 """
-import fcntl
 import os
 import stat
 import tempfile
@@ -26,6 +25,7 @@ from contextlib import contextmanager, ExitStack
 from pathlib import Path
 
 import d5_locks as locks
+from d5_locks import fcntl
 from d5_authority import (AuthorityError, validate, encode, decode, evaluate,
                           revoked, claimed, relinquished, replacement_allowed)
 from d5_host import ProcessIdentity
@@ -66,7 +66,21 @@ def _cleanup(action, *args):
 @contextmanager
 def _preserving(guard):
     """Release a lock context without replacing the store's primary error."""
-    value = guard.__enter__()
+    entry_frame = guard.gen.gi_frame
+    try:
+        value = guard.__enter__()
+    except BaseException as secondary:
+        primary = secondary.__context__
+        trace = primary.__traceback__ if primary is not None else None
+        # U3a's generator may fail in its entry cleanup. Restore an exception
+        # that already reached THIS invocation, not an unrelated caller's
+        # exception or an intentional `raise ... from ...` wrapper.
+        while trace is not None and not secondary.__suppress_context__:
+            if trace.tb_frame is entry_frame:
+                primary.cleanup_errors = getattr(primary, "cleanup_errors", ()) + (secondary,)
+                raise primary
+            trace = trace.tb_next
+        raise
     with _cleanup(guard.__exit__, None, None, None):
         yield value
 
