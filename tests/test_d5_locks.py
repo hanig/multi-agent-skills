@@ -586,19 +586,45 @@ class TestCleanup(unittest.TestCase):
 class TestCleanupErrors(unittest.TestCase):
     """DISCARD-CLEANUP-ERROR: each consumer must retain its secondary error."""
     def test_readonly_cleanup_errors_preserves_primary(self):
-        # Open R1 finding: the mandated annotation cannot satisfy this case.
-        # Preserved as a failing regression, not a merge-ready implementation.
+        # ARC-3635-OD2: failed annotation drops the secondary, never the primary.
         class Primary(RuntimeError):
             @property
             def cleanup_errors(self):
                 return ()
 
+        self.check_annotation(Primary, "dropped")
+
+    def test_slots_cleanup_errors_preserves_primary(self):
+        class Primary(RuntimeError):
+            __slots__ = ("code",)
+
+        # BaseException still supplies __dict__; slots alone allow annotation.
+        self.check_annotation(Primary, "attached")
+
+    def test_setattr_cleanup_errors_preserves_primary(self):
+        class Primary(RuntimeError):
+            def __setattr__(self, name, value):
+                if name == "cleanup_errors":
+                    raise AttributeError("diagnostics are read-only")
+                super().__setattr__(name, value)
+
+        self.check_annotation(Primary, "dropped")
+
+    def test_getter_cleanup_errors_preserves_primary(self):
+        class Primary(RuntimeError):
+            @property
+            def cleanup_errors(self):
+                raise ValueError("diagnostics are unreadable")
+
+        self.check_annotation(Primary, "unreadable")
+
+    def check_annotation(self, kind, annotation):
         with tempfile.TemporaryDirectory() as directory:
             for site in ("pin", "start", "state", "drain", "_open"):
                 with self.subTest(site=site), ExitStack() as stack:
                     record = (None if site == "pin" else
                               stack.enter_context(locks.pin(directory)))
-                    primary, secondary = Primary("primary"), OSError("secondary")
+                    primary, secondary = kind("primary"), OSError("secondary")
                     cause = ValueError("cause")
                     primary.__cause__ = cause
                     real_close = os.close
@@ -607,7 +633,7 @@ class TestCleanupErrors(unittest.TestCase):
                         real_close(fd)
                         raise secondary
 
-                    with mock.patch.object(os, "close", side_effect=close):
+                    with mock.patch.object(os, "close", side_effect=close) as closing:
                         with self.assertRaises(BaseException) as caught:
                             if site == "_open":
                                 with mock.patch.object(os, "fstat", side_effect=primary):
@@ -617,9 +643,18 @@ class TestCleanupErrors(unittest.TestCase):
                                          else getattr(record, site)())
                                 with guard:
                                     raise primary
+                        closing.assert_called_once()
                     self.assertIs(caught.exception, primary)
+                    self.assertIs(type(caught.exception), kind)
+                    self.assertEqual(str(caught.exception), "primary")
                     self.assertIs(caught.exception.__cause__, cause)
-                    self.assertEqual(caught.exception.cleanup_errors, (secondary,))
+                    if annotation == "attached":
+                        self.assertEqual(caught.exception.cleanup_errors, (secondary,))
+                    elif annotation == "dropped":
+                        self.assertEqual(getattr(caught.exception, "cleanup_errors", ()), ())
+                    else:
+                        with self.assertRaisesRegex(ValueError, "diagnostics are unreadable"):
+                            _ = caught.exception.cleanup_errors
 
     def test_cleanup_preserves_primary(self):
         with tempfile.TemporaryDirectory() as directory:
