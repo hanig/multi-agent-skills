@@ -23,7 +23,7 @@ it with drain(inherited_fd=fd). The caller guarantees it is a held shared drain
 and owns/closes the original fd. Import checks file identity, not lock ownership.
 Do not use an inherited Python manager after a raw fork of a threaded process.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import os
 import stat
 import threading
@@ -72,6 +72,25 @@ def _held():
     if not hasattr(_local, "held"):
         _local.held = []
     return _local.held
+
+
+@contextmanager
+def _cleanup(action, *args, **kwargs):
+    """Keep a body's exception primary, including its explicit cause.
+
+    Only an exception escaping this body permits suppressing cleanup OSError;
+    an unrelated exception being handled by the caller does not.
+    """
+    try:
+        yield
+    except BaseException:
+        try:
+            action(*args, **kwargs)
+        except OSError:
+            pass
+        raise
+    else:
+        action(*args, **kwargs)
 
 
 class _Entry:
@@ -138,7 +157,10 @@ class _Record:
                     os.fchmod(fd, 0o600)
                 return fd
             except BaseException:
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
                 raise
         except OSError as exc:
             raise LockError(_UNSAFE) from exc
@@ -159,14 +181,11 @@ class _Record:
             self._order(rank)
         with self.entry.guards[rank]:
             fd = prior[3] if prior is not None else self._open(rank)
-            try:
+            with _cleanup(os.close, fd) if prior is None else nullcontext():
                 if prior is None:
                     fcntl.flock(fd, fcntl.LOCK_EX)
                 with self._track(rank, False, fd):
                     yield
-            finally:
-                if prior is None:
-                    os.close(fd)
 
     def start(self):
         """START exclusive, reentrant in the owning thread."""
@@ -200,13 +219,11 @@ class _Record:
         if source is None:
             self._order(0)
         fd = self._open(0) if source is None else os.dup(source)
-        try:
+        with _cleanup(os.close, fd):
             if source is None:
                 fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
             with self._track(0, shared, fd):
                 yield fd
-        finally:
-            os.close(fd)
 
 
 @contextmanager
@@ -218,10 +235,10 @@ def pin(directory):
     except OSError as exc:
         raise LockError(_UNSAFE) from exc
     record = None
-    try:
-        record = _Record(fd)
-        yield record
-    finally:
-        if record is not None:
-            record.fd = None
-        os.close(fd)
+    with _cleanup(os.close, fd):
+        try:
+            record = _Record(fd)
+            yield record
+        finally:
+            if record is not None:
+                record.fd = None

@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import FrozenInstanceError, replace
 import copy
+import errno
 import fcntl
 import json
 import os
@@ -435,6 +436,132 @@ class TestEffectLog(unittest.TestCase):
         self.eq(next(r for r in rows if "error" in r),
                 {"file": torn.name, "error": E.INVALID, "reconciliation_required": True})
         self.eq(torn.read_bytes(), b"")
+
+
+
+class TestEffectCleanup(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.directory = Path(temp.name)
+
+    def exercise(self, site, primary, cleanup_fails):
+        cleanup = OSError(errno.EIO, "cleanup EIO")
+        calls = []
+        access_fd = None
+        real_close, real_fdopen = os.close, os.fdopen
+
+        def close(fd):
+            real_close(fd)
+            if site == "access" and fd != access_fd:
+                return
+            calls.append("close")
+            if cleanup_fails:
+                raise cleanup
+
+        def unlink(*args, **kwargs):
+            calls.append("unlink")
+            if cleanup_fails:
+                raise cleanup
+
+        def fdopen(*args):
+            handle = real_fdopen(*args)
+            original_close = handle.close
+            def closing():
+                original_close()
+                calls.append("handle.close")
+                if cleanup_fails:
+                    raise cleanup
+            handle.close = closing
+            if site == "write" and primary is not None:
+                handle.write = mock.Mock(side_effect=primary)
+            return handle
+
+        with E._access(self.directory, create=True) as (record, fd):
+            name = "fixture.json"
+            E._write(fd, name, {})
+            with ExitStack() as stack:
+                if site in ("write", "load"):
+                    stack.enter_context(mock.patch.object(os, "fdopen", side_effect=fdopen))
+                elif site == "unlink":
+                    stack.enter_context(mock.patch.object(os, "unlink", side_effect=unlink))
+                else:
+                    stack.enter_context(mock.patch.object(os, "close", side_effect=close))
+                if primary is not None and site not in ("access", "write"):
+                    target = {"write": "_encode", "load": "_decode",
+                              "confirm": "_sync", "unlink": "_encode"}[site]
+                    stack.enter_context(mock.patch.object(E, target, side_effect=primary))
+                # _load needs a valid schema only when decoding succeeds.
+                if site == "load" and primary is None:
+                    stack.enter_context(mock.patch.object(E, "_keys", side_effect=StopIteration("after close")))
+                try:
+                    try:
+                        raise ValueError("ambient handled exception")
+                    except ValueError:
+                        if site == "access":
+                            # Only fail the effects-directory close, not outer locks.
+                            with E._access(self.directory) as (_, target_fd):
+                                access_fd = target_fd
+                                if primary is not None:
+                                    raise primary
+                        elif site == "write" or site == "unlink":
+                            E._write(fd, name, {})
+                        elif site == "load":
+                            E._load(fd, name, record)
+                        else:
+                            E._confirm(fd, name)
+                except BaseException as exc:
+                    result = exc
+                else:
+                    result = None
+            self.assertEqual(len(calls), 1, calls)
+        return result, cleanup
+
+    def check_site(self, site):
+        # Compare the same operation with successful and failing cleanup.
+        # Test both direct propagation and the module's existing OSError wrappers.
+        for primary in (KeyboardInterrupt("primary body"), OSError(errno.EIO, "ledger write primary"), None):
+            if primary is not None:
+                primary.__cause__ = ValueError("original cause")
+            with self.subTest(site=site, primary=type(primary).__name__):
+                before, _ = self.exercise(site, primary, False)
+                after, cleanup = self.exercise(site, primary, True)
+                if primary is not None:
+                    self.assertIs(type(after), type(before))
+                    self.assertEqual(str(after), str(before))
+                    self.assertIs(after.__cause__, before.__cause__)
+                    if before is primary:
+                        self.assertIs(after, primary)
+                    else:
+                        self.assertIs(after.__cause__, primary)
+                    self.assertEqual(str(primary.__cause__), "original cause")
+                elif site in ("access", "write"):
+                    self.assertIsNone(before)
+                    self.assertIsInstance(after, E.EffectError)
+                    self.assertEqual(str(after), E.INVALID if site == "access" else E.DURABILITY)
+                    self.assertIs(after.__cause__, cleanup)
+                else:
+                    if site == "load":
+                        self.assertIsInstance(before, StopIteration)
+                    else:
+                        self.assertIsNone(before)
+                    self.assertIs(after, cleanup)
+                    self.assertIsNone(after.__cause__)
+
+    def test_access_cleanup(self):
+        self.check_site("access")
+
+    def test_write_close_cleanup(self):
+        self.check_site("write")
+
+    def test_load_close_cleanup(self):
+        self.check_site("load")
+
+    def test_temporary_unlink_cleanup(self):
+        self.check_site("unlink")
+
+    def test_confirm_cleanup(self):
+        self.check_site("confirm")
 
 
 if __name__ == "__main__":
