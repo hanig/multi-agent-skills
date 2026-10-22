@@ -107,7 +107,7 @@ def _locked(directory, *, start=False, drain=False, initialize=False):
         # filesystem refusal and original OSError cause for these failures.
         if isinstance(exc, locks.LockError):
             if not isinstance(exc.__cause__, OSError):
-                raise
+                raise AuthorityError(str(exc)) from exc
             exc = exc.__cause__
         raise AuthorityError("record: filesystem operation failed; "
                              "durability is unconfirmed: {}".format(exc)) from exc
