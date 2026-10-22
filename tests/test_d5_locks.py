@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import weakref
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,8 +24,15 @@ import d5_locks as locks
 PEER = ROOT / "tests/fixtures/d5/lock_peer.py"
 
 
+def isolate_pool(case):
+    patch = mock.patch.object(locks, "_pool", weakref.WeakValueDictionary())
+    patch.start()
+    case.addCleanup(patch.stop)
+
+
 class TestD5Locks(unittest.TestCase):
     def setUp(self):
+        isolate_pool(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
@@ -444,6 +452,7 @@ class TestD5Locks(unittest.TestCase):
                     def __exit__(self, *args):
                         guard.release()
 
+                self.addCleanup(a.entry.guards.__setitem__, rank, guard)
                 a.entry.guards[rank] = Gate()
 
                 def contender():
@@ -466,6 +475,7 @@ class TestD5Locks(unittest.TestCase):
 
 class TestCleanup(unittest.TestCase):
     def setUp(self):
+        isolate_pool(self)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.directory = Path(temp.name)
@@ -585,6 +595,9 @@ class TestCleanup(unittest.TestCase):
 
 class TestCleanupErrors(unittest.TestCase):
     """DISCARD-CLEANUP-ERROR: each consumer must retain its secondary error."""
+    def setUp(self):
+        isolate_pool(self)
+
     def test_readonly_cleanup_errors_preserves_primary(self):
         # ARC-3635-OD2: failed annotation drops the secondary, never the primary.
         class Primary(RuntimeError):

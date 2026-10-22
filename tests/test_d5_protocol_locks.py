@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import weakref
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,12 +19,14 @@ import d5_protocol_locks as protocol
 import d5_effect_log as ledger
 import d5_authority_store as store
 from tests.test_d5_authority import grant
+from tests import test_d5_locks as lock_tests
 
 PEER = ROOT / "tests/fixtures/d5/protocol_peer.py"
 
 
 class TestProtocolLocks(unittest.TestCase):
     def setUp(self):
+        lock_tests.isolate_pool(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
@@ -165,6 +168,7 @@ class TestProtocolLocks(unittest.TestCase):
                 finally:
                     attempted.set()
 
+            self.addCleanup(a._record.entry.guards.__setitem__, 1, guard)
             a._record.entry.guards[1] = ObservedGuard()
             with a.start():
                 thread = threading.Thread(target=contender, daemon=True)
@@ -179,6 +183,43 @@ class TestProtocolLocks(unittest.TestCase):
             self.assertFalse(thread.is_alive(), "thread watchdog")
             self.assertEqual(results, [("blocked", True), ("entered_after_release", True)])
         self.assertEqual(self.probe(1), "available")
+
+    def test_guard_restoration_with_reused_inode(self):
+        # Retain a pooled entry across the original test order and inode reuse.
+        entry = locks._Entry()
+        originals = dict(entry.guards)
+        pool = weakref.WeakValueDictionary({(123, 456): entry})
+        real_fstat = os.fstat
+        directories = []
+        cases = (lock_tests.TestD5Locks("test_threads_serialize_start_and_state_across_pins"),
+                 TestProtocolLocks("test_start_excludes_peer"))
+        for case in cases:
+            prior_pool = locks._pool
+            try:
+                case.setUp()
+                self.assertIsNot(locks._pool, prior_pool)
+                directories.append(case.directory)
+                disk = case.directory.stat()
+
+                def reused(fd):
+                    info = real_fstat(fd)
+                    if (info.st_dev, info.st_ino) == (disk.st_dev, disk.st_ino):
+                        fields = list(info)
+                        fields[stat.ST_DEV], fields[stat.ST_INO] = 123, 456
+                        return os.stat_result(fields)
+                    return info
+
+                # Share the pool to test restoration independently of isolation.
+                with mock.patch.object(locks, "_pool", pool), \
+                        mock.patch.object(os, "fstat", side_effect=reused):
+                    with locks.pin(case.directory) as record:
+                        self.assertIs(record.entry, entry)
+                    getattr(case, case._testMethodName)()
+            finally:
+                self.assertTrue(case.doCleanups())
+            self.assertIs(locks._pool, prior_pool)
+        self.assertNotEqual(*directories)
+        self.assertEqual(entry.guards, originals)
 
     def test_inherited_drain_survives_owner_close(self):
         # R1-UNLOCK-SHARED: parent closure cannot release the child's description.
