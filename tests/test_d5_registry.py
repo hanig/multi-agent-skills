@@ -1189,6 +1189,30 @@ class TestD5Registry(unittest.TestCase):
         self.assertEqual(self.tree(), before)
         checked.assert_called_once()
 
+    def test_final_c6_unregistered_lookup_runs_walk(self):
+        # Preserve the final round's literal-C6 refutation, pending adjudication.
+        other = self.d / "unregistered-state"
+        other.mkdir()
+        for registered in (False, True):
+            if registered:
+                self.register()
+            with self.subTest(registry_exists=registered), \
+                 mock.patch.object(R, "_entries", wraps=R._entries) as read, \
+                 mock.patch.object(R, "_record_key", wraps=R._record_key) as walk:
+                self.assertIsNone(R.lookup(self.repo, "unregistered", other))
+                read.assert_called_once()
+                walk.assert_called_once()
+
+    def test_final_legacy_schema_one_entry_remains_accepted(self):
+        # Reviewer compatibility expectation; conflicts with the required field.
+        entry = self.register()
+        path = self.root / "registry.json"
+        value = json.loads(path.read_bytes())
+        del value["entries"][0]["record_key"]
+        del entry["record_key"]
+        path.write_text(json.dumps(value))
+        self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+
 
 if __name__ == "__main__":
     unittest.main()
