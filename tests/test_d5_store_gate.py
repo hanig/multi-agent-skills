@@ -475,13 +475,22 @@ class TestD5StoreGate(unittest.TestCase):
                                error.__cause__.errno))
             self.assertEqual(errors[0], errors[1], name)
             self.assertEqual(errors[0][2], errno.ENOENT)
+        # C3 declared delta: 0400 locks are excluded from identity comparison.
+        # U3a repairs owner read/write permissions before the store operation.
         d = self.seed("permissions")
         (d / STATE).chmod(0o400)
-        for module in (old, store):
-            with self.subTest(module=module.__name__):
-                with self.assertRaises(store.AuthorityError) as caught:
-                    module.revoke(d, 102, "stop")
-                self.assertEqual(caught.exception.__cause__.errno, errno.EACCES)
+        with self.assertRaises(store.AuthorityError) as caught:
+            old.revoke(d, 102, "stop")
+        self.assertEqual(caught.exception.__cause__.errno, errno.EACCES)
+        self.assertEqual((d / STATE).stat().st_mode & 0o777, 0o400)
+
+    def test_C3_declared_delta_0400_lock_is_repaired_before_revoke(self):
+        d = self.seed("permissions")
+        (d / STATE).chmod(0o400)
+        result = store.revoke(d, 102, "stop")
+        self.assertEqual(result["invalidation"]["kind"], "revoked")
+        self.assertEqual(store.read(d), result)
+        self.assertEqual((d / STATE).stat().st_mode & 0o777, 0o600)
 
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
