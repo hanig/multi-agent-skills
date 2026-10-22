@@ -108,7 +108,7 @@ class TestD5StoreGate(unittest.TestCase):
         proc = subprocess.Popen([
             sys.executable, "-c", "from tests.test_d5_store_gate import peer_main; peer_main()",
             str(directory), name, watched], cwd=str(ROOT),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
 
         def cleanup():
             if proc.poll() is None:
@@ -214,6 +214,9 @@ class TestD5StoreGate(unittest.TestCase):
         directory = self.seed("read")
         with locks.pin(directory) as record, record.start():
             proc = self.peer(directory, "read", STATE)
+            # Both lines must already be present: readline must not hide the
+            # completion in a Python buffer that communicate bypasses.
+            proc.wait(timeout=10)
             self.assertEqual(self.line(proc), "acquired:" + STATE)
             self.finish(proc)
         self.assertEqual(store.read(directory), held())
