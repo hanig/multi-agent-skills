@@ -144,16 +144,21 @@ def _access(directory, create=False):
         with locks.pin(directory) as record:
             _safe(record.fd, directory=True)
             with record.state():
+                created = False
                 if create:
                     try:
                         os.mkdir(DIRECTORY, 0o700, dir_fd=record.fd)
                     except FileExistsError:
                         pass
                     else:
+                        created = True
+                        # Permit opening even when umask removed owner access.
                         os.chmod(DIRECTORY, 0o700, dir_fd=record.fd)
                 fd = os.open(DIRECTORY, os.O_RDONLY | os.O_DIRECTORY |
                              os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=record.fd)
                 try:
+                    if created:
+                        os.fchmod(fd, 0o700)
                     _safe(fd, directory=True)
                     if create:
                         _sync(record.fd)
@@ -180,6 +185,7 @@ def _write(fd, name, entry, create=False):
         opened = True
         with os.fdopen(out, "wb") as handle:
             os.fchmod(handle.fileno(), 0o600)
+            _safe(handle.fileno())
             handle.write(_encode(entry) + b"\n")
             handle.flush()
             _sync(handle.fileno())

@@ -129,12 +129,12 @@ class _Record:
                     os.chmod(name, 0o600, dir_fd=self.fd)
                 fd = os.open(name, flags, 0o600, dir_fd=self.fd)
             try:
+                if created:
+                    os.fchmod(fd, 0o600)
                 info = os.fstat(fd)
                 if not _safe(info):
                     raise LockError(_UNSAFE)
-                if created:
-                    os.fchmod(fd, 0o600)
-                elif info.st_mode & 0o600 != 0o600:
+                if not created and info.st_mode & 0o600 != 0o600:
                     os.fchmod(fd, 0o600)
                 return fd
             except BaseException:
@@ -192,10 +192,8 @@ class _Record:
             try:
                 info = os.fstat(inherited_fd)
                 expected = os.stat(_NAMES[0], dir_fd=self.fd, follow_symlinks=False)
-                if _key(info) != _key(expected):
+                if not _safe(info) or _key(info) != _key(expected):
                     raise LockError(_REFERENCE)
-                if not _safe(info):
-                    raise LockError(_UNSAFE)
             except OSError as exc:
                 raise LockError(_REFERENCE) from exc
         source = prior[3] if prior is not None else inherited_fd

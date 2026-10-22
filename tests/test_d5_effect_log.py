@@ -355,6 +355,38 @@ class TestEffectLog(unittest.TestCase):
                 finally:
                     os.umask(saved)
 
+    def test_new_nonprivate_modes_repaired_before_check(self):
+        real_open, real_fchmod, real_safe = os.open, os.fchmod, E._safe
+        created, checked = [], []
+
+        def opening(path, flags, mode=0o777, *, dir_fd=None):
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            if path == E.DIRECTORY and not created:
+                real_fchmod(fd, 0o755)  # synthetic new-directory ACL mode
+                created.append((os.fstat(fd).st_ino, 0o700))
+            elif flags & os.O_CREAT and not str(path).endswith(".lock"):
+                self.assertTrue(flags & os.O_EXCL)
+                real_fchmod(fd, 0o644)
+                created.append((os.fstat(fd).st_ino, 0o600))
+            return fd
+
+        def checking(fd, directory=False):
+            real_safe(fd, directory=directory)
+            info = os.fstat(fd)
+            checked.append((info.st_ino, stat.S_IMODE(info.st_mode)))
+
+        with mock.patch.object(os, "open", side_effect=opening), \
+                mock.patch.object(E, "_safe", side_effect=checking):
+            intent = self.prepare()
+            self.eq(stat.S_IMODE(self.path(intent).parent.stat().st_mode), 0o700)
+            self.eq(stat.S_IMODE(self.path(intent).stat().st_mode), 0o600)
+            receipt = E._classify(intent, "submitted")
+            E.complete(receipt, self.ok)
+        self.eq(len(created), 4)  # directory, intent, two atomic replacements
+        for identity_and_mode in created:
+            self.assertIn(identity_and_mode, checked)
+        self.eq(stat.S_IMODE(self.path(receipt).stat().st_mode), 0o600)
+
     def test_existing_nonprivate_files_and_directories_refused(self):
         receipt = self.receipt()
         path = self.path(receipt)

@@ -222,7 +222,33 @@ class TestD5Locks(unittest.TestCase):
                     self.assertEqual(path.read_bytes(), b"unchanged")
                     path.unlink()
 
-    def test_existing_nonprivate_inherited_drain_uses_unsafe_refusal(self):
+    def test_new_nonprivate_mode_repaired_before_check_and_flock(self):
+        real_open, real_fchmod = os.open, os.fchmod
+        real_flock = locks.fcntl.flock
+        created = []
+
+        def opening(path, flags, mode=0o777, *, dir_fd=None):
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            if flags & os.O_CREAT:
+                self.assertTrue(flags & os.O_EXCL)
+                real_fchmod(fd, 0o644)  # synthetic inherited-ACL mode
+                created.append(path)
+            return fd
+
+        def flock(fd, operation):
+            self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o600)
+            return real_flock(fd, operation)
+
+        with mock.patch.object(os, "open", side_effect=opening), \
+                mock.patch.object(locks.fcntl, "flock", side_effect=flock):
+            with locks.pin(self.directory) as record:
+                with record.drain(), record.start(), record.state():
+                    pass
+        self.assertCountEqual(created, locks._NAMES.values())
+        for name in created:
+            self.assertEqual(stat.S_IMODE((self.directory / name).stat().st_mode), 0o600)
+
+    def test_existing_nonprivate_inherited_drain_uses_reference_refusal(self):
         path = self.directory / "authority.drain.lock"
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -233,7 +259,7 @@ class TestD5Locks(unittest.TestCase):
                     with locks.pin(self.directory) as record, \
                             mock.patch.object(locks.fcntl, "flock", side_effect=AssertionError("flock")), \
                             mock.patch.object(os, "fchmod", side_effect=AssertionError("fchmod")), \
-                            self.refused(locks._UNSAFE), record.drain(inherited_fd=fd):
+                            self.refused(locks._REFERENCE), record.drain(inherited_fd=fd):
                         self.fail("nonprivate inherited drain entered")
                     self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), mode)
                     self.assertFalse(self.available(path.name))
