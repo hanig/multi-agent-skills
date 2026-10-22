@@ -1,6 +1,6 @@
 """R3 consumers: real stores/flocks; events and failed NB probes order waits."""
 from contextlib import contextmanager, ExitStack
-import copy
+import json
 import os
 from pathlib import Path
 import select
@@ -295,6 +295,51 @@ class TestInstall(unittest.TestCase):
                 self.assertEqual((info.st_dev, info.st_ino), identity)
         archived = directory / "superseded" / ("a" * 32 + ".json")
         self.assertEqual(store.decode(archived.read_bytes()), grant())
+
+    def test_M5_child_holds_drain_after_ancestor_exit_through_accounting(self):
+        directory = self.directory("M5", "replace")
+        peer = ROOT / "tests/fixtures/d5/install_peer.py"
+        ancestor = subprocess.Popen([sys.executable, str(peer), "ancestor", str(directory)],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, close_fds=True)
+
+        def cleanup():
+            if ancestor.poll() is None:
+                ancestor.kill()
+            ancestor.communicate(timeout=10)  # EOF also releases the child's read.
+
+        self.addCleanup(cleanup)
+
+        def line():
+            ready, _, _ = select.select([ancestor.stdout], [], [], 10)
+            self.assertTrue(ready, "effect child watchdog")
+            return ancestor.stdout.readline()
+
+        self.assertEqual(line(), b"submitted\n")
+        ancestor.kill()
+        ancestor.wait(timeout=10)
+        self.assertLess(ancestor.returncode, 0)
+        original = store.replace
+
+        def replacing(*args):
+            rows = list((directory / "authority.effects").glob("*.json"))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(json.loads(rows[0].read_bytes())["state"], "completed")
+            return original(*args)
+
+        with mock.patch.object(store, "replace", side_effect=replacing):
+            # Failed real EX probe proves survival beyond ancestor termination.
+            try:
+                with self.waiter(lambda: self.call("replace", directory), directory, hold=False) as (results, errors):
+                    ancestor.stdin.write(b"release\n")
+                    ancestor.stdin.flush()
+                    self.assertEqual(line(), b"completed and released\n")
+            finally:
+                ancestor.stdin.close()
+                ancestor.stdin = None
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(store.read(directory)["grant_id"], "b" * 32)
 
     def test_initial_uses_provisioned_directory_and_refuses_duplicate(self):
         # Consumer seam: the real registration sequence provisions D first.
