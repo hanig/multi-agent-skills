@@ -92,7 +92,10 @@ def _cleanup(action, *args, **kwargs):
         try:
             action(*args, **kwargs)
         except OSError as secondary:
-            primary.cleanup_errors = getattr(primary, "cleanup_errors", ()) + (secondary,)
+            try:
+                primary.cleanup_errors = getattr(primary, "cleanup_errors", ()) + (secondary,)
+            except Exception:
+                pass
         raise
     else:
         action(*args, **kwargs)
@@ -165,7 +168,10 @@ class _Record:
                 try:
                     os.close(fd)
                 except OSError as secondary:
-                    primary.cleanup_errors = getattr(primary, "cleanup_errors", ()) + (secondary,)
+                    try:
+                        primary.cleanup_errors = getattr(primary, "cleanup_errors", ()) + (secondary,)
+                    except Exception:
+                        pass
                 raise
         except OSError as exc:
             raise LockError(_UNSAFE) from exc
