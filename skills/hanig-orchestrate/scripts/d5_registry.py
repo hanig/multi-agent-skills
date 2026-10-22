@@ -11,6 +11,11 @@ Git 2.36 or later and a standard repository layout. Lookup and idempotent
 registration check owned directories for Git entries and record identity;
 this module remains inert until activation.
 
+Registry schema 2 includes record_key. Fact: register has refused while D5
+is inactive since U1b-1 merged (PR 267), and D5 has never been active.
+Existing schema-1 files were written by tests or by hand; none can hold a grant.
+Non-claim: a schema-1 registry is not migrated.
+
 Non-claims: path-string equivalence; equivalence across clones or copies;
 persistence across inode recreation; protection against malicious same-UID
 replacement; TOCTOU against a writer outside the lock.
@@ -207,8 +212,12 @@ def _entries(root):
         raise AuthorityError("registry: invalid JSON: {}".format(exc)) from exc
     _require(type(value) is dict and set(value) == {"schema_version", "entries"},
              "invalid registry fields")
-    _require(type(value["schema_version"]) is int and value["schema_version"] == 1,
-             "invalid schema_version")
+    version = value["schema_version"]
+    _require(type(version) is int, "invalid schema_version")
+    _require(version != 1, "unsupported registry schema 1, written before tamper checks; "
+             "D5 was never active, so it holds no grants: remove registry.json "
+             "and register again")
+    _require(version == 2, "invalid schema_version")
     entries = value["entries"]
     _require(type(entries) is list, "entries must be a list")
     ids, plans, states = set(), set(), set()
@@ -338,7 +347,7 @@ def register(checkout, plan_id, state_dir):
                 return existing
             entry = dict(identity, registration_id=rid, record_dir=str(directory),
                          record_key=record_key)
-            raw = (json.dumps({"schema_version": 1, "entries": entries + [entry]},
+            raw = (json.dumps({"schema_version": 2, "entries": entries + [entry]},
                               sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
             store.write_bytes(root / "registry.json", raw)
             return entry

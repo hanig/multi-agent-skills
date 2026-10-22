@@ -386,7 +386,7 @@ class TestD5Registry(unittest.TestCase):
         path = self.root / "registry.json"
         original = path.read_bytes()
         valid = json.loads(original)
-        invalid = [b'{"schema_version":1,"schema_version":1,"entries":[]}', b"NaN", b"\xff"]
+        invalid = [b'{"schema_version":2,"schema_version":2,"entries":[]}', b"NaN", b"\xff"]
         for field, value in (("schema_version", True), ("entries", {}), ("extra", 1)):
             record = copy.deepcopy(valid)
             record[field] = value
@@ -413,7 +413,7 @@ class TestD5Registry(unittest.TestCase):
         path = self.root / "registry.json"
         path.unlink()
         target = self.d / "target"
-        target.write_text('{"schema_version":1,"entries":[]}')
+        target.write_text('{"schema_version":2,"entries":[]}')
         for kind in ("link", "fifo", "directory"):
             if kind == "link":
                 path.symlink_to(target)
@@ -953,12 +953,12 @@ class TestD5Registry(unittest.TestCase):
                         self.assertIn("record_key mismatch", str(caught.exception))
             self.assertEqual(calls, paths[:count])
 
-    def test_record_key_schema_is_strict_and_version_stays_one(self):
+    def test_record_key_schema_is_strict_and_new_registry_is_version_two(self):
         entry = self.register()
         path = self.root / "registry.json"
         original = path.read_bytes()
         valid = json.loads(original)
-        self.assertEqual(valid["schema_version"], 1)
+        self.assertEqual(valid["schema_version"], 2)
         self.assertEqual(entry["record_key"], list(R._key(Path(entry["record_dir"]).stat())))
         for key in (None, [], [1], [1, 2, 3], [True, 1], [-1, 1], [1, "2"], {"dev": 1}):
             value = copy.deepcopy(valid)
@@ -1189,29 +1189,64 @@ class TestD5Registry(unittest.TestCase):
         self.assertEqual(self.tree(), before)
         checked.assert_called_once()
 
-    def test_final_c6_unregistered_lookup_runs_walk(self):
-        # Preserve the final round's literal-C6 refutation, pending adjudication.
+    def test_c6_unregistered_lookup_returns_none_without_walk(self):
+        # C6 covers a matching entry; these absent/unmatched paths need no walk.
         other = self.d / "unregistered-state"
         other.mkdir()
         for registered in (False, True):
             if registered:
                 self.register()
+            before = self.tree()
             with self.subTest(registry_exists=registered), \
                  mock.patch.object(R, "_entries", wraps=R._entries) as read, \
                  mock.patch.object(R, "_record_key", wraps=R._record_key) as walk:
                 self.assertIsNone(R.lookup(self.repo, "unregistered", other))
                 read.assert_called_once()
-                walk.assert_called_once()
+                walk.assert_not_called()
+            self.assertEqual(self.tree(), before)
 
-    def test_final_legacy_schema_one_entry_remains_accepted(self):
-        # Reviewer compatibility expectation; conflicts with the required field.
+    def test_schema_one_refuses_without_migration_or_mutation(self):
         entry = self.register()
+        (Path(entry["record_dir"]) / "retained").write_bytes(b"existing work")
+        path = self.root / "registry.json"
+        original = json.loads(path.read_bytes())
+        message = ("registry: unsupported registry schema 1, written before tamper checks; "
+                   "D5 was never active, so it holds no grants: remove registry.json "
+                   "and register again")
+        for fields in ("with-key", "without-key", "empty"):
+            value = copy.deepcopy(original)
+            value["schema_version"] = 1
+            if fields == "without-key":
+                del value["entries"][0]["record_key"]
+            elif fields == "empty":
+                value["entries"] = []
+            path.write_text(json.dumps(value))
+            for call in (lambda: R.lookup(self.repo, "p", self.state), self.register):
+                before = self.tree(self.root)
+                with self.subTest(fields=fields, operation=call), \
+                     mock.patch.object(R, "_record_key", wraps=R._record_key) as walk:
+                    try:
+                        with self.assertRaises(R.AuthorityError) as caught:
+                            call()
+                        self.assertEqual(str(caught.exception), message)
+                        walk.assert_not_called()
+                    finally:
+                        self.assertEqual(self.tree(self.root), before)
+
+    def test_other_schema_versions_keep_existing_refusal(self):
+        self.register()
         path = self.root / "registry.json"
         value = json.loads(path.read_bytes())
-        del value["entries"][0]["record_key"]
-        del entry["record_key"]
-        path.write_text(json.dumps(value))
-        self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+        for version in (None, True, False, 0, -1, 3, 1.0, 2.0, "1", "2", [], {}):
+            value["schema_version"] = version
+            path.write_text(json.dumps(value))
+            for call in (lambda: R.lookup(self.repo, "p", self.state), self.register):
+                before = self.tree(self.root)
+                with self.subTest(version=version, operation=call):
+                    with self.assertRaises(R.AuthorityError) as caught:
+                        call()
+                    self.assertEqual(str(caught.exception), "registry: invalid schema_version")
+                    self.assertEqual(self.tree(self.root), before)
 
 
 if __name__ == "__main__":
