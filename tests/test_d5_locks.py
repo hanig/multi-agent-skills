@@ -585,6 +585,42 @@ class TestCleanup(unittest.TestCase):
 
 class TestCleanupErrors(unittest.TestCase):
     """DISCARD-CLEANUP-ERROR: each consumer must retain its secondary error."""
+    def test_readonly_cleanup_errors_preserves_primary(self):
+        # Open R1 finding: the mandated annotation cannot satisfy this case.
+        # Preserved as a failing regression, not a merge-ready implementation.
+        class Primary(RuntimeError):
+            @property
+            def cleanup_errors(self):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            for site in ("pin", "start", "state", "drain", "_open"):
+                with self.subTest(site=site), ExitStack() as stack:
+                    record = (None if site == "pin" else
+                              stack.enter_context(locks.pin(directory)))
+                    primary, secondary = Primary("primary"), OSError("secondary")
+                    cause = ValueError("cause")
+                    primary.__cause__ = cause
+                    real_close = os.close
+
+                    def close(fd):
+                        real_close(fd)
+                        raise secondary
+
+                    with mock.patch.object(os, "close", side_effect=close):
+                        with self.assertRaises(BaseException) as caught:
+                            if site == "_open":
+                                with mock.patch.object(os, "fstat", side_effect=primary):
+                                    record._open(1)
+                            else:
+                                guard = (locks.pin(directory) if record is None
+                                         else getattr(record, site)())
+                                with guard:
+                                    raise primary
+                    self.assertIs(caught.exception, primary)
+                    self.assertIs(caught.exception.__cause__, cause)
+                    self.assertEqual(caught.exception.cleanup_errors, (secondary,))
+
     def test_cleanup_preserves_primary(self):
         with tempfile.TemporaryDirectory() as directory:
             for site in ("pin", "start", "state", "drain", "_open"):
