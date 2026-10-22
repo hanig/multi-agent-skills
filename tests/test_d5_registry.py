@@ -997,5 +997,20 @@ class TestD5Registry(unittest.TestCase):
         self.assertEqual(self.tree(), before)
 
 
+    @unittest.skipIf(os.geteuid() == 0, "requires non-root permission enforcement")
+    def test_review_round2_searchable_nonlistable_record_lookup(self):
+        # Preserved counterexample: NOT READY; final review found this regression.
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        original_mode = directory.stat().st_mode & 0o777
+        directory.chmod(0o300)
+        try:
+            self.assertEqual(list(R._key(directory.stat())), entry["record_key"])
+            self.assertFalse((directory / ".git").exists())
+            self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+        finally:
+            directory.chmod(original_mode)
+
+
 if __name__ == "__main__":
     unittest.main()
