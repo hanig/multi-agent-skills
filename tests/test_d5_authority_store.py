@@ -459,6 +459,86 @@ class TestD5AuthorityStore(unittest.TestCase):
                 attached = error.cleanup_errors[0]
                 self.assertIs(attached.__cause__ if cleanup == "lookup" else attached, secondary)
 
+    def test_entry_cleanup_preserves_acquisition_failure(self):
+        for name, operation in (
+                ("authority.lock", lambda: A.read(self.d)),
+                ("authority.start.lock", lambda: A.check(self.d, 102, MANDATE)),
+                ("authority.drain.lock", lambda: A.replace(self.d, self.successor()))):
+            with self.subTest(lock=name):
+                if not self.path.exists():
+                    self.create()
+                info = (self.d / name).stat()
+                key = info.st_dev, info.st_ino
+                primary = OSError(errno.ENOLCK, "primary acquisition")
+                secondary = OSError(errno.EIO, "cleanup close")
+                real_close, real_flock = os.close, A.fcntl.flock
+
+                def matches(fd):
+                    info = os.fstat(fd)
+                    return (info.st_dev, info.st_ino) == key
+
+                def flock(fd, mode):
+                    if matches(fd):
+                        raise primary
+                    return real_flock(fd, mode)
+
+                def close(fd):
+                    selected = matches(fd)
+                    real_close(fd)
+                    if selected:
+                        raise secondary
+
+                with mock.patch.object(A.fcntl, "flock", side_effect=flock), \
+                        mock.patch.object(A.os, "close", side_effect=close):
+                    with self.assertRaises(A.AuthorityError) as caught:
+                        operation()
+                self.assertIs(caught.exception.__cause__, primary)
+                self.eq(primary.cleanup_errors, (secondary,))
+                self.stored(grant())
+
+    def test_entry_preserves_explicit_wrapping_and_caller_exception(self):
+        self.create()
+        primary = OSError(errno.EIO, "current failure")
+        try:
+            raise OSError(errno.EINTR, "unrelated caller exception")
+        except OSError:
+            with mock.patch.object(A.fcntl, "flock", side_effect=primary):
+                with self.assertRaises(A.AuthorityError) as caught:
+                    A.read(self.d)
+        self.assertIs(caught.exception.__cause__, primary)
+        self.assertFalse(hasattr(primary, "cleanup_errors"))
+        # pin() deliberately wraps this error with an explicit LockError cause.
+        with mock.patch.object(A.os, "open", side_effect=primary):
+            with self.assertRaises(A.AuthorityError) as caught:
+                A.read(self.d)
+        self.assertIs(caught.exception.__cause__, primary)
+        self.assertFalse(hasattr(primary, "cleanup_errors"))
+
+    def test_missing_fcntl_imports_then_refuses_before_filesystem(self):
+        script = '''
+import os, sys
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+sys.modules.pop("fcntl", None)
+class MissingFcntl:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "fcntl":
+            raise ModuleNotFoundError("fixture: no fcntl")
+sys.meta_path.insert(0, MissingFcntl())
+import d5_authority_store as store
+with mock.patch.object(os, "open", side_effect=AssertionError("filesystem")):
+    try:
+        store.read("unused")
+    except store.locks.LockError as exc:
+        assert str(exc) == "D5 lock refused: safe locking unavailable", str(exc)
+    else:
+        raise AssertionError("accepted missing fcntl")
+'''
+        result = subprocess.run([sys.executable, "-c", script,
+                                 str(ROOT / "skills/hanig-orchestrate/scripts")],
+                                capture_output=True, text=True, timeout=10)
+        self.eq(result.returncode, 0, result.stdout + result.stderr)
+
 
     def successor(self, old=None, fresh=False):
         new = copy.deepcopy(old if old is not None else grant())
