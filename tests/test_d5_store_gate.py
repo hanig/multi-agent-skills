@@ -281,11 +281,11 @@ class TestD5StoreGate(unittest.TestCase):
         with locks.pin(directory) as record, record.drain():
             for name in ("claim", "replace"):
                 with self.subTest(name=name), self.assertRaisesRegex(
-                        locks.LockError, "^D5 custody change refused: caller holds shared drain$"):
+                        store.AuthorityError, "^D5 custody change refused: caller holds shared drain$"):
                     operation(directory, name)
             for name in WRITERS + ("read",):
                 with self.subTest(name=name), self.assertRaisesRegex(
-                        locks.LockError, "^D5 lock refused: cross-record nesting$"):
+                        store.AuthorityError, "^D5 lock refused: cross-record nesting$"):
                     operation(other, name)
 
     def test_state_only_same_record_read_is_reentrant(self):
