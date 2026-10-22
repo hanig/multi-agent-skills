@@ -2521,6 +2521,8 @@ else:
         with mock.patch.object(RV.shutil, 'which', return_value='/fixture/controller'), mock.patch.object(
                 RV, '_command', side_effect=query):
             result = self.assert_accounting(supervise=True)
+            self.configure({'321': 'COMPLETED'}, unavailable='sacct')
+            self.assert_accounting(None, supervise=True)
         self.assertNotIn('error', result)
 
     def test_discovery_without_accounting_requires_complete_controller_launch(self):
