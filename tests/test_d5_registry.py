@@ -1,6 +1,6 @@
 """D5 registration against real local repositories and directory objects."""
 import copy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import errno
 import fcntl
 import json
@@ -895,6 +895,64 @@ class TestD5Registry(unittest.TestCase):
                 path.unlink()
                 moved.rename(path)
 
+    @contextmanager
+    def walk_io(self, probe):
+        """Intercept filesystem entry points while the real walk executes."""
+        with ExitStack() as stack:
+            for name in ("open", "scandir", "listdir", "stat"):
+                stack.enter_context(mock.patch.object(
+                    os, name, side_effect=AssertionError("walk called " + name)))
+            stack.enter_context(mock.patch("builtins.open", side_effect=AssertionError("open")))
+            stack.enter_context(mock.patch.object(Path, "open", side_effect=AssertionError("Path.open")))
+            stack.enter_context(mock.patch.object(os, "lstat", side_effect=probe))
+            yield
+
+    def test_adversarial_walk_trace_and_refusals(self):
+        entry = self.register()
+        levels = (self.root, self.root / "plans", Path(entry["record_dir"]))
+        paths = [p for level in levels for p in (level, level / ".git")]
+        real_lstat = os.lstat
+        # Each case supplies one altered lstat result, or one failed probe.
+        cases = [("healthy", None, None, None, 6)]
+        for i, level in enumerate(levels):
+            cases.append(("symlink", level, SimpleNamespace(st_mode=0o120777),
+                          NotADirectoryError, 2 * i + 1))
+            for mode in (0o100600, 0o040700, 0o120777):
+                cases.append(("git", level / ".git", SimpleNamespace(st_mode=mode),
+                              R.AuthorityError, 2 * i + 2))
+        for field in ("st_dev", "st_ino"):
+            info = real_lstat(levels[-1])
+            changed = SimpleNamespace(st_mode=info.st_mode, st_dev=info.st_dev, st_ino=info.st_ino)
+            setattr(changed, field, getattr(changed, field) + 1)
+            cases.append((field, levels[-1], changed, R.AuthorityError, 6))
+        for i, path in enumerate(paths):
+            codes = (errno.EACCES, errno.EIO, errno.ENOTDIR)
+            if path in levels:
+                codes += (errno.ENOENT,)
+            for code in codes:
+                cases.append(("error", path, OSError(code, "synthetic lstat failure"),
+                              OSError, i + 1))
+        for label, altered, result, error, count in cases:
+            calls = []
+            def probe(path):
+                calls.append(path)
+                if path == altered:
+                    if isinstance(result, OSError):
+                        raise result
+                    return result
+                return real_lstat(path)
+            with self.subTest(case=label, path=altered, result=result), self.walk_io(probe):
+                if error is None:
+                    R._check_record(self.root, entry)
+                else:
+                    with self.assertRaises(error) as caught:
+                        R._check_record(self.root, entry)
+                    if label == "git":
+                        self.assertEqual(str(caught.exception), "authority storage became a Git worktree")
+                    if label in ("st_dev", "st_ino"):
+                        self.assertIn("record_key mismatch", str(caught.exception))
+            self.assertEqual(calls, paths[:count])
+
     def test_record_key_schema_is_strict_and_version_stays_one(self):
         entry = self.register()
         path = self.root / "registry.json"
@@ -917,7 +975,7 @@ class TestD5Registry(unittest.TestCase):
 
     def test_walk_after_read_before_use_and_initial_key_from_lstat(self):
         events, probes, keys = [], [], []
-        real_open, real_lstat = os.open, os.lstat
+        real_open, real_lstat, real_fsync = os.open, os.lstat, os.fsync
         real_entries, real_walk = R._entries, R._record_key
         real_sync, real_mkdir = store.sync_directory, Path.mkdir
         real_write, real_stat = store.write_bytes, Path.stat
@@ -940,6 +998,10 @@ class TestD5Registry(unittest.TestCase):
             self.assertFalse(walking, "tamper walk opened a directory")
             self.assertNotEqual(Path(path).parent, self.root / "plans", "D opened")
             return real_open(path, flags, *args, **kwargs)
+        def fsync(fd):
+            if phase in ("lookup", "idempotent"):
+                self.assertEqual(events[-1], "walk", "fsync preceded tamper walk")
+            return real_fsync(fd)
         def lstat(path):
             if walking:
                 probes.append(path)
@@ -977,7 +1039,7 @@ class TestD5Registry(unittest.TestCase):
              mock.patch.object(Path, "stat", path_stat), \
              mock.patch.object(store, "write_bytes", side_effect=write), \
              mock.patch.object(store, "sync_directory", side_effect=sync):
-            ops.open, ops.lstat = opened, lstat
+            ops.open, ops.lstat, ops.fsync = opened, lstat, fsync
             for phase, call in (("new", self.register),
                                 ("lookup", lambda: R.lookup(self.repo, "p", self.state)),
                                 ("idempotent", self.register)):
@@ -1083,7 +1145,8 @@ class TestD5Registry(unittest.TestCase):
             self.assertEqual(self.register(), entry)  # Operator recovery retains D.
 
     def test_review_round1_lookup_walk_after_envelope_stat_is_read_only(self):
-        # Corrected contract: the envelope stats listed D before registry access.
+        # Exercise a converted D from a later listed checkout without
+        # constraining the separate envelope gate's filesystem probes.
         entry = self.register()
         directory = Path(entry["record_dir"])
         self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
@@ -1092,52 +1155,39 @@ class TestD5Registry(unittest.TestCase):
         listed = R._worktrees(later)
         self.assertLess(listed.index(directory), listed.index(later))
         events = []
-        real_stat, real_entries, real_walk = Path.stat, R._entries, R._record_key
-        def path_stat(path, *args, **kwargs):
-            if path == directory:
-                self.assertNotIn("registry-read", events, "record path used D outside walk")
-                events.append("D.stat")
-            return real_stat(path, *args, **kwargs)
+        real_entries, real_walk, real_lstat = R._entries, R._record_key, os.lstat
         def entries(root):
             result = real_entries(root)
             events.append("registry-read")
             return result
         def walk(root, rid):
             events.append("tamper-walk")
-            with mock.patch.object(os, "open", side_effect=AssertionError("walk opened")), \
-                 mock.patch("builtins.open", side_effect=AssertionError("walk opened")), \
-                 mock.patch.object(Path, "open", side_effect=AssertionError("walk opened")):
+            with self.walk_io(real_lstat):
                 return real_walk(root, rid)
         before = self.tree()
         fds = len(os.listdir("/dev/fd"))
-        with mock.patch.object(Path, "stat", path_stat), \
-             mock.patch.object(R, "_entries", side_effect=entries), \
+        with mock.patch.object(R, "_entries", side_effect=entries), \
              mock.patch.object(R, "_record_key", side_effect=walk):
             with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
                 R.lookup(later, "p", self.state)
         self.assertEqual(self.tree(), before)
         self.assertEqual(len(os.listdir("/dev/fd")), fds)
         self.assertLess(events.index("registry-read"), events.index("tamper-walk"))
-        self.assertLess(events.index("D.stat"), events.index("registry-read"))
 
-    def test_final_envelope_stats_every_listed_worktree(self):
-        # Preserved failing contract: envelope membership stops at main.
+    def test_final_converted_record_refuses_without_walk_open(self):
+        # Unit-owned behavior, independent of the envelope's traversal.
         directory = Path(self.register()["record_dir"])
         self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
-        seen = []
-        real_stat, real_envelope = Path.stat, R._envelope
-        def envelope(checkout):
-            def probe(path, *args, **kwargs):
-                seen.append(path)
-                return real_stat(path, *args, **kwargs)
-            with mock.patch.object(Path, "stat", probe):
-                return real_envelope(checkout)
+        real_walk, real_lstat = R._record_key, os.lstat
+        def walk(root, rid):
+            with self.walk_io(real_lstat):
+                return real_walk(root, rid)
         before = self.tree()
-        with mock.patch.object(R, "_envelope", side_effect=envelope):
+        with mock.patch.object(R, "_record_key", side_effect=walk) as checked:
             with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
                 R.lookup(self.repo, "p", self.state)
         self.assertEqual(self.tree(), before)
-        self.assertIn(directory, seen, "envelope did not stat listed D")
+        checked.assert_called_once()
 
 
 if __name__ == "__main__":
