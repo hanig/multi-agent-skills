@@ -712,6 +712,47 @@ class TestD5StoreGate(unittest.TestCase):
                     self.assertIs(caught.exception.__cause__, denied)
                     self.assertEqual(str(caught.exception), FS_PREFIX + " " + str(denied))
 
+    def test_review_low_descriptor_limit_matches_legacy_claim(self):
+        script = '''
+import resource
+from tests.test_d5_store_gate import *
+old = legacy_store()
+with tempfile.TemporaryDirectory() as left, tempfile.TemporaryDirectory() as right:
+    for d in (left, right):
+        Path(d).chmod(0o700)
+        store.create(d, held())
+    saved = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (8, saved[1]))
+    try:
+        args = (103, MANDATE, 'next', ProcessIdentity(43, 9000002), lambda _: 'dead')
+        expected = old.claim(left, *args)
+        actual = store.claim(right, *args)
+        assert actual == expected
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, saved)
+    assert store.read(right) == expected
+'''
+        result = subprocess.run([sys.executable, "-c", script], cwd=str(ROOT),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_review_inplace_callback_restore_is_refused(self):
+        for change in (False, True):
+            with self.subTest(change=change):
+                d = self.d / str(change)
+                d.mkdir(mode=0o700)
+                store.create(d, held())
+                path = d / store.RECORD_NAME
+                raw = path.read_bytes()
+                def probe(_):
+                    if change:
+                        path.write_bytes(raw + b" \n")
+                    path.write_bytes(raw)
+                    return "dead"
+                with self.assertRaisesRegex(store.AuthorityError,
+                                            "^record: changed during liveness observation$"):
+                    store.claim(d, 103, MANDATE, "next", ProcessIdentity(43, 9000002), probe)
+
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
         started, finished = threading.Event(), threading.Event()
