@@ -201,7 +201,7 @@ class SlurmEvidence(unittest.TestCase):
                        {"job_state": "REVOKED"}, {"job_state": "SPECIAL_EXIT"},
                        {"job_state": "REQUEUED"}, {"job_state": "RESIZING"}, {"job_state": "SUSPENDED"},
                        {"submit_time": "not-a-date"}, {"submit_time": []},
-                       {"end_time": "not-a-date"}, {"end_time": []}, {"schema_version": True},
+                       {"end_time": "not-a-date"}, {"end_time": []}, {"observed_at": "not-a-date"}, {"schema_version": True},
                        {"source": "exit-record"}, {"exit_code": ""}, {"extra": 1}):
             with self.subTest(change=change):
                 self.observation(**dict({"job_state": "FAILED"}, **change))

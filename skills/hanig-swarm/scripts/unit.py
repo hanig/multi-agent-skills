@@ -807,10 +807,10 @@ def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
     row, err = None, error
     if path is not None:
         try:
-            with path.open("rb") as handle:
-                raw = handle.read(65537)
+            with path.open("rb") as f:
+                raw = f.read(65537)
             if len(raw) > 65536:
-                raise ValueError("observation too large")
+                raise ValueError("oversize")
             row = json.loads(raw)
         except (OSError, ValueError, RecursionError) as exc:
             err = str(exc)
@@ -825,7 +825,7 @@ def observed_slurm_state(path, unit_dir, spec, declared_at, bound_at, notes):
             and row["unit_id"] == spec.get("task_id")
             and row["attempt_id"] == spec.get("attempt_id") == Path(unit_dir).name
             and sacct_row_is_ours(parse_iso_ts(row["submit_time"]), declared_at, bound_at)[0]
-            and parse_iso_ts(row["end_time"]) is not None
+            and all(parse_iso_ts(row[k]) is not None for k in ("end_time", "observed_at"))
             and row["job_state"] in (SLURM_FAILED - {"REVOKED", "SPECIAL_EXIT"}) | {"PREEMPTED"}):
         return row["job_state"], row["exit_code"], row["submit_time"], None
     notes.append("controller observation ignored: " + (err or "invalid row or non-failure state"))
