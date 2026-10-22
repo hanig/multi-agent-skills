@@ -88,12 +88,13 @@ def _check_directory(directory):
                  info.st_mode & 0o700 == 0o700, "record",
                  "directory must be owned by the caller and grant its owner "
                  "read, write and search permission")
+    return info
 
 
 @contextmanager
 def _locked(directory, *, start=False, drain=False, initialize=False):
     directory = Path(directory)
-    _check_directory(directory)
+    checked = _check_directory(directory)
     try:
         # Preserve legacy pathname failures before creating permanent locks.
         try:
@@ -102,6 +103,11 @@ def _locked(directory, *, start=False, drain=False, initialize=False):
             pass
         with ExitStack() as stack:
             record = stack.enter_context(locks.pin(directory))
+            pinned = os.fstat(record.fd)
+            _require((pinned.st_dev, pinned.st_ino) == (checked.st_dev, checked.st_ino) and
+                     pinned.st_uid == os.geteuid() and pinned.st_mode & 0o700 == 0o700,
+                     "record", "directory must be owned by the caller and grant its owner "
+                     "read, write and search permission")
             if drain:
                 stack.enter_context(record.drain(shared=False))
             if start:

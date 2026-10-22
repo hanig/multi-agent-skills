@@ -837,18 +837,70 @@ with tempfile.TemporaryDirectory() as left, tempfile.TemporaryDirectory() as rig
         self.assertEqual((d / store.RECORD_NAME).read_bytes(), before)
 
     def test_review_C0_precedes_unavailable_facilities(self):
-        # Preservation regression for the reported competing refusal sources.
+        # OD16: outside E (category 3), refusal precedence is not contract.
+        path = self.d / store.RECORD_NAME
+        raw = store.encode(held())
+        path.write_bytes(raw)
         self.d.chmod(0o500)
         try:
             with mock.patch.object(store, "_facilities", side_effect=locks.LockError(
                     "D5 lock refused: safe locking unavailable")):
                 with self.assertRaisesRegex(store.AuthorityError,
-                        "^record: directory must be owned by the caller and grant its "
-                        "owner read, write and search permission$"):
+                        "^(record: directory must be owned by the caller and grant its "
+                        "owner read, write and search permission|"
+                        "D5 lock refused: safe locking unavailable)$"):
                     store.read(self.d)
-            self.assertEqual(list(self.d.iterdir()), [])
+            self.assertEqual(list(self.d.iterdir()), [path])
+            self.assertEqual(path.read_bytes(), raw)
         finally:
             self.d.chmod(0o700)
+
+    def test_pin_verifies_identity_and_envelope_before_lock_open(self):
+        # OOE category 2: synthetic same-UID changes at the check/pin boundary.
+        for change in ("swap", "mode", "owner"):
+            for name in WRITERS + ("read",):
+                with self.subTest(change=change, name=name), tempfile.TemporaryDirectory() as tmp:
+                    d, saved = Path(tmp) / "D", Path(tmp) / "saved"
+                    d.mkdir(mode=0o700)
+                    raw = store.encode(held())
+                    (d / store.RECORD_NAME).write_bytes(raw)
+                    pin, fstat = locks.pin, os.fstat
+
+                    @contextmanager
+                    def changed(path):
+                        if change == "swap":
+                            d.rename(saved)
+                            d.mkdir(mode=0o700)
+                            (d / store.RECORD_NAME).write_bytes(raw)
+                        with pin(path) as record:
+                            if change == "mode":
+                                d.chmod(0o500)
+                            def info(fd):
+                                value = fstat(fd)
+                                if change == "owner" and fd == record.fd:
+                                    fields = {k: getattr(value, k) for k in dir(value)
+                                              if k.startswith("st_")}
+                                    fields["st_uid"] = os.geteuid() + 1
+                                    return types.SimpleNamespace(**fields)
+                                return value
+                            with mock.patch.object(os, "fstat", side_effect=info):
+                                yield record
+
+                    try:
+                        with mock.patch.object(locks, "pin", changed), \
+                                mock.patch.object(locks._Record, "_open", side_effect=
+                                                  AssertionError("lock opened before verification")) as opening:
+                            with self.assertRaisesRegex(store.AuthorityError,
+                                    "^record: directory must be owned by the caller and grant its "
+                                    "owner read, write and search permission$"):
+                                operation(d, name)
+                            opening.assert_not_called()
+                        self.assertEqual(list(d.iterdir()), [d / store.RECORD_NAME])
+                        self.assertEqual((d / store.RECORD_NAME).read_bytes(), raw)
+                        if change == "swap":
+                            self.assertEqual(files(saved), {store.RECORD_NAME: raw})
+                    finally:
+                        d.chmod(0o700)
 
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
