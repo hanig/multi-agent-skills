@@ -66,38 +66,16 @@ def _cleanup(action, *args):
 
 
 @contextmanager
-def _preserving(guard):
-    """Release a lock context without replacing the store's primary error."""
-    entry_frame = guard.gen.gi_frame
-    try:
-        value = guard.__enter__()
-    except BaseException as secondary:
-        primary = secondary.__context__
-        trace = primary.__traceback__ if primary is not None else None
-        # U3a's generator may fail in its entry cleanup. Restore an exception
-        # that already reached THIS invocation, not an unrelated caller's
-        # exception or an intentional `raise ... from ...` wrapper.
-        while trace is not None and not secondary.__suppress_context__:
-            if trace.tb_frame is entry_frame:
-                primary.cleanup_errors = getattr(primary, "cleanup_errors", ()) + (secondary,)
-                raise primary
-            trace = trace.tb_next
-        raise
-    with _cleanup(guard.__exit__, None, None, None):
-        yield value
-
-
-@contextmanager
 def _locked(directory, *, start=False, drain=False, initialize=False):
     directory = Path(directory)
     try:
         with ExitStack() as stack:
-            record = stack.enter_context(_preserving(locks.pin(directory)))
+            record = stack.enter_context(locks.pin(directory))
             if drain:
-                stack.enter_context(_preserving(record.drain(shared=False)))
+                stack.enter_context(record.drain(shared=False))
             if start:
-                stack.enter_context(_preserving(record.start()))
-            stack.enter_context(_preserving(record.state()))
+                stack.enter_context(record.start())
+            stack.enter_context(record.state())
             if initialize:
                 # Create the permanent drain inode before initial publication.
                 # A later refused replacement must not change the directory.
