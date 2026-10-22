@@ -1082,8 +1082,8 @@ class TestD5Registry(unittest.TestCase):
             self.assertEqual(self.tree(), before)
             self.assertEqual(self.register(), entry)  # Operator recovery retains D.
 
-    def test_review_round1_lookup_walk_is_first_record_access(self):
-        # Preserved contract counterexample: the Git envelope also stats D.
+    def test_review_round1_lookup_walk_after_envelope_stat_is_read_only(self):
+        # Corrected contract: the envelope stats listed D before registry access.
         entry = self.register()
         directory = Path(entry["record_dir"])
         self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
@@ -1095,24 +1095,30 @@ class TestD5Registry(unittest.TestCase):
         real_stat, real_entries, real_walk = Path.stat, R._entries, R._record_key
         def path_stat(path, *args, **kwargs):
             if path == directory:
+                self.assertNotIn("registry-read", events, "record path used D outside walk")
                 events.append("D.stat")
             return real_stat(path, *args, **kwargs)
         def entries(root):
+            result = real_entries(root)
             events.append("registry-read")
-            return real_entries(root)
+            return result
         def walk(root, rid):
             events.append("tamper-walk")
-            return real_walk(root, rid)
+            with mock.patch.object(os, "open", side_effect=AssertionError("walk opened")), \
+                 mock.patch("builtins.open", side_effect=AssertionError("walk opened")), \
+                 mock.patch.object(Path, "open", side_effect=AssertionError("walk opened")):
+                return real_walk(root, rid)
         before = self.tree()
+        fds = len(os.listdir("/dev/fd"))
         with mock.patch.object(Path, "stat", path_stat), \
              mock.patch.object(R, "_entries", side_effect=entries), \
              mock.patch.object(R, "_record_key", side_effect=walk):
             with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
                 R.lookup(later, "p", self.state)
         self.assertEqual(self.tree(), before)
+        self.assertEqual(len(os.listdir("/dev/fd")), fds)
         self.assertLess(events.index("registry-read"), events.index("tamper-walk"))
-        self.assertNotIn("D.stat", events[:events.index("registry-read")],
-                         "Git envelope accesses D before the registry read and walk")
+        self.assertLess(events.index("D.stat"), events.index("registry-read"))
 
 
 if __name__ == "__main__":
