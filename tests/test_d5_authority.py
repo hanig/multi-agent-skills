@@ -26,6 +26,14 @@ def grant(identifier="a" * 32):
     }
 
 
+def held():
+    r = grant()
+    r["custody"] = {"session_id": "native", "anchor_pid": 42,
+                    "anchor_start_us": 9000001, "generation": 1,
+                    "claimed_at": 101, "relinquished_at": None}
+    return r
+
+
 class TestD5Authority(unittest.TestCase):
 
     def refuses(self, field, op, *args):
@@ -125,7 +133,8 @@ class TestD5Authority(unittest.TestCase):
     def test_purity(self):
         source = Path(A.__file__).read_text()
         for forbidden in ("open(", "os.", "fcntl", "pathlib", "tempfile", "shutil",
-                          "import os"):
+                          "import os", "d5_host", "subprocess", "import time",
+                          "datetime", "__import__"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
 
@@ -156,13 +165,228 @@ class TestD5Authority(unittest.TestCase):
         r["expires_at"] = 101
         A.validate(r)
 
-    def test_custody_must_be_null(self):
+    def test_custody_null_or_exact_object(self):
         for value in ({}, {"session": "opaque"}, [], True, False, "holder", 0, 1):
             r = grant()
             r["custody"] = value
             self.refuses("custody", A.validate, r)
             self.refuses("custody", A.decode, json.dumps(r).encode())
         self.assertIsNone(A.decode(A.encode(grant()))["custody"])
+        self.assertEqual(A.decode(A.encode(held())), held())
+
+    def test_custody_field_schema(self):
+        base = held()
+        for field in base["custody"]:
+            with self.subTest(missing=field):
+                r = copy.deepcopy(base)
+                del r["custody"][field]
+                self.refuses("custody." + field, A.validate, r)
+            for value in (True, False, 1.5, [], {}):
+                with self.subTest(field=field, value=value):
+                    r = copy.deepcopy(base)
+                    r["custody"][field] = value
+                    self.refuses("custody." + field, A.validate, r)
+                    self.refuses("custody." + field, A.decode, json.dumps(r).encode())
+        r = copy.deepcopy(base)
+        r["custody"]["extra"] = None
+        self.refuses("custody.extra", A.validate, r)
+        r = copy.deepcopy(base)
+        r["custody"][1] = None
+        self.refuses("custody", A.validate, r)
+        for value in (None, 1, "", chr(0xD800), chr(0xDFFF),
+                      chr(0xD83D) + chr(0xDE00)):
+            r = copy.deepcopy(base)
+            r["custody"]["session_id"] = value
+            self.refuses("custody.session_id", A.validate, r)
+        for field in ("anchor_pid", "anchor_start_us", "generation",
+                      "claimed_at", "relinquished_at"):
+            limit = 2**31 if field == "anchor_pid" else 2**63
+            for value in ("1", 0, -1, limit, 1 << 16384, None):
+                if value is None and field == "relinquished_at":
+                    continue
+                with self.subTest(field=field, value=value):
+                    r = copy.deepcopy(base)
+                    r["custody"][field] = value
+                    self.refuses("custody." + field, A.validate, r)
+            for value in (1, limit - 1):
+                r = copy.deepcopy(base)
+                r["custody"]["claimed_at"] = 1
+                r["custody"][field] = value
+                self.assertEqual(A.decode(A.encode(r)), r)
+        r = held()
+        r["custody"]["relinquished_at"] = 100
+        self.refuses("custody.relinquished_at", A.validate, r)
+
+    def test_claim_no_custody_and_independence(self):
+        for holder in ("alive", "dead", "unknown"):
+            original = grant()
+            r = A.claimed(original, "native", 42, 9000001, 101, holder)
+            self.assertEqual(r, held())
+            self.assertEqual(original, grant())
+            r["scope"]["plans"].append("local")
+            r["confirmation"]["owner_response"] = "local"
+            self.assertEqual(original, grant())
+        # No normalization of scalar session IDs, or lower bound tied to issued_at.
+        for session in (" ", "\x00", "e\u0301", "é", chr(0x10FFFF)):
+            r = A.claimed(grant(), session, 1, 1, 1, "unknown")
+            self.assertEqual(r["custody"]["session_id"], session)
+            self.assertEqual(A.decode(A.encode(r)), r)
+
+    def test_compaction_exact_identity(self):
+        old = held()
+        old["custody"]["generation"] = 2**63 - 1
+        for holder in ("alive", "dead", "unknown"):
+            r = A.claimed(old, "native", 42, 9000001, 102, holder)
+            self.assertEqual(r, old)
+            r["custody"]["generation"] = 1
+            r["scope"]["plans"].append("local")
+            self.assertEqual(old["custody"]["generation"], 2**63 - 1)
+            self.assertEqual(old["scope"], grant()["scope"])
+        for claimant in (("other", 42, 9000001), ("native", 43, 9000001),
+                         ("native", 42, 9000002), ("other", 43, 9000002)):
+            with self.subTest(claimant=claimant):
+                self.refuses("dead holder", A.claimed, held(), *claimant, 102, "alive")
+
+    def test_release_does_not_allow_live_takeover(self):
+        old = A.relinquished(held(), "native", 42, 9000001, 102)
+        self.refuses("dead holder", A.claimed, old, "other", 43, 9000002, 103, "alive")
+        for holder in ("alive", "dead", "unknown"):
+            self.refuses("custody relinquished", A.claimed,
+                         old, "native", 42, 9000001, 103, holder)
+
+    def test_stale_time_does_not_allow_takeover(self):
+        # The schema imposes no relation between claimed_at and issued_at.
+        old = held()
+        old.update(issued_at=2**62, confirmed_at=2**62, expires_at=2**62 + 86400)
+        for now in (2**62, old["expires_at"] - 1):
+            self.refuses("dead holder", A.claimed, old,
+                         "other", 43, 9000002, now, "alive")
+
+    def test_dead_successor_keeps_grant_and_confirmation(self):
+        for released in (False, True):
+            old = held()
+            old["custody"]["generation"] = 7
+            if released:
+                old["custody"]["relinquished_at"] = 102
+            before = copy.deepcopy(old)
+            for claimant in (("other", 43, 9000002), ("other", 42, 9000001),
+                             ("native", 43, 9000001), ("native", 42, 9000002)):
+                r = A.claimed(old, *claimant, 103, "dead")
+                expected = copy.deepcopy(before)
+                expected["custody"] = dict(zip(
+                    ("session_id", "anchor_pid", "anchor_start_us"), claimant),
+                    generation=8, claimed_at=103, relinquished_at=None)
+                self.assertEqual(r, expected)
+                self.assertEqual(A.decode(A.encode(r)), expected)
+                r["confirmation"]["owner_response"] = "local"
+                r["scope"]["plans"].append("local")
+                self.assertEqual(old, before)
+
+    def test_unknown_is_not_dead(self):
+        for released in (False, True):
+            old = held()
+            if released:
+                old["custody"]["relinquished_at"] = 102
+            self.refuses("dead holder", A.claimed,
+                         old, "other", 43, 9000002, 103, "unknown")
+
+    def test_claim_invalid_grant(self):
+        for old in (grant(), held()):
+            for claimant in (("native", 42, 9000001), ("other", 43, 9000002)):
+                for now in (old["expires_at"], old["expires_at"] + 1):
+                    self.refuses("expired", A.claimed, old, *claimant, now, "dead")
+                for kind in ("revoked", "mandate_changed"):
+                    invalid = copy.deepcopy(old)
+                    invalid["invalidation"] = {"at": 102, "kind": kind, "reason": "stop"}
+                    for now in (103, old["expires_at"]):
+                        self.refuses("invalidated", A.claimed, invalid, *claimant, now, "dead")
+                self.assertEqual(old, grant() if old["custody"] is None else held())
+
+    def test_claim_generation_exhaustion(self):
+        old = held()
+        old["custody"]["generation"] = 2**63 - 2
+        r = A.claimed(old, "other", 43, 9000002, 102, "dead")
+        self.assertEqual(r["custody"]["generation"], 2**63 - 1)
+        before = copy.deepcopy(r)
+        self.refuses("custody.generation", A.claimed,
+                     r, "next", 44, 9000003, 103, "dead")
+        self.assertEqual(r, before)
+
+    def test_relinquish_by_exact_holder_only(self):
+        self.refuses("custody", A.relinquished, grant(), "native", 42, 9000001, 102)
+        for released in (False, True):
+            old = held()
+            if released:
+                old["custody"]["relinquished_at"] = 102
+            before = copy.deepcopy(old)
+            for claimant in (("other", 42, 9000001), ("native", 43, 9000001),
+                             ("native", 42, 9000002), ("other", 43, 9000002)):
+                self.refuses("custody", A.relinquished, old, *claimant, 103)
+            self.assertEqual(old, before)
+
+    def test_relinquish_preserves_first_time_and_independence(self):
+        old = held()
+        self.refuses("now", A.relinquished, old, "native", 42, 9000001, 100)
+        for now in (101, 102, old["expires_at"]):
+            r = A.relinquished(old, "native", 42, 9000001, now)
+            expected = held()
+            expected["custody"]["relinquished_at"] = now
+            self.assertEqual(r, expected)
+            for later in (101, now, now + 1):
+                again = A.relinquished(r, "native", 42, 9000001, later)
+                self.assertEqual(again, expected)
+                again["custody"]["relinquished_at"] = 200
+                again["scope"]["plans"].append("local")
+                self.assertEqual(r, expected)
+            r["custody"]["generation"] = 2
+            self.assertEqual(old, held())
+        invalid = A.revoked(old, 102, "stop")
+        r = A.relinquished(invalid, "native", 42, 9000001, 103)
+        self.assertEqual(r["invalidation"], invalid["invalidation"])
+        self.assertEqual(r["custody"]["relinquished_at"], 103)
+
+    def test_custody_transition_arguments(self):
+        old = held()
+        for op, tail in ((A.claimed, ("dead",)), (A.relinquished, ())):
+            for index, field, bad in (
+                    (0, "session_id", (None, True, False, 1, "", [], chr(0xD800))),
+                    (1, "anchor_pid", (None, True, False, 1.0, "42", 0, -1, 2**31)),
+                    (2, "anchor_start_us", (None, True, False, 1.0, "1", 0, -1, 2**63)),
+                    (3, "now", (None, True, False, 1.0, "1", 0, -1, 2**63))):
+                for value in bad:
+                    args = ["native", 42, 9000001, 102]
+                    args[index] = value
+                    self.refuses(field, op, old, *args, *tail)
+            corrupt = held()
+            corrupt["session_cap"] = True
+            self.refuses("session_cap", op, corrupt, "native", 42, 9000001, 102, *tail)
+        for holder in (None, True, False, 0, [], {}, "", "DEAD", "dead "):
+            for record in (grant(), old):
+                self.refuses("holder", A.claimed,
+                             record, "native", 42, 9000001, 102, holder)
+        self.assertEqual(old, held())
+
+    def test_replacement_preserves_exact_custody(self):
+        for fresh in (False, True):
+            for released in (False, True):
+                old = held()
+                if released:
+                    old["custody"]["relinquished_at"] = 102
+                before = copy.deepcopy(old)
+                new = self.successor(old, fresh=fresh)
+                unchanged = copy.deepcopy(new)
+                self.assertIs(A.replacement_allowed(old, new), True)
+                self.assertEqual(new, unchanged)
+                for field, value in (("session_id", "other"), ("anchor_pid", 43),
+                                     ("anchor_start_us", 9000002), ("generation", 2),
+                                     ("claimed_at", 100), ("relinquished_at", 103)):
+                    changed = copy.deepcopy(new)
+                    changed["custody"][field] = value
+                    self.refuses("custody", A.replacement_allowed, old, changed)
+                new["custody"] = None
+                self.refuses("custody", A.replacement_allowed, old, new)
+                self.refuses("custody", A.replacement_allowed, grant(), unchanged)
+                self.assertEqual(old, before)
 
     def test_digest_and_terminal_change(self):
         for content in (MANDATE.replace(b"grant", b"Grant"),

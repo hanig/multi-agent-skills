@@ -8,6 +8,8 @@ _FIELDS = {"schema_version", "grant_id", "issued_at", "confirmed_at",
            "expires_at", "session_cap", "mandate_sha256", "scope",
            "confirmation", "custody", "invalidation"}
 _SCOPES = {"plans", "repositories", "actions", "trackers"}
+_CUSTODY_FIELDS = {"session_id", "anchor_pid", "anchor_start_us", "generation",
+                   "claimed_at", "relinquished_at"}
 
 class AuthorityError(ValueError):
     """Named-field schema or transition refusal."""
@@ -38,6 +40,29 @@ def _string(value, field):
     except UnicodeEncodeError as exc:
         raise AuthorityError(field + ": expected Unicode scalar values") from exc
 
+def _claimant(session_id, anchor_pid, anchor_start_us):
+    _string(session_id, "custody.session_id")
+    _require(bool(session_id), "custody.session_id", "expected non-empty string")
+    _integer(anchor_pid, "custody.anchor_pid")
+    _require(0 < anchor_pid < 2**31, "custody.anchor_pid",
+             "must satisfy 0 < pid < 2**31")
+    _timestamp(anchor_start_us, "custody.anchor_start_us")
+
+def _custody(value):
+    _keys(value, _CUSTODY_FIELDS, "custody")
+    _claimant(value["session_id"], value["anchor_pid"], value["anchor_start_us"])
+    _timestamp(value["generation"], "custody.generation")
+    _timestamp(value["claimed_at"], "custody.claimed_at")
+    if value["relinquished_at"] is not None:
+        _timestamp(value["relinquished_at"], "custody.relinquished_at")
+        _require(value["relinquished_at"] >= value["claimed_at"],
+                 "custody.relinquished_at", "must not precede claimed_at")
+
+def _same_holder(custody, session_id, anchor_pid, anchor_start_us):
+    return (custody["session_id"] == session_id and
+            custody["anchor_pid"] == anchor_pid and
+            custody["anchor_start_us"] == anchor_start_us)
+
 def validate(record):
     _keys(record, _FIELDS, "record")
     for field in ("schema_version", "session_cap"):
@@ -63,7 +88,8 @@ def validate(record):
           "confirmation")
     for key, value in record["confirmation"].items():
         _string(value, "confirmation." + key)
-    _require(record["custody"] is None, "custody", "must be null in U1a")
+    if record["custody"] is not None:
+        _custody(record["custody"])
     invalidation = record["invalidation"]
     if invalidation is not None:
         _keys(invalidation, {"at", "kind", "reason"}, "invalidation")
@@ -136,10 +162,57 @@ def revoked(record, now, reason):
     return result
 
 
+def claimed(record, session_id, anchor_pid, anchor_start_us, now, holder):
+    """Return independent custody; only observed death permits a successor.
+
+    Liveness is supplied by the caller, which must check the mandate separately.
+    A matching session AND anchor is compaction, never a new generation.
+    """
+    validate(record)
+    _timestamp(now, "now")
+    _claimant(session_id, anchor_pid, anchor_start_us)
+    _require(type(holder) is str and holder in ("alive", "dead", "unknown"),
+             "holder", "expected alive, dead or unknown")
+    _require(record["invalidation"] is None, "invalidation", "invalidated")
+    _require(now < record["expires_at"], "expires_at", "expired")
+    custody = record["custody"]
+    if custody is not None:
+        if _same_holder(custody, session_id, anchor_pid, anchor_start_us):
+            _require(custody["relinquished_at"] is None, "custody", "custody relinquished")
+            return copy.deepcopy(record)
+        _require(holder == "dead", "custody", "successor requires dead holder")
+    result = copy.deepcopy(record)
+    result["custody"] = {
+        "session_id": session_id, "anchor_pid": anchor_pid,
+        "anchor_start_us": anchor_start_us,
+        "generation": 1 if custody is None else custody["generation"] + 1,
+        "claimed_at": now, "relinquished_at": None,
+    }
+    _custody(result["custody"])
+    return result
+
+
+def relinquished(record, session_id, anchor_pid, anchor_start_us, now):
+    """Return an independent record retaining the holder's first relinquishment."""
+    validate(record)
+    _timestamp(now, "now")
+    _claimant(session_id, anchor_pid, anchor_start_us)
+    custody = record["custody"]
+    _require(custody is not None and
+             _same_holder(custody, session_id, anchor_pid, anchor_start_us),
+             "custody", "only the exact holder may relinquish")
+    _require(now >= custody["claimed_at"], "now", "must not precede claimed_at")
+    result = copy.deepcopy(record)
+    if result["custody"]["relinquished_at"] is None:
+        result["custody"]["relinquished_at"] = now
+    return result
+
+
 def replacement_allowed(old, new):
     """Decide consent reuse or fresh confirmation; neither record is modified."""
     validate(old)
     validate(new)
+    _require(new["custody"] == old["custody"], "custody", "must carry over unchanged")
     _require(new["grant_id"] != old["grant_id"], "grant_id", "must be fresh")
     if new["confirmation"] == old["confirmation"]:
         _require(old["invalidation"] is None, "confirmation", "invalidated consent")
