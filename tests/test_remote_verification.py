@@ -2309,25 +2309,27 @@ else:
         self.supervisor_fixture()
         self.request['timeout'] = 3
         RV.publish(self.stage / 'request.json', self.request)
-        def observe(controller):
+        def observe(controller, transient=False, finish=2.5, acct=1, latency=2):
             (self.stage / 'result.json').unlink(missing_ok=True)
             seconds, events = [0.0], []
             def advance(duration):
                 seconds[0] += duration
-                if seconds[0] >= 2.5 and not (self.stage / 'result.json').exists():
+                if seconds[0] >= finish and not (self.stage / 'result.json').exists():
                     RV.publish(self.stage / 'result.json',
                                {'execution': {}, 'outcomes': [{'exit_code': 0}]})
             def query(argv, **kwargs):
                 started = seconds[0]
-                state = 'COMPLETED' if started >= 2.5 else 'RUNNING'
+                state = 'COMPLETED' if started >= finish else 'RUNNING'
                 events.append((argv, started, state))
                 if argv[0] == 'sbatch':
                     return 0, '321\n', ''
                 if argv[0] == 'squeue':
-                    advance(2)
+                    advance(latency)
                     return 0, state + '\n', ''
                 self.assertEqual(argv[0], 'sacct')
-                advance(1)
+                advance(acct)
+                if transient and started == 0:
+                    return 1, '', 'accounting error'
                 return 0, '321|' + state + '|0:0\n', ''
             self.sleep.reset_mock()
             self.sleep.side_effect = advance
@@ -2345,6 +2347,10 @@ else:
         self.assertEqual(actual, baseline)
         self.assertEqual(actual[1:3], (4.0, [mock.call(2)]))
         self.assertEqual([event[0][0] for event in actual[3]], ['sbatch', 'sacct', 'sacct'])
+
+        for args in ((True, 2.5, 1, 2), (True, 1.5, 0, 3.1)):
+            with self.subTest(transient=args):
+                self.assertEqual(observe(True, *args), observe(False, *args))
 
     def test_controller_completes_supervision_during_accounting_outage(self):
         self.supervisor_fixture()
