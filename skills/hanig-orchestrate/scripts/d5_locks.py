@@ -142,11 +142,14 @@ class _Record:
                     created = True
                 except FileExistsError:
                     fd = os.open(name, flags, 0o600, dir_fd=self.fd)
-            except PermissionError:
+            except PermissionError as denied:
                 # Recover a prior/overlapping creator's restrictive-umask file.
                 # Identity stability is the declared envelope, including here:
                 # repair owner permissions in pinned D, never replace the file.
-                info = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+                try:
+                    info = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    raise denied
                 if not _safe(info):
                     raise
                 if info.st_mode & 0o600 != 0o600:
