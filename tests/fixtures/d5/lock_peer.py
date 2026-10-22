@@ -30,7 +30,7 @@ def main():
         elif action == "permissions":
             old_mask = os.umask(0o277)
             try:
-                for case in ("new", "persisted", "concurrent"):
+                for case in ("new", "persisted", "concurrent", "repaired"):
                     for rank, name in locks._NAMES.items():
                         path = Path(directory) / name
                         if case == "persisted":
@@ -39,12 +39,15 @@ def main():
                             path.unlink()  # fixture setup only
                         inode = path.stat().st_ino if path.exists() else None
                         real_open = os.open
-                        pending = [case == "concurrent"]
+                        pending = [case in ("concurrent", "repaired")]
 
                         def opening(*args, **kwargs):
                             if pending and pending.pop():
                                 # Another creator publishes 0400 after our stat.
                                 os.close(real_open(*args, **kwargs))
+                                if case == "repaired":
+                                    path.chmod(0o600)
+                                    raise PermissionError("creator fixed mode after EACCES")
                             return real_open(*args, **kwargs)
 
                         with mock.patch.object(os, "open", side_effect=opening):

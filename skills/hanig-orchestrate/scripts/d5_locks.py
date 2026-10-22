@@ -16,8 +16,8 @@ pin() pins that directory, not authority. Future operational entry points must
 check activation and authority themselves. These primitives are inert like
 the existing record store. No lock is unlinked, replaced, or explicitly unlocked.
 
-Guards are lexical, thread-owned contexts. Shared references are OS descriptor
-references: nested contexts dup the same description and close their own copy.
+Guards are lexical, thread-owned contexts. Nested shared contexts dup one
+description and close only their own copy.
 For delegation, explicitly pass the yielded shared fd to an exec child; import
 it with drain(inherited_fd=fd). The caller guarantees it is a held shared drain
 and owns/closes the original fd. Import checks file identity, not lock ownership.
@@ -118,9 +118,10 @@ class _Record:
                 # Identity stability is the declared envelope, including here:
                 # repair owner permissions in pinned D, never replace the file.
                 info = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
-                if not _safe(info) or info.st_mode & 0o600 == 0o600:
+                if not _safe(info):
                     raise
-                os.chmod(name, 0o600, dir_fd=self.fd)
+                if info.st_mode & 0o600 != 0o600:
+                    os.chmod(name, 0o600, dir_fd=self.fd)
                 fd = os.open(name, flags, 0o600, dir_fd=self.fd)
             try:
                 info = os.fstat(fd)
