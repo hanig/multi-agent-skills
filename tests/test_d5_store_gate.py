@@ -1,8 +1,4 @@
-"""U3b store integration: real locks, pipe ordering and S1-S3 mutations.
-
-The simulated admitted start is local test code, not a submission API.
-Watchdog deadlines fail and reap peers; no sleep establishes test ordering.
-"""
+"""U3b store integration with real locks and deterministic pipe ordering."""
 from contextlib import ExitStack
 import os
 from pathlib import Path
@@ -28,29 +24,29 @@ WRITERS = ("create", "check", "revoke", "relinquish", "claim", "replace")
 ANCHOR = ProcessIdentity(42, 9000001)
 
 
-def operation(directory, name):
+def operation(d, name):
     if name == "create":
-        return store.create(directory, held())
+        return store.create(d, held())
     if name == "check":
-        return store.check(directory, 102, b"changed")
+        return store.check(d, 102, b"changed")
     if name == "revoke":
-        return store.revoke(directory, 102, "stop")
+        return store.revoke(d, 102, "stop")
     if name == "relinquish":
-        return store.relinquish(directory, 102, "native", ANCHOR)
+        return store.relinquish(d, 102, "native", ANCHOR)
     if name == "claim":
-        return store.claim(directory, 102, MANDATE, "successor",
+        return store.claim(d, 102, MANDATE, "successor",
                            ProcessIdentity(43, 9000002), lambda _: "dead")
     if name == "replace":
-        return store.replace(directory, grant("b" * 32))
+        return store.replace(d, grant("b" * 32))
     if name == "read":
-        return store.read(directory)
+        return store.read(d)
     raise AssertionError(name)
 
 
-def lock_name(directory, fd):
+def lock_name(d, fd):
     info = os.fstat(fd)
     for name in (START, STATE, DRAIN):
-        path = directory / name
+        path = d / name
         if path.exists():
             other = path.stat()
             if (info.st_dev, info.st_ino) == (other.st_dev, other.st_ino):
@@ -59,11 +55,11 @@ def lock_name(directory, fd):
 
 
 def peer_main():
-    directory, name, watched = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+    d, name, watched = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
     real = locks.fcntl.flock
 
     def flock(fd, mode):
-        if lock_name(directory, fd) == watched:
+        if lock_name(d, fd) == watched:
             try:
                 real(fd, mode | locks.fcntl.LOCK_NB)
             except BlockingIOError:
@@ -75,7 +71,7 @@ def peer_main():
             real(fd, mode)
 
     with mock.patch.object(locks.fcntl, "flock", side_effect=flock):
-        operation(directory, name)
+        operation(d, name)
     print("done", flush=True)
 
 
@@ -83,17 +79,17 @@ class TestD5StoreGate(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.directory = Path(temporary.name)
+        self.d = Path(temporary.name)
 
     def seed(self, name):
-        directory = self.directory / name
-        directory.mkdir()
+        d = self.d / name
+        d.mkdir()
         if name != "create":
-            store.create(directory, held())
-        return directory
+            store.create(d, held())
+        return d
 
-    def available(self, directory, name, shared=False):
-        fd = os.open(directory / name, os.O_RDWR | os.O_CREAT, 0o600)
+    def available(self, d, name, shared=False):
+        fd = os.open(d / name, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             try:
                 locks.fcntl.flock(fd, locks.fcntl.LOCK_NB |
@@ -104,10 +100,10 @@ class TestD5StoreGate(unittest.TestCase):
         finally:
             os.close(fd)
 
-    def peer(self, directory, name, watched=START):
+    def peer(self, d, name, watched=START):
         proc = subprocess.Popen([
             sys.executable, "-c", "from tests.test_d5_store_gate import peer_main; peer_main()",
-            str(directory), name, watched], cwd=str(ROOT),
+            str(d), name, watched], cwd=str(ROOT),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
 
         def cleanup():
@@ -129,36 +125,36 @@ class TestD5StoreGate(unittest.TestCase):
         self.assertEqual(stdout, b"done\n")
 
     def start_blocks(self, name):
-        directory = self.seed(name)
-        with locks.pin(directory) as record, record.start():
-            before = ((directory / store.RECORD_NAME).read_bytes()
+        d = self.seed(name)
+        with locks.pin(d) as record, record.start():
+            before = ((d / store.RECORD_NAME).read_bytes()
                       if name != "create" else None)
-            proc = self.peer(directory, name)
+            proc = self.peer(d, name)
             self.assertEqual(self.line(proc), "blocked:" + START)
-            self.assertTrue(self.available(directory, STATE))
-            after = ((directory / store.RECORD_NAME).read_bytes()
+            self.assertTrue(self.available(d, STATE))
+            after = ((d / store.RECORD_NAME).read_bytes()
                      if name != "create" else None)
             self.assertEqual(after, before)
         self.finish(proc)
-        return directory
+        return d
 
     def test_S1_U3_M1_revoke_waits_for_admitted_start(self):
-        directory = self.start_blocks("revoke")
-        with locks.pin(directory) as record, record.drain(), record.start():
-            self.assertEqual(store.check(directory, 103, MANDATE), "invalidated")
-        self.assertEqual(store.read(directory)["invalidation"]["kind"], "revoked")
+        d = self.start_blocks("revoke")
+        with locks.pin(d) as record, record.drain(), record.start():
+            self.assertEqual(store.check(d, 103, MANDATE), "invalidated")
+        self.assertEqual(store.read(d)["invalidation"]["kind"], "revoked")
 
     def test_S2_U3_M2_check_waits_for_admitted_start(self):
-        directory = self.start_blocks("check")
-        with locks.pin(directory) as record, record.drain(), record.start():
-            self.assertEqual(store.check(directory, 103, MANDATE), "invalidated")
-        self.assertEqual(store.read(directory)["invalidation"]["kind"], "mandate_changed")
+        d = self.start_blocks("check")
+        with locks.pin(d) as record, record.drain(), record.start():
+            self.assertEqual(store.check(d, 103, MANDATE), "invalidated")
+        self.assertEqual(store.read(d)["invalidation"]["kind"], "mandate_changed")
 
     def test_S3_other_named_writers_wait_for_start(self):
         for name in ("create", "relinquish", "claim", "replace"):
             with self.subTest(name=name):
-                directory = self.start_blocks(name)
-                record = store.read(directory)
+                d = self.start_blocks(name)
+                record = store.read(d)
                 if name == "relinquish":
                     self.assertEqual(record["custody"]["relinquished_at"], 102)
                 elif name == "claim":
@@ -170,132 +166,144 @@ class TestD5StoreGate(unittest.TestCase):
         real = locks.fcntl.flock
         for name in WRITERS + ("read",):
             with self.subTest(name=name):
-                directory = self.seed(name)
+                d = self.seed(name)
                 calls = []
 
                 def flock(fd, mode):
-                    calls.append((lock_name(directory, fd), mode))
+                    calls.append((lock_name(d, fd), mode))
                     return real(fd, mode)
 
                 with mock.patch.object(locks.fcntl, "flock", side_effect=flock):
-                    operation(directory, name)
+                    operation(d, name)
                 expected = [STATE] if name == "read" else [START, STATE]
                 if name in ("claim", "replace"):
                     expected.insert(0, DRAIN)
                 self.assertEqual(calls, [(lock, locks.fcntl.LOCK_EX) for lock in expected])
                 for lock in expected:
-                    self.assertTrue(self.available(directory, lock))
+                    self.assertTrue(self.available(d, lock))
 
     def test_check_retains_start_through_invalidation_persistence(self):
-        directory = self.seed("check")
+        d = self.seed("check")
         stages = []
         real_write, real_sync = store._write, store._sync_directory
 
         def writing(path, raw):
-            self.assertFalse(self.available(directory, START))
-            self.assertFalse(self.available(directory, STATE))
+            self.assertFalse(self.available(d, START))
+            self.assertFalse(self.available(d, STATE))
             stages.append("write")
             return real_write(path, raw)
 
         def syncing(path):
-            self.assertFalse(self.available(directory, START))
-            self.assertFalse(self.available(directory, STATE))
+            self.assertFalse(self.available(d, START))
+            self.assertFalse(self.available(d, STATE))
             stages.append("fsync")
             return real_sync(path)
 
         with mock.patch.object(store, "_write", side_effect=writing), \
                 mock.patch.object(store, "_sync_directory", side_effect=syncing):
-            self.assertEqual(store.check(directory, 102, b"changed"), "mandate_changed")
+            self.assertEqual(store.check(d, 102, b"changed"), "mandate_changed")
         self.assertEqual(stages, ["write", "fsync"])
-        self.assertEqual(store.check(directory, 103, MANDATE), "invalidated")
-        self.assertTrue(self.available(directory, START))
+        self.assertEqual(store.check(d, 103, MANDATE), "invalidated")
+        self.assertTrue(self.available(d, START))
 
     def test_read_progresses_while_start_is_held(self):
-        directory = self.seed("read")
-        with locks.pin(directory) as record, record.start():
-            proc = self.peer(directory, "read", STATE)
-            # Both lines must already be present: readline must not hide the
-            # completion in a Python buffer that communicate bypasses.
+        d = self.seed("read")
+        with locks.pin(d) as record, record.start():
+            proc = self.peer(d, "read", STATE)
             proc.wait(timeout=10)
             self.assertEqual(self.line(proc), "acquired:" + STATE)
             self.finish(proc)
-        self.assertEqual(store.read(directory), held())
+        self.assertEqual(store.read(d), held())
 
     def test_initial_drain_inode_keeps_refused_replacement_nonmutating(self):
-        directory = self.seed("replacement")
+        d = self.seed("replacement")
 
         def snapshot():
-            return {str(p.relative_to(directory)):
+            return {str(p.relative_to(d)):
                     (p.stat().st_ino, p.stat().st_mode, p.stat().st_mtime_ns,
                      p.read_bytes() if p.is_file() else None)
-                    for p in [directory] + list(directory.rglob("*"))}
+                    for p in [d] + list(d.rglob("*"))}
 
         before = snapshot()
         replacement = grant("b" * 32)
         replacement["issued_at"] += 1
         replacement["expires_at"] += 1
         with self.assertRaisesRegex(store.AuthorityError, "extension requires fresh confirmation"):
-            store.replace(directory, replacement)
+            store.replace(d, replacement)
         self.assertEqual(snapshot(), before)
-        self.assertEqual((directory / DRAIN).stat().st_mode & 0o777, 0o600)
+        self.assertEqual((d / DRAIN).stat().st_mode & 0o777, 0o600)
 
     def test_claim_replace_wait_for_drain_without_start_or_state(self):
         for name in ("claim", "replace"):
             with self.subTest(name=name):
-                directory = self.seed(name)
-                with locks.pin(directory) as record, record.drain():
-                    proc = self.peer(directory, name, DRAIN)
+                d = self.seed(name)
+                with locks.pin(d) as record, record.drain():
+                    proc = self.peer(d, name, DRAIN)
                     self.assertEqual(self.line(proc), "blocked:" + DRAIN)
-                    self.assertTrue(self.available(directory, START))
-                    self.assertTrue(self.available(directory, STATE))
-                    self.assertEqual(store.read(directory), held())
+                    self.assertTrue(self.available(d, START))
+                    self.assertTrue(self.available(d, STATE))
+                    self.assertEqual(store.read(d), held())
                 self.finish(proc)
 
     def test_revoke_and_check_do_not_wait_for_drain(self):
         for name in ("revoke", "check"):
             with self.subTest(name=name):
-                directory = self.seed(name)
-                with locks.pin(directory) as record, record.drain():
-                    proc = self.peer(directory, name)
+                d = self.seed(name)
+                with locks.pin(d) as record, record.drain():
+                    proc = self.peer(d, name)
                     self.assertEqual(self.line(proc), "acquired:" + START)
                     self.finish(proc)
-                    self.assertIsNotNone(store.read(directory)["invalidation"])
+                    self.assertIsNotNone(store.read(d)["invalidation"])
 
     def test_nested_named_operations_reuse_start_and_state(self):
         for name in WRITERS + ("read",):
             with self.subTest(name=name):
-                directory = self.seed(name)
-                with locks.pin(directory) as record, ExitStack() as stack:
+                d = self.seed(name)
+                with locks.pin(d) as record, ExitStack() as stack:
                     stack.enter_context(record.drain(shared=name not in ("claim", "replace")))
                     stack.enter_context(record.start())
                     stack.enter_context(record.state())
-                    # No new flock description is permitted under these outer locks.
                     with mock.patch.object(locks.fcntl, "flock", side_effect=AssertionError("reflock")):
-                        operation(directory, name)
+                        operation(d, name)
                 for lock in (DRAIN, START, STATE):
-                    self.assertTrue(self.available(directory, lock))
+                    self.assertTrue(self.available(d, lock))
 
     def test_store_preserves_upgrade_and_cross_record_refusals(self):
-        directory = self.seed("held")
+        d = self.seed("held")
         other = self.seed("other")
-        with locks.pin(directory) as record, record.drain():
+        with locks.pin(d) as record, record.drain():
             for name in ("claim", "replace"):
                 with self.subTest(name=name), self.assertRaisesRegex(
                         store.AuthorityError, "^D5 custody change refused: caller holds shared drain$"):
-                    operation(directory, name)
+                    operation(d, name)
             for name in WRITERS + ("read",):
                 with self.subTest(name=name), self.assertRaisesRegex(
                         store.AuthorityError, "^D5 lock refused: cross-record nesting$"):
                     operation(other, name)
 
     def test_state_only_same_record_read_is_reentrant(self):
-        directory = self.seed("read")
-        with locks.pin(directory) as record, record.state(), \
+        d = self.seed("read")
+        with locks.pin(d) as record, record.state(), \
                 mock.patch.object(locks.fcntl, "flock", side_effect=AssertionError("reflock")):
-            self.assertEqual(store.read(directory), held())
+            self.assertEqual(store.read(d), held())
+
+    def test_nested_liveness_mutation_is_retained(self):
+        for name in ("check", "revoke", "replace", "relinquish", "claim"):
+            with self.subTest(name=name):
+                d = self.seed(name)
+                observed = []
+                def probe(_):
+                    operation(d, name)
+                    observed.append(store.read(d))
+                    return "dead"
+                with self.assertRaisesRegex(store.AuthorityError,
+                        "^record: changed during liveness observation$"):
+                    store.claim(d, 103, MANDATE, "outer",
+                                ProcessIdentity(44, 9000003), probe)
+                self.assertEqual(store.read(d), observed[0])
 
     def test_threads_share_store_start_guard(self):
-        directory = self.seed("revoke")
+        d = self.seed("revoke")
         started, finished = threading.Event(), threading.Event()
         errors = []
         real = locks._Record.start
@@ -306,23 +314,23 @@ class TestD5StoreGate(unittest.TestCase):
 
         def worker():
             try:
-                store.revoke(directory, 102, "stop")
+                store.revoke(d, 102, "stop")
             except BaseException as exc:
                 errors.append(exc)
             finally:
                 finished.set()
 
-        with locks.pin(directory) as record:
+        with locks.pin(d) as record:
             with record.start(), mock.patch.object(locks._Record, "start", entering):
                 thread = threading.Thread(target=worker, daemon=True)
                 thread.start()
                 self.assertTrue(started.wait(10), "worker watchdog")
                 self.assertFalse(finished.is_set())
-                self.assertEqual(store.read(directory), held())
+                self.assertEqual(store.read(d), held())
             thread.join(10)
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
-        self.assertEqual(store.read(directory)["invalidation"]["kind"], "revoked")
+        self.assertEqual(store.read(d)["invalidation"]["kind"], "revoked")
 
 
 if __name__ == "__main__":
