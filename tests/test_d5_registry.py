@@ -861,26 +861,39 @@ class TestD5Registry(unittest.TestCase):
                 path.unlink()
                 moved.rename(path)
 
-    def test_walk_closes_fds_on_each_stat_or_open_failure(self):
+    def test_walk_opens_nothing_and_leaks_no_fds_on_each_lstat_failure(self):
         entry = self.register()
-        real_open, real_stat = os.open, os.stat
-        for level in range(3):
-            for operation in ("open", "stat"):
-                counts = {"open": 0, "stat": 0}
-                def invoke(name, real, *args, **kwargs):
-                    n = counts[name]
-                    counts[name] += 1
-                    if name == operation and n == level:
-                        raise PermissionError(errno.EACCES, "synthetic walk failure")
-                    return real(*args, **kwargs)
-                before = len(os.listdir("/dev/fd"))
-                with self.subTest(level=level, operation=operation), \
-                     mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops:
-                    ops.open = lambda *a, **kw: invoke("open", real_open, *a, **kw)
-                    ops.stat = lambda *a, **kw: invoke("stat", real_stat, *a, **kw)
-                    with self.assertRaises(PermissionError):
-                        R._record_key(self.root, entry["registration_id"])
-                self.assertEqual(len(os.listdir("/dev/fd")), before)
+        real_lstat = os.lstat
+        for failed_call in range(6):  # Directory and .git at every level.
+            calls = []
+            def probe(path):
+                calls.append(path)
+                if len(calls) == failed_call + 1:
+                    raise PermissionError(errno.EACCES, "synthetic walk failure")
+                return real_lstat(path)
+            before = len(os.listdir("/dev/fd"))
+            with self.subTest(failed_call=failed_call), \
+                 mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops:
+                ops.open = mock.Mock(side_effect=AssertionError("walk opened a directory"))
+                ops.lstat = probe
+                with self.assertRaises(PermissionError):
+                    R._record_key(self.root, entry["registration_id"])
+                self.assertEqual(len(calls), failed_call + 1)
+                ops.open.assert_not_called()
+            self.assertEqual(len(os.listdir("/dev/fd")), before)
+
+    def test_walk_rejects_non_directory_at_every_level(self):
+        entry = self.register()
+        for path in (self.root, self.root / "plans", Path(entry["record_dir"])):
+            moved = self.d / "moved"
+            path.rename(moved)
+            path.write_bytes(b"not a directory")
+            try:
+                with self.subTest(level=path), self.assertRaises(NotADirectoryError):
+                    R._record_key(self.root, entry["registration_id"])
+            finally:
+                path.unlink()
+                moved.rename(path)
 
     def test_record_key_schema_is_strict_and_version_stays_one(self):
         entry = self.register()
@@ -902,19 +915,20 @@ class TestD5Registry(unittest.TestCase):
         path.write_bytes(original)
         self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
 
-    def test_walk_after_read_before_use_and_initial_key_from_open_fd(self):
-        events, opened, keys = [], [], []
-        real_open, real_fstat = os.open, os.fstat
+    def test_walk_after_read_before_use_and_initial_key_from_lstat(self):
+        events, probes, keys = [], [], []
+        real_open, real_lstat = os.open, os.lstat
         real_entries, real_walk = R._entries, R._record_key
         real_sync, real_mkdir = store.sync_directory, Path.mkdir
-        walking = False
+        real_write, real_stat = store.write_bytes, Path.stat
+        walking, phase = False, None
         def entries(root):
             result = real_entries(root)
             events.append("read")
             return result
         def walk(root, rid):
             nonlocal walking
-            self.assertEqual(events[-1], "mkdir" if "mkdir" in events else "read")
+            self.assertEqual(events[-1], "mkdir" if phase == "new" else "read")
             walking = True
             try:
                 result = real_walk(root, rid)
@@ -922,18 +936,23 @@ class TestD5Registry(unittest.TestCase):
                 walking = False
             events.append("walk")
             return result
-        def opened_fd(path, flags, *args, **kwargs):
-            if Path(path).parent == self.root / "plans" and not walking:
-                self.assertEqual(events[-1], "walk", "record open preceded tamper walk")
-            fd = real_open(path, flags, *args, **kwargs)
+        def opened(path, flags, *args, **kwargs):
+            self.assertFalse(walking, "tamper walk opened a directory")
+            self.assertNotEqual(Path(path).parent, self.root / "plans", "D opened")
+            return real_open(path, flags, *args, **kwargs)
+        def lstat(path):
             if walking:
-                opened.append((str(path), flags, kwargs.get("dir_fd"), fd))
-            return fd
-        def fstat(fd):
-            info = real_fstat(fd)
-            if walking and fd == opened[-1][3]:
+                probes.append(path)
+            info = real_lstat(path)
+            if walking and path.parent == self.root / "plans":
                 keys.append(list(R._key(info)))
             return info
+        def path_stat(path, *args, **kwargs):
+            if path.parent == self.root / "plans":
+                self.assertNotEqual(phase, "lookup", "lookup used D outside walk")
+                if phase == "idempotent":
+                    self.assertEqual(events[-1], "walk", "D use preceded tamper walk")
+            return real_stat(path, *args, **kwargs)
         def mkdir(path, *args, **kwargs):
             real_mkdir(path, *args, **kwargs)
             if path.parent == self.root / "plans":
@@ -941,31 +960,40 @@ class TestD5Registry(unittest.TestCase):
         def sync(path):
             if path in self.chain() or path.parent == self.root / "plans":
                 self.assertEqual(events[-1], "walk", "fsync preceded tamper walk")
+                self.assertNotEqual(path.parent, self.root / "plans", "D synced")
+            elif path == self.base.parent:
+                self.assertEqual(phase, "new")
+                self.assertNotIn("walk", events)
+                events.append("base-sync")
             real_sync(path)
+        def write(path, raw):
+            self.assertEqual(events[-1], "walk")
+            self.assertEqual(json.loads(raw)["entries"][0]["record_key"], keys[-1])
+            real_write(path, raw)
         with mock.patch.object(R, "_entries", side_effect=entries), \
              mock.patch.object(R, "_record_key", side_effect=walk), \
              mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops, \
              mock.patch.object(Path, "mkdir", mkdir), \
+             mock.patch.object(Path, "stat", path_stat), \
+             mock.patch.object(store, "write_bytes", side_effect=write), \
              mock.patch.object(store, "sync_directory", side_effect=sync):
-            ops.open, ops.fstat = opened_fd, fstat
-            for call in (self.register, lambda: R.lookup(self.repo, "p", self.state), self.register):
+            ops.open, ops.lstat = opened, lstat
+            for phase, call in (("new", self.register),
+                                ("lookup", lambda: R.lookup(self.repo, "p", self.state)),
+                                ("idempotent", self.register)):
                 events.clear()
-                opened.clear()
+                probes.clear()
                 keys.clear()
                 before = len(os.listdir("/dev/fd"))
                 entry = call()
-                self.assertEqual(events[-1], "walk")
-                self.assertTrue(keys)
-                self.assertTrue(all(key == entry["record_key"] for key in keys))
-                self.assertEqual(len(opened) % 3, 0)
-                for i in range(0, len(opened), 3):
-                    root, plans, record = opened[i:i + 3]
-                    self.assertEqual([x[0] for x in (root, plans, record)],
-                                     [str(self.root), "plans", entry["registration_id"]])
-                    self.assertEqual(plans[2], root[3])
-                    self.assertEqual(record[2], plans[3])
-                    self.assertTrue(all(x[1] == os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-                                        for x in (root, plans, record)))
+                expected = {"new": ["read", "base-sync", "read", "mkdir", "walk"],
+                            "lookup": ["read", "walk"],
+                            "idempotent": ["read", "walk", "read", "walk"]}
+                self.assertEqual(events, expected[phase])
+                count = 2 if phase == "idempotent" else 1
+                self.assertEqual(keys, [entry["record_key"]] * count)
+                paths = (self.root, self.root / "plans", Path(entry["record_dir"]))
+                self.assertEqual(probes, [p for d in paths for p in (d, d / ".git")] * count)
                 self.assertEqual(len(os.listdir("/dev/fd")), before)
 
     def test_lookup_and_lease_status_create_nothing_and_inherit_refusal(self):
@@ -999,7 +1027,7 @@ class TestD5Registry(unittest.TestCase):
 
     @unittest.skipIf(os.geteuid() == 0, "requires non-root permission enforcement")
     def test_review_round2_searchable_nonlistable_record_lookup(self):
-        # Preserved counterexample: NOT READY; final review found this regression.
+        # Preserved permission counterexample, repaired by the OD1 no-open walk.
         entry = self.register()
         directory = Path(entry["record_dir"])
         original_mode = directory.stat().st_mode & 0o777
@@ -1010,6 +1038,49 @@ class TestD5Registry(unittest.TestCase):
             self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
         finally:
             directory.chmod(original_mode)
+
+    @unittest.skipIf(os.geteuid() == 0, "requires non-root permission enforcement")
+    def test_search_only_levels_keep_lookup_and_required_durability(self):
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        sentinel = directory / "work"
+        sentinel.write_bytes(b"preserved work")
+        registry = (self.root / "registry.json").read_bytes()
+        real_sync, real_open = store.sync_directory, os.open
+        for level in (directory, self.root / "plans", self.root):
+            original_mode = level.stat().st_mode & 0o777
+            before = self.tree()
+            opened = []
+            def open_fd(path, *args, **kwargs):
+                opened.append(Path(path))
+                return real_open(path, *args, **kwargs)
+            level.chmod(0o300)
+            try:
+                with self.subTest(level=level), mock.patch.object(os, "open", side_effect=open_fd):
+                    # Real permissions, real fsyncs: no permission or durability mocks.
+                    self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+                    self.assertEqual(lease.status(self.repo, "p", self.state, now=150,
+                                                  mandate_bytes=b"mandate")["registration"], entry)
+                    self.assertNotIn(level, opened, "lookup/status opened restricted level")
+                    with mock.patch.object(store, "sync_directory", wraps=real_sync) as sync:
+                        if level == directory:
+                            self.assertEqual(self.register(), entry)
+                            self.assertEqual([c.args[0] for c in sync.call_args_list],
+                                             [self.base, self.root.parent, self.root / "plans", self.root])
+                        else:
+                            with self.assertRaisesRegex(R.AuthorityError, "durability is unconfirmed") as cm:
+                                self.register()
+                            self.assertIsInstance(cm.exception.__cause__, PermissionError)
+                            self.assertEqual(cm.exception.__cause__.errno, errno.EACCES)
+                            self.assertEqual(sync.call_args.args[0], level)
+                    self.assertNotIn(directory, opened, "registration opened D")
+                    self.assertEqual(list(R._key(directory.lstat())), entry["record_key"])
+                    self.assertEqual((self.root / "registry.json").read_bytes(), registry)
+                    self.assertEqual(sentinel.read_bytes(), b"preserved work")
+            finally:
+                level.chmod(original_mode)
+            self.assertEqual(self.tree(), before)
+            self.assertEqual(self.register(), entry)  # Operator recovery retains D.
 
 
 if __name__ == "__main__":

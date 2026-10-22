@@ -18,11 +18,14 @@ replacement; TOCTOU against a writer outside the lock.
 - **Recreated directories whose `(st_dev, st_ino)` the filesystem reuses.**
 - **A race against a concurrent same-UID writer.**
 - Substitution between the directory walk and a later use of the record root.
+- Concurrent same-UID substitution of a component between two lstat calls.
 - **A separate Git directory named `.git`.** Git reports its parent as the main worktree and records the original checkout nowhere, so it is indistinguishable from a standard repository.
 - **An unlisted alias.** Containment does not cover any checkout that reaches the common directory through a `.git` file but is absent from Git's worktree list.
 
 Non-claim: if an earlier failed call created B itself, a later retry does not re-confirm B's link in its parent. The external base is coordinator infrastructure (`~/.local/state`) that normally pre-exists.
+Non-claim: registration needs read permission on R and `plans` for the OD4 directory fsyncs.
 """
+import errno
 import fcntl
 import json
 import os
@@ -32,7 +35,7 @@ import stat
 import subprocess
 import sys
 import uuid
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 
 import skill_paths
 import d5_authority as authority
@@ -244,22 +247,18 @@ def _find(root, entries, identity, state_fd):
 
 
 def _record_key(root, registration_id):
-    """Walk R/P/D without following substituted links; create nothing."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    with ExitStack() as stack:
-        fd = os.open(str(root), flags)
-        stack.enter_context(store.cleanup(os.close, fd))
-        for child in (None, "plans", registration_id):
-            if child is not None:
-                fd = os.open(child, flags, dir_fd=fd)
-                stack.enter_context(store.cleanup(os.close, fd))
-            try:
-                os.stat(".git", dir_fd=fd, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                raise AuthorityError("authority storage became a Git worktree")
-        return list(_key(os.fstat(fd)))
+    """Check R/P/D top-down by no-follow lstat; open and create nothing."""
+    for path in (root, root / "plans", root / "plans" / registration_id):
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "Not a directory", str(path))
+        try:
+            os.lstat(path / ".git")
+        except FileNotFoundError:
+            pass
+        else:
+            raise AuthorityError("authority storage became a Git worktree")
+    return list(_key(info))
 
 
 def _check_record(root, entry):
