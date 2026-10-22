@@ -18,6 +18,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
 import d5_registry as R
+import d5_lease as lease
 import d5_authority_store as store
 
 
@@ -286,12 +287,17 @@ class TestD5Registry(unittest.TestCase):
                     if Path(candidate) == directory:
                         reads.assert_called_once_with(self.root / "registry.json")
                     return present(candidate, field)
-                def opened(candidate, *args):
-                    candidate = Path(candidate)
+                def opened(candidate, flags, **kwargs):
                     self.assertEqual(path, directory)  # R/P still refuse all opens.
-                    self.assertNotEqual(candidate, directory)
-                    self.assertNotIn(directory, candidate.parents)
-                    return os.open(str(candidate), *args)
+                    self.assertFalse(flags & os.O_CREAT)
+                    if candidate == entry["registration_id"]:
+                        reads.assert_called_once_with(self.root / "registry.json")
+                        self.assertEqual(flags, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                        self.assertIn("dir_fd", kwargs)
+                    else:
+                        self.assertNotEqual(Path(candidate), directory)
+                        self.assertNotIn(directory, Path(candidate).parents)
+                    return os.open(str(candidate), flags, **kwargs)
                 with mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops, \
                      mock.patch.object(store, "present", side_effect=checked), \
                      mock.patch.object(store, "read_bytes", wraps=store.read_bytes) as reads, \
@@ -299,7 +305,8 @@ class TestD5Registry(unittest.TestCase):
                     ops.open = opened
                     for call in (self.register, lambda: R.lookup(self.repo, "p", self.state)):
                         reads.reset_mock()
-                        with self.assertRaisesRegex(R.AuthorityError, str(path)):
+                        message = str(path) if path != directory else "filesystem/git operation failed"
+                        with self.assertRaisesRegex(R.AuthorityError, message):
                             call()
             finally:
                 path.unlink()
@@ -761,15 +768,14 @@ class TestD5Registry(unittest.TestCase):
         first = self.register(repo=linked)
         self.assertEqual(R.lookup(linked, "p", self.state), first)
 
-    def test_record_worktree_refuses_before_first_mkdir_but_lookup_is_unchanged(self):
+    def test_record_worktree_refuses_before_first_mkdir_and_on_lookup(self):
         entry = self.register()
         directory = Path(entry["record_dir"])
         self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
+        self.assertEqual(entry["record_key"], list(R._key(directory.stat())))
         before = self.tree()
         with mock.patch.object(Path, "mkdir", side_effect=AssertionError("mkdir")):
-            with self.assertRaisesRegex(R.AuthorityError, "authority path is inside operated Git storage"):
-                self.register()
-        self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+            self.assert_tamper_refused("authority storage became a Git worktree")
         self.assertEqual(self.tree(), before)
 
     def test_candidate_record_worktree_refuses_before_first_mkdir(self):
@@ -792,6 +798,203 @@ class TestD5Registry(unittest.TestCase):
         self.disable_maintenance(self.d)
         entry = self.register()
         self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+
+
+    def assert_tamper_refused(self, message):
+        for call in (lambda: R.lookup(self.repo, "p", self.state), self.register):
+            with self.subTest(operation=call), \
+                 mock.patch.object(os, "fsync", side_effect=AssertionError("fsync before check")):
+                before = len(os.listdir("/dev/fd"))
+                with self.assertRaisesRegex(R.AuthorityError, message):
+                    call()
+                self.assertEqual(len(os.listdir("/dev/fd")), before, "fd leak on refusal")
+
+    def test_git_entry_at_each_owned_level(self):
+        entry = self.register()
+        for directory in (self.root, self.root / "plans", Path(entry["record_dir"])):
+            for kind in ("file", "directory", "dangling symlink"):
+                marker = directory / ".git"
+                if kind == "file":
+                    marker.write_text("gitdir: unused\n")
+                elif kind == "directory":
+                    marker.mkdir()
+                else:
+                    marker.symlink_to(self.d / "missing")
+                try:
+                    with self.subTest(level=directory, kind=kind):
+                        self.assert_tamper_refused("authority storage became a Git worktree")
+                finally:
+                    marker.rmdir() if kind == "directory" else marker.unlink()
+
+    def test_record_recreated_refuses(self):
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)  # Pin the old inode; reuse is a non-claim.
+        directory.rmdir()
+        directory.mkdir()
+        self.assertNotEqual(entry["record_key"], list(R._key(directory.stat())))
+        self.assert_tamper_refused("record_key mismatch: record directory replaced")
+
+    def test_record_symlink_to_same_inode_refuses(self):
+        entry = self.register()
+        directory = Path(entry["record_dir"])
+        moved = self.d / "moved"
+        directory.rename(moved)
+        directory.symlink_to(moved, target_is_directory=True)
+        self.assertEqual(entry["record_key"], list(R._key(directory.stat())))
+        self.assertFalse((moved / ".git").exists())
+        self.assert_tamper_refused("filesystem/git operation failed")
+
+    def test_walk_itself_refuses_symlinks_at_every_level(self):
+        entry = self.register()
+        for path in (self.root, self.root / "plans", Path(entry["record_dir"])):
+            moved = self.d / "moved"
+            path.rename(moved)
+            path.symlink_to(moved, target_is_directory=True)
+            try:
+                before = len(os.listdir("/dev/fd"))
+                with self.subTest(level=path), self.assertRaises(OSError):
+                    R._record_key(self.root, entry["registration_id"])
+                self.assertEqual(len(os.listdir("/dev/fd")), before)
+            finally:
+                path.unlink()
+                moved.rename(path)
+
+    def test_walk_closes_fds_on_each_stat_or_open_failure(self):
+        entry = self.register()
+        real_open, real_stat = os.open, os.stat
+        for level in range(3):
+            for operation in ("open", "stat"):
+                counts = {"open": 0, "stat": 0}
+                def invoke(name, real, *args, **kwargs):
+                    n = counts[name]
+                    counts[name] += 1
+                    if name == operation and n == level:
+                        raise PermissionError(errno.EACCES, "synthetic walk failure")
+                    return real(*args, **kwargs)
+                before = len(os.listdir("/dev/fd"))
+                with self.subTest(level=level, operation=operation), \
+                     mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops:
+                    ops.open = lambda *a, **kw: invoke("open", real_open, *a, **kw)
+                    ops.stat = lambda *a, **kw: invoke("stat", real_stat, *a, **kw)
+                    with self.assertRaises(PermissionError):
+                        R._record_key(self.root, entry["registration_id"])
+                self.assertEqual(len(os.listdir("/dev/fd")), before)
+
+    def test_record_key_schema_is_strict_and_version_stays_one(self):
+        entry = self.register()
+        path = self.root / "registry.json"
+        original = path.read_bytes()
+        valid = json.loads(original)
+        self.assertEqual(valid["schema_version"], 1)
+        self.assertEqual(entry["record_key"], list(R._key(Path(entry["record_dir"]).stat())))
+        for key in (None, [], [1], [1, 2, 3], [True, 1], [-1, 1], [1, "2"], {"dev": 1}):
+            value = copy.deepcopy(valid)
+            value["entries"][0]["record_key"] = key
+            path.write_text(json.dumps(value))
+            with self.subTest(key=key):
+                self.assert_tamper_refused("invalid record_key")
+        value = copy.deepcopy(valid)
+        del value["entries"][0]["record_key"]
+        path.write_text(json.dumps(value))
+        self.assert_tamper_refused("invalid entry fields")
+        path.write_bytes(original)
+        self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+
+    def test_walk_after_read_before_use_and_initial_key_from_open_fd(self):
+        events, opened, keys = [], [], []
+        real_open, real_fstat = os.open, os.fstat
+        real_entries, real_walk = R._entries, R._record_key
+        real_sync, real_mkdir = store.sync_directory, Path.mkdir
+        walking = False
+        def entries(root):
+            result = real_entries(root)
+            events.append("read")
+            return result
+        def walk(root, rid):
+            nonlocal walking
+            self.assertEqual(events[-1], "mkdir" if "mkdir" in events else "read")
+            walking = True
+            try:
+                result = real_walk(root, rid)
+            finally:
+                walking = False
+            events.append("walk")
+            return result
+        def opened_fd(path, flags, *args, **kwargs):
+            if Path(path).parent == self.root / "plans" and not walking:
+                self.assertEqual(events[-1], "walk", "record open preceded tamper walk")
+            fd = real_open(path, flags, *args, **kwargs)
+            if walking:
+                opened.append((str(path), flags, kwargs.get("dir_fd"), fd))
+            return fd
+        def fstat(fd):
+            info = real_fstat(fd)
+            if walking and fd == opened[-1][3]:
+                keys.append(list(R._key(info)))
+            return info
+        def mkdir(path, *args, **kwargs):
+            real_mkdir(path, *args, **kwargs)
+            if path.parent == self.root / "plans":
+                events.append("mkdir")
+        def sync(path):
+            if path in self.chain() or path.parent == self.root / "plans":
+                self.assertEqual(events[-1], "walk", "fsync preceded tamper walk")
+            real_sync(path)
+        with mock.patch.object(R, "_entries", side_effect=entries), \
+             mock.patch.object(R, "_record_key", side_effect=walk), \
+             mock.patch.object(R, "os", SimpleNamespace(**vars(os))) as ops, \
+             mock.patch.object(Path, "mkdir", mkdir), \
+             mock.patch.object(store, "sync_directory", side_effect=sync):
+            ops.open, ops.fstat = opened_fd, fstat
+            for call in (self.register, lambda: R.lookup(self.repo, "p", self.state), self.register):
+                events.clear()
+                opened.clear()
+                keys.clear()
+                before = len(os.listdir("/dev/fd"))
+                entry = call()
+                self.assertEqual(events[-1], "walk")
+                self.assertTrue(keys)
+                self.assertTrue(all(key == entry["record_key"] for key in keys))
+                self.assertEqual(len(opened) % 3, 0)
+                for i in range(0, len(opened), 3):
+                    root, plans, record = opened[i:i + 3]
+                    self.assertEqual([x[0] for x in (root, plans, record)],
+                                     [str(self.root), "plans", entry["registration_id"]])
+                    self.assertEqual(plans[2], root[3])
+                    self.assertEqual(record[2], plans[3])
+                    self.assertTrue(all(x[1] == os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                                        for x in (root, plans, record)))
+                self.assertEqual(len(os.listdir("/dev/fd")), before)
+
+    def test_lookup_and_lease_status_create_nothing_and_inherit_refusal(self):
+        entry = self.register()
+        before = self.tree()
+        real_open = os.open
+        def opened(path, flags, *args, **kwargs):
+            self.assertFalse(flags & os.O_CREAT)
+            return real_open(path, flags, *args, **kwargs)
+        with mock.patch.object(os, "open", side_effect=opened):
+            self.assertEqual(R.lookup(self.repo, "p", self.state), entry)
+            self.assertEqual(lease.status(self.repo, "p", self.state, now=150,
+                                          mandate_bytes=b"mandate")["registration"], entry)
+        self.assertEqual(self.tree(), before)
+        (Path(entry["record_dir"]) / ".git").write_text("gitdir: unused\n")
+        before = self.tree()
+        calls = [lambda: lease.status(self.repo, "p", self.state, now=150, mandate_bytes=b"mandate"),
+                 lambda: lease.revoke(self.repo, "p", self.state, 150, "stop"),
+                 lambda: lease.grant(self.repo, "p", self.state, issued_at=100,
+                                     confirmed_at=101, expires_at=200, mandate_bytes=b"mandate",
+                                     scope={"plans": ["p"], "repositories": ["repo"],
+                                            "actions": ["review"], "trackers": []},
+                                     owner_response="confirmed", displayed_bounds="bounded")]
+        with mock.patch.object(R, "d5_active", return_value=True), \
+             mock.patch.object(os, "open", side_effect=opened):
+            for call in calls:
+                with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
+                    call()
+        self.assertEqual(self.tree(), before)
 
 
 if __name__ == "__main__":
