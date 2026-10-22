@@ -2,7 +2,7 @@
 
 Local filesystem, trusted same-UID writers. Filesystem objects identify a
 repository and state directory; paths are locators, never identity. Atomic
-registry snapshots permit read-only lookup without creating a lock.
+registry snapshots permit nonmutating lookup without creating a lock.
 The permanent registry lock serializes registration writes.
 No custody, enforcement, migration or protection from outside-lock writers.
 
@@ -18,12 +18,18 @@ replacement; TOCTOU against a writer outside the lock.
 - **Recreated directories whose `(st_dev, st_ino)` the filesystem reuses.**
 - **A race against a concurrent same-UID writer.**
 - Substitution between the directory walk and a later use of the record root.
-- Concurrent same-UID substitution of a component between two lstat calls.
 - **A separate Git directory named `.git`.** Git reports its parent as the main worktree and records the original checkout nowhere, so it is indistinguishable from a standard repository.
-- **An unlisted alias.** Containment does not cover any checkout that reaches the common directory through a `.git` file but is absent from Git's worktree list.
+- **An unlisted alias.** Containment does not cover a checkout that reaches the common directory through a `.git` file but is absent from Git's worktree list.
 
 Non-claim: if an earlier failed call created B itself, a later retry does not re-confirm B's link in its parent. The external base is coordinator infrastructure (`~/.local/state`) that normally pre-exists.
-Non-claim: registration needs read permission on R and `plans` for the OD4 directory fsyncs.
+
+Tamper-walk non-claims:
+- The envelope gate (U1b-1c) may stat D before the walk.
+- A concurrent same-UID substitution between two `lstat` calls (TOCTOU).
+- Components above R are not checked by the walk.
+- Identity equality does not detect a recreated directory that the filesystem gives the same `(st_dev, st_ino)` (inode reuse).
+- Registration needs read permission on R and `plans` for the OD4 directory fsyncs.
+- The new-registration path, which creates D and then takes `record_key`, is outside C6 and C7.
 """
 import errno
 import fcntl
