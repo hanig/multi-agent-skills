@@ -1120,6 +1120,25 @@ class TestD5Registry(unittest.TestCase):
         self.assertLess(events.index("registry-read"), events.index("tamper-walk"))
         self.assertLess(events.index("D.stat"), events.index("registry-read"))
 
+    def test_final_envelope_stats_every_listed_worktree(self):
+        # Preserved failing contract: envelope membership stops at main.
+        directory = Path(self.register()["record_dir"])
+        self.git("-C", str(self.repo), "worktree", "add", "--detach", str(directory))
+        seen = []
+        real_stat, real_envelope = Path.stat, R._envelope
+        def envelope(checkout):
+            def probe(path, *args, **kwargs):
+                seen.append(path)
+                return real_stat(path, *args, **kwargs)
+            with mock.patch.object(Path, "stat", probe):
+                return real_envelope(checkout)
+        before = self.tree()
+        with mock.patch.object(R, "_envelope", side_effect=envelope):
+            with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
+                R.lookup(self.repo, "p", self.state)
+        self.assertEqual(self.tree(), before)
+        self.assertIn(directory, seen, "envelope did not stat listed D")
+
 
 if __name__ == "__main__":
     unittest.main()
