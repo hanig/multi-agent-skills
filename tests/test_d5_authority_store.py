@@ -250,7 +250,7 @@ class TestD5AuthorityStore(unittest.TestCase):
                  "directory_open", "directory_fsync", "directory_close", "lock_close",
                  "start_close", "pin_close")
         for operation in ("create", "check", "revoke"):
-            for step in steps:
+            for step in steps + (("drain_open", "drain_close") if operation == "create" else ()):
                 with self.subTest(operation=operation, step=step), tempfile.TemporaryDirectory() as d:
                     current = Path(d) / A.RECORD_NAME
                     old = None
@@ -268,6 +268,7 @@ class TestD5AuthorityStore(unittest.TestCase):
                         # Pinning D and syncing D are separate descriptor lifetimes.
                         kind = ("pin" if flags & os.O_DIRECTORY else
                                 "lock" if Path(path).name == A.LOCK_NAME else
+                                "drain" if Path(path).name == "authority.drain.lock" else
                                 "start" if Path(path).name == "authority.start.lock" else "directory")
                         target = kind != "directory" or Path(path) == Path(d)
                         if step == kind + "_open" and target:
@@ -329,7 +330,7 @@ class TestD5AuthorityStore(unittest.TestCase):
                             return fsync(fd)
                         effect = sync
                     elif step.endswith("_open") or step in (
-                            "directory_close", "lock_close", "start_close", "pin_close"):
+                            "directory_close", "lock_close", "start_close", "pin_close", "drain_close"):
                         name = "fstat"  # open/close hooks below inject these faults.
                         effect = os.fstat
                     effect = effect or injected(getattr(owner, name))
