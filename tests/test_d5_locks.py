@@ -583,5 +583,46 @@ class TestCleanup(unittest.TestCase):
             self.assertEqual(str(primary.__cause__), "source cause")
 
 
+class TestCleanupErrors(unittest.TestCase):
+    """DISCARD-CLEANUP-ERROR: each consumer must retain its secondary error."""
+    def test_cleanup_preserves_primary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for site in ("pin", "start", "state", "drain", "_open"):
+                for kind in (ValueError, OSError, KeyboardInterrupt):
+                    with self.subTest(site=site, kind=kind), ExitStack() as stack:
+                        record = (None if site == "pin" else
+                                  stack.enter_context(locks.pin(directory)))
+                        primary, secondary = kind("primary"), OSError("secondary")
+                        cause, previous = ValueError("cause"), OSError("previous")
+                        primary.__cause__ = cause
+                        primary.cleanup_errors = (previous,)
+                        real_close = os.close
+
+                        def close(fd):
+                            real_close(fd)
+                            raise secondary
+
+                        with mock.patch.object(os, "close", side_effect=close) as closing:
+                            with self.assertRaises(BaseException) as caught:
+                                if site == "_open":
+                                    with mock.patch.object(os, "fstat", side_effect=primary):
+                                        record._open(1)
+                                else:
+                                    guard = (locks.pin(directory) if record is None
+                                             else getattr(record, site)())
+                                    with guard:
+                                        raise primary
+                            closing.assert_called_once()
+                        observed = caught.exception
+                        if site == "_open" and kind is OSError:
+                            self.assertIsInstance(observed, locks.LockError)
+                            self.assertEqual(str(observed), locks._UNSAFE)
+                            observed = observed.__cause__
+                        self.assertIs(observed, primary)
+                        self.assertEqual(str(observed), "primary")
+                        self.assertIs(observed.__cause__, cause)
+                        self.assertEqual(observed.cleanup_errors, (previous, secondary))
+
+
 if __name__ == "__main__":
     unittest.main()
