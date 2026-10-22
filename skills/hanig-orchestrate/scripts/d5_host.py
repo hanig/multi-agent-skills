@@ -138,9 +138,9 @@ def session_anchor():
    return native, ProcessIdentity(rec.pid, rec.start_us)
  return Unknown("anchor is not a strict ancestor")
 
-def verify_anchor(native, identity):
+def verify_anchor(session_id, identity):
  """Reinspect the current session and ancestry on every call; never cache."""
- return session_anchor()==(native, identity)
+ return session_anchor()==(session_id, identity)
 
 def liveness(identity):
  """Alive/dead/unknown for an incarnation; only reuse or ESRCH proves death."""

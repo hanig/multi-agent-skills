@@ -166,6 +166,9 @@ class TestSessionAnchor(unittest.TestCase):
   self.assertIsInstance(H.session_anchor(), H.Unknown)
   H.process_uid.assert_not_called()
 
+ def test_contract_keyword_arguments(self):
+  self.assertTrue(H.verify_anchor(session_id='native', identity=Identity(70, 10)))
+
  def test_every_verification_rechecks_id_incarnation_chain_and_uid(self):
   wanted=Identity(70, 10)
   self.assertTrue(H.verify_anchor('native', wanted))
