@@ -11,6 +11,11 @@ Non-claims
 - Does not decide whether a transport actually submitted.
 - Does not perform remote reconciliation or guarantee exactly-once execution.
 - Does not protect against hostile same-process Python.
+- A guard entered and exited normally inside a caller's finally block does not
+  preserve an unrelated caller exception that is unwinding. A cleanup OSError
+  is raised as before, with the caller's exception as its __context__. Detecting
+  this case would require ambient exception state, which would also suppress
+  cleanup errors in ordinary handled-exception blocks.
 
 The helper owns admission/DRAIN. Keep secrets out of argv, environment and logs.
 Hostile same-UID filesystem writers are excluded. Retry unconfirmed writes with
@@ -156,15 +161,13 @@ def _access(directory, create=False):
                         os.chmod(DIRECTORY, 0o700, dir_fd=record.fd)
                 fd = os.open(DIRECTORY, os.O_RDONLY | os.O_DIRECTORY |
                              os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=record.fd)
-                try:
+                with locks._cleanup(os.close, fd):
                     if created:
                         os.fchmod(fd, 0o700)
                     _safe(fd, directory=True)
                     if create:
                         _sync(record.fd)
                     yield record, fd
-                finally:
-                    os.close(fd)
     except OSError as exc:
         raise EffectError(INVALID) from exc
 
@@ -179,33 +182,38 @@ def _sync(fd):
 def _write(fd, name, entry, create=False):
     temporary = name if create else ".effect-" + secrets.token_hex(16)
     opened = False
-    try:
-        out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                      os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
-        opened = True
-        with os.fdopen(out, "wb") as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            _safe(handle.fileno())
-            handle.write(_encode(entry) + b"\n")
-            handle.flush()
-            _sync(handle.fileno())
-        if not create:
-            os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
-        _sync(fd)
-    except OSError as exc:
-        raise EffectError(DURABILITY) from exc
-    finally:
+
+    def remove_temporary():
         if opened and not create:
             try:
                 os.unlink(temporary, dir_fd=fd)
             except FileNotFoundError:
                 pass
 
+    with locks._cleanup(remove_temporary):
+        try:
+            out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                          os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+            opened = True
+            handle = os.fdopen(out, "wb")
+            with locks._cleanup(handle.close):
+                os.fchmod(handle.fileno(), 0o600)
+                _safe(handle.fileno())
+                handle.write(_encode(entry) + b"\n")
+                handle.flush()
+                _sync(handle.fileno())
+            if not create:
+                os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
+            _sync(fd)
+        except OSError as exc:
+            raise EffectError(DURABILITY) from exc
+
 
 def _load(fd, name, record):
     out = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW |
                   os.O_CLOEXEC, dir_fd=fd)
-    with os.fdopen(out, "rb") as handle:
+    handle = os.fdopen(out, "rb")
+    with locks._cleanup(handle.close):
         _safe(handle.fileno())
         entry = _decode(handle.read())
     _keys(entry, {"schema_version", "effect_id", "binding", "receipt_verifier", "state", "outcome"})
@@ -297,11 +305,9 @@ def _classify(attempt, state):
 
 def _confirm(fd, name):
     out = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
-    try:
+    with locks._cleanup(os.close, out):
         _sync(out)
         _sync(fd)
-    finally:
-        os.close(out)
 
 
 def complete(receipt, outcome):
