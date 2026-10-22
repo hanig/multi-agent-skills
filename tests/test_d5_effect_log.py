@@ -6,6 +6,7 @@ import copy
 import fcntl
 import json
 import os
+import signal
 from pathlib import Path
 import sys
 import tempfile
@@ -58,7 +59,11 @@ class TestEffectLog(unittest.TestCase):
     def reject(self, message=E.INVALID):
         return self.raises(E.EffectError, "^" + message + "$")
 
-    def test_A0_inactive_precedes_filesystem_and_process_work(self):
+    def denied(self, call, *args, error=E.INVALID, **kwargs):
+        with self.reject(error):
+            call(*args, **kwargs)
+
+    def test_A0_inactive_no_io(self):
         with mock.patch.object(E.registry, "d5_active", return_value=False), ExitStack() as stack:
             for target, name in ((E.registry, "lookup"), (E.locks, "pin"),
                                  (os, "open"), (os, "mkdir"), (os, "lstat"),
@@ -67,10 +72,10 @@ class TestEffectLog(unittest.TestCase):
                     side_effect=AssertionError("inactive performed work")))
             for call in (self.prepare, lambda: E._classify(None, "submitted"),
                          lambda: E.complete(None, self.ok), lambda: E.unresolved(*self.args)):
-                with self.subTest(call=call), self.reject("D5 inactive"):
-                    call()
+                with self.subTest(call=call):
+                    self.denied(call, error="D5 inactive")
 
-    def test_C1_destination_secret_and_immutable_request(self):
+    def test_C1_destination_and_secrets(self):
         intent = self.prepare()
         self.lookup.assert_called_once_with(*self.args)
         self.assertRegex(intent.effect_id, r"^[0-9a-f]{32}$")
@@ -92,69 +97,60 @@ class TestEffectLog(unittest.TestCase):
         E.complete(receipt, self.ok)
         self.eq(self.entry(receipt)["binding"], row["binding"])
 
-    def test_C1_forged_cross_operation_and_binding_variants(self):
+    def test_C1_forgery_and_bindings(self):
         receipt, other = self.receipt(), self.receipt()
         path = self.path(receipt)
         forged = [replace(receipt, _secret=b"x" * 32), replace(receipt, effect_id=other.effect_id),
                   replace(receipt, effect_id="../outside"), replace(receipt, _secret=b""), object()]
         saved = self.entry(receipt)
-        for key in saved["binding"]:
-            binding = copy.deepcopy(saved["binding"])
-            value = binding[key]
-            if isinstance(value, str):
-                binding[key] = "c" * 32
-            elif isinstance(value, list):
-                binding[key] = [1, 2]
-            elif key == "custody":
-                value["generation"] += 1
-            elif key == "scope":
-                value["plans"] = ["other"]
-            else:
-                value["request_id"] = "other"
+        changes = dict(record_id="c" * 32, registration_id="c" * 32,
+            record_key=[1, 2], effects_key=[1, 2], kind="other",
+            custody=dict(saved["binding"]["custody"], generation=2),
+            scope=dict(saved["binding"]["scope"], plans=["other"]),
+            correlation={"request_id": "other"})
+        for key, value in changes.items():
+            binding = dict(saved["binding"], **{key: value})
             forged.append(replace(receipt, _binding=E._encode(binding)))
             tampered = copy.deepcopy(saved)
             tampered["binding"] = binding
             path.write_bytes(E._encode(tampered))
-            with self.subTest(binding=key), self.reject():
-                E.complete(receipt, self.ok)
-            with self.subTest(verifier=key), self.reject():
-                E.complete(forged[-1], self.ok)
+            with self.subTest(binding=key):
+                self.denied(E.complete, receipt, self.ok)
+            with self.subTest(verifier=key):
+                self.denied(E.complete, forged[-1], self.ok)
             path.write_bytes(E._encode(saved))
         for handle in forged:
-            with self.subTest(handle=handle), self.reject():
-                E.complete(handle, self.ok)
+            with self.subTest(handle=handle):
+                self.denied(E.complete, handle, self.ok)
         self.eq(self.entry(receipt), saved)
 
-    def test_C2_intent_and_unsubmitted_states_never_complete(self):
+    def test_C2_unsubmitted_refusals(self):
         admitted = self.prepare()
         E._classify(admitted, "submitted")
-        with self.reject(E.NOT_SUBMITTED):
-            E.complete(admitted, self.ok)
+        self.denied(E.complete, admitted, self.ok, error=E.NOT_SUBMITTED)
         for state in ("attempting", "unknown", "not_submitted"):
             intent = self.prepare()
             if state != "attempting":
                 E._classify(intent, state)
-            with self.reject(E.NOT_SUBMITTED):
-                E.complete(intent, self.ok)
+            self.denied(E.complete, intent, self.ok, error=E.NOT_SUBMITTED)
             forged = E.Receipt(intent.effect_id, intent._directory, intent._binding, intent._secret)
-            with self.subTest(state=state), self.reject(E.NOT_SUBMITTED):
-                E.complete(forged, self.ok)
+            with self.subTest(state=state):
+                self.denied(E.complete, forged, self.ok, error=E.NOT_SUBMITTED)
             self.eq(self.entry(intent)["state"], state)
 
-    def test_C3_terminal_idempotence_and_conflict(self):
+    def test_C3_terminal_repeats(self):
         receipt = self.receipt()
         path = self.path(receipt)
         self.eq(E.complete(receipt, self.ok), self.ok)
         before = path.stat(), path.read_bytes()
         with mock.patch.object(E, "_write", side_effect=AssertionError("rewritten")):
             self.eq(E.complete(receipt, dict(reversed(list(self.ok.items())))), self.ok)
-            with self.reject(E.CONFLICT):
-                E.complete(receipt, self.bad)
+            self.denied(E.complete, receipt, self.bad, error=E.CONFLICT)
         after = path.stat(), path.read_bytes()
         self.eq((before[0].st_ino, before[0].st_mtime_ns, before[1]),
                          (after[0].st_ino, after[0].st_mtime_ns, after[1]))
 
-    def test_C4_unknown_exception_and_abandoned_intent_are_exposed(self):
+    def test_C4_reconciliation(self):
         intent = self.prepare()
         for error in (RuntimeError("unclassified"), KeyboardInterrupt()):
             attempt = self.prepare()
@@ -163,8 +159,7 @@ class TestEffectLog(unittest.TestCase):
         submitted = self.prepare()
         receipt = E._classify(submitted, "submitted")
         E._classify(submitted, RuntimeError("response lost"))
-        with self.reject(E.NOT_SUBMITTED):
-            E.complete(receipt, self.ok)
+        self.denied(E.complete, receipt, self.ok, error=E.NOT_SUBMITTED)
         E._classify(self.prepare(), "not_submitted")
         E.complete(self.receipt(), self.ok)
         rows = E.unresolved(*self.args)
@@ -173,7 +168,7 @@ class TestEffectLog(unittest.TestCase):
         self.assertIn(intent.effect_id, [r["effect_id"] for r in rows])
         self.assertTrue(all("receipt_verifier" not in r for r in rows))
 
-    def test_C5_completion_survives_authority_changes_and_replacement(self):
+    def test_C5_authority_changes(self):
         record = grant()
         store.create(self.d, record)
         receipt = self.receipt()
@@ -195,7 +190,7 @@ class TestEffectLog(unittest.TestCase):
             E.complete(receipt, self.ok)
         self.eq(self.entry(receipt)["outcome"], self.ok)
 
-    def test_C1_invalid_state_schema_outcome_and_duplicate_keys(self):
+    def test_C1_invalid_entries(self):
         receipt = self.receipt()
         path = self.path(receipt)
         saved = path.read_bytes()
@@ -204,20 +199,19 @@ class TestEffectLog(unittest.TestCase):
             row = json.loads(saved)
             row[key] = value
             path.write_bytes(E._encode(row))
-            with self.subTest(field=key, value=value), self.reject():
-                E.complete(receipt, self.ok)
+            with self.subTest(field=key, value=value):
+                self.denied(E.complete, receipt, self.ok)
         for raw in (b'{', b'[]', b'\xff', saved.replace(b'"state":', b'"state":"unknown","state":')):
             path.write_bytes(raw)
-            with self.reject():
-                E.complete(receipt, self.ok)
+            self.denied(E.complete, receipt, self.ok)
         path.write_bytes(saved)
         for bad in ({}, None, {"status": "unknown", "detail": "x"},
                     {"status": "succeeded", "detail": 1}, dict(self.ok, path="elsewhere")):
-            with self.subTest(outcome=bad), self.reject():
-                E.complete(receipt, bad)
+            with self.subTest(outcome=bad):
+                self.denied(E.complete, receipt, bad)
         self.eq(path.read_bytes(), saved)
 
-    def test_C1_unsafe_files_and_directory_rebinding(self):
+    def test_C1_filesystem_binding(self):
         receipt = self.receipt()
         path = self.path(receipt)
         raw = path.read_bytes()
@@ -234,8 +228,8 @@ class TestEffectLog(unittest.TestCase):
             else:
                 path.write_bytes(raw)
                 path.chmod(0o666)
-            with self.subTest(variant=variant), self.reject():
-                E.complete(receipt, self.ok)
+            with self.subTest(variant=variant):
+                self.denied(E.complete, receipt, self.ok)
         path.unlink()
         path.write_bytes(raw)
         self.eq(outside.read_bytes(), raw)
@@ -243,21 +237,18 @@ class TestEffectLog(unittest.TestCase):
         moved = self.d / "moved"
         directory.rename(moved)
         directory.symlink_to(moved, target_is_directory=True)
-        with self.reject():
-            E.complete(receipt, self.ok)
+        self.denied(E.complete, receipt, self.ok)
         directory.unlink()
         directory.mkdir()
         path.write_bytes(raw)
-        with self.reject():
-            E.complete(receipt, self.ok)
+        self.denied(E.complete, receipt, self.ok)
         other = self.d / "different-record"
         other.mkdir()
         (other / E.DIRECTORY).mkdir()
         (other / E.DIRECTORY / path.name).write_bytes(raw)
-        with self.reject():
-            E.complete(replace(receipt, _directory=str(other)), self.ok)
+        self.denied(E.complete, replace(receipt, _directory=str(other)), self.ok)
 
-    def test_E1_state_serializes_consumers_and_concurrent_terminal_results(self):
+    def test_E1_serialization(self):
         real_write = E._write
         def writing(*args, **kwargs):
             fd = os.open(self.d / "authority.lock", os.O_RDWR)
@@ -282,19 +273,17 @@ class TestEffectLog(unittest.TestCase):
                 results = [f.result(timeout=10) for f in futures]
             self.assertCountEqual(results, ["ok", E.CONFLICT])
 
-    def test_E2_exclusive_creation_durability_and_retry(self):
+    def test_E2_durability(self):
         intent = self.prepare()
         saved = self.path(intent).read_bytes()
         with mock.patch.object(E.secrets, "token_hex", return_value=intent.effect_id):
-            with self.reject(E.DURABILITY):
-                self.prepare()
+            self.denied(self.prepare, error=E.DURABILITY)
         self.eq(self.path(intent).read_bytes(), saved)
         receipt = E._classify(intent, "submitted")
         path = self.path(receipt)
         prior = path.read_bytes()
         with mock.patch.object(os, "replace", side_effect=OSError("pre-publication")):
-            with self.reject(E.DURABILITY):
-                E.complete(receipt, self.ok)
+            self.denied(E.complete, receipt, self.ok, error=E.DURABILITY)
         self.eq(path.read_bytes(), prior)
         real_sync = os.fsync
         def fail_directory(fd):
@@ -304,11 +293,9 @@ class TestEffectLog(unittest.TestCase):
         dirfd = os.open(path.parent, os.O_RDONLY)
         try:
             with mock.patch.object(os, "fsync", side_effect=fail_directory):
-                with self.reject(E.DURABILITY):
-                    E.complete(receipt, self.ok)
+                self.denied(E.complete, receipt, self.ok, error=E.DURABILITY)
                 self.eq(self.entry(receipt)["state"], "completed")
-                with self.reject(E.DURABILITY):
-                    E.complete(receipt, self.ok)
+                self.denied(E.complete, receipt, self.ok, error=E.DURABILITY)
             E.complete(receipt, self.ok)
         finally:
             os.close(dirfd)
@@ -327,17 +314,15 @@ class TestEffectLog(unittest.TestCase):
                     if allowed:
                         E._classify(intent, target)
                     else:
-                        with self.reject(E.CONFLICT):
-                            E._classify(intent, target)
+                        self.denied(E._classify, intent, target, error=E.CONFLICT)
         for invalid in (None, True, [], "completed", "attempting"):
-            with self.reject():
-                E._classify(self.prepare(), invalid)
+            self.denied(E._classify, self.prepare(), invalid)
 
-    def test_E4_binding_schema_and_restrictive_umask(self):
+    def test_E4_schema_and_umask(self):
         for field, value in (("record_id", "wrong"), ("kind", ""), ("custody", {}),
                              ("scope", "all"), ("correlation", {})):
-            with self.subTest(field=field), self.reject():
-                self.prepare(**{field: value})
+            with self.subTest(field=field):
+                self.denied(self.prepare, **{field: value})
         saved = os.umask(0o777)
         try:
             receipt = self.receipt()
@@ -345,6 +330,31 @@ class TestEffectLog(unittest.TestCase):
         finally:
             os.umask(saved)
         self.eq(self.path(receipt).stat().st_mode & 0o777, 0o600)
+
+
+    def test_E5_torn_intent(self):
+        intent = self.prepare()
+        E._classify(intent, "unknown")
+        pid = os.fork()
+        if pid == 0:
+            signal.alarm(10)
+            encode = E._encode
+            def crash(value):
+                if isinstance(value, dict) and "schema_version" in value:
+                    os._exit(99)
+                return encode(value)
+            E._encode = crash
+            try:
+                self.prepare()
+            finally:
+                os._exit(1)
+        self.eq(os.waitpid(pid, 0)[1], 99 << 8)
+        torn = next(p for p in (self.d / E.DIRECTORY).glob("*.json") if not p.stat().st_size)
+        rows = E.unresolved(*self.args)
+        self.eq(next(r for r in rows if r.get("effect_id") == intent.effect_id)["state"], "unknown")
+        self.eq(next(r for r in rows if "error" in r),
+                {"file": torn.name, "error": E.INVALID, "reconciliation_required": True})
+        self.eq(torn.read_bytes(), b"")
 
 
 if __name__ == "__main__":

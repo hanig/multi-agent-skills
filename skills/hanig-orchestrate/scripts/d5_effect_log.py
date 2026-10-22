@@ -12,11 +12,9 @@ Non-claims
 - Does not perform remote reconciliation or guarantee exactly-once execution.
 - Does not protect against hostile same-process Python.
 
-The later helper owns admission and DRAIN. Keep capabilities out of argv,
-environment and logs. Stable same-UID infrastructure; hostile same-UID writes
-are not covered. Retry unconfirmed writes with the same handle/result. Correlation
-requires request_id and string fields; outcomes have status (succeeded/failed)
-and detail (string). Invalid inputs/files use INVALID; conflicts use CONFLICT.
+The helper owns admission/DRAIN. Keep secrets out of argv, environment and logs.
+Hostile same-UID filesystem writers are excluded. Retry unconfirmed writes with
+the same handle/result. Outcomes require status (succeeded/failed) and detail.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -33,7 +31,7 @@ import d5_registry as registry
 
 
 class EffectError(ValueError):
-    """Restricted accounting refusal."""
+    pass
 
 
 INVALID = "D5 completion refused: invalid receipt"
@@ -82,8 +80,7 @@ def _binding(value):
         _require(_hex(value[key], 32))
     for key in ("record_key", "effects_key"):
         pair = value[key]
-        _require(type(pair) is list and len(pair) == 2 and
-                 all(type(n) is int and n >= 0 for n in pair))
+        _require(type(pair) is list and len(pair) == 2 and all(type(n) is int and n >= 0 for n in pair))
     custody = value["custody"]
     _keys(custody, {"generation", "session_id", "anchor_pid", "anchor_start_us"})
     _require(_text(custody["session_id"]) and bool(custody["session_id"]))
@@ -102,8 +99,7 @@ def _binding(value):
 
 def _outcome(value):
     _keys(value, {"status", "detail"})
-    _require(type(value["status"]) is str and value["status"] in ("succeeded", "failed")
-             and _text(value["detail"]))
+    _require(type(value["status"]) is str and value["status"] in ("succeeded", "failed") and _text(value["detail"]))
 
 
 def _encode(value):
@@ -143,7 +139,6 @@ def _safe(fd, directory=False):
 
 @contextmanager
 def _access(directory, create=False):
-    """STATE spans lookup through durable publication."""
     try:
         _require(stat.S_ISDIR(os.lstat(directory).st_mode))
         with locks.pin(directory) as record:
@@ -177,7 +172,6 @@ def _sync(fd):
 
 
 def _write(fd, name, entry, create=False):
-    # Store discipline, relative to pinned fd: flush/fsync, replace, fsync directory.
     temporary = name if create else ".effect-" + secrets.token_hex(16)
     opened = False
     try:
@@ -212,8 +206,7 @@ def _load(fd, name, record):
     _require(type(entry["schema_version"]) is int and entry["schema_version"] == 1)
     _require(_hex(entry["effect_id"], 32) and name == entry["effect_id"] + ".json")
     _binding(entry["binding"])
-    _require(entry["binding"]["record_key"] == _key(record.fd) and
-             entry["binding"]["effects_key"] == _key(fd))
+    _require(entry["binding"]["record_key"] == _key(record.fd) and entry["binding"]["effects_key"] == _key(fd))
     _require(_hex(entry["receipt_verifier"], 64))
     _require(type(entry["state"]) is str and entry["state"] in _STATES)
     if entry["state"] == "completed":
@@ -225,7 +218,7 @@ def _load(fd, name, record):
 
 @dataclass(frozen=True)
 class Attempt:
-    """Durable intent, not a submitted receipt."""
+    """Intent capability."""
     effect_id: str
     _directory: str = field(repr=False)
     _binding: bytes = field(repr=False)
@@ -234,7 +227,7 @@ class Attempt:
 
 @dataclass(frozen=True)
 class Receipt(Attempt):
-    """Completion capability for the operation classified as submitted."""
+    """Submitted capability."""
 
 
 def _verifier(effect_id, binding, secret):
@@ -243,7 +236,6 @@ def _verifier(effect_id, binding, secret):
 
 
 def prepare(checkout, plan_id, state_dir, *, record_id, custody, kind, scope, correlation):
-    """Record intent; the later helper owns admission and DRAIN."""
     _active()
     registration = registry.lookup(checkout, plan_id, state_dir)
     _require(registration is not None)
@@ -271,19 +263,17 @@ def _checked(handle):
         name = handle.effect_id + ".json"
         entry = _load(fd, name, record)
         _require(_encode(entry["binding"]) == handle._binding)
-        _require(hmac.compare_digest(entry["receipt_verifier"],
-                                     _verifier(handle.effect_id, handle._binding, handle._secret)))
+        _require(hmac.compare_digest(entry["receipt_verifier"], _verifier(handle.effect_id, handle._binding, handle._secret)))
         yield fd, name, entry
 
 
 def _classify(attempt, state):
-    """Internal state; exceptions mean unknown. Caller holds DRAIN."""
+    """Internal; exceptions mean unknown. Caller holds DRAIN."""
     _active()
     _require(type(attempt) is Attempt)
     if isinstance(state, BaseException):
         state = "unknown"
-    _require(type(state) is str and
-             state in ("submitted", "not_submitted", "unknown"))
+    _require(type(state) is str and state in ("submitted", "not_submitted", "unknown"))
     with _checked(attempt) as (fd, name, entry):
         prior = "submitted" if entry["state"] == "completed" else entry["state"]
         transition = prior == "attempting" or (entry["state"] == "submitted" and
@@ -293,7 +283,6 @@ def _classify(attempt, state):
             entry["state"] = state
             _write(fd, name, entry)
         else:
-            # Reconfirm a prior visible-but-unconfirmed publication on retry.
             _confirm(fd, name)
     if state == "submitted":
         return Receipt(attempt.effect_id, attempt._directory, attempt._binding, attempt._secret)
@@ -310,7 +299,6 @@ def _confirm(fd, name):
 
 
 def complete(receipt, outcome):
-    """Record a submitted terminal outcome."""
     _active()
     _require(type(receipt) is not Attempt, NOT_SUBMITTED)
     _require(type(receipt) is Receipt)
@@ -330,7 +318,8 @@ def complete(receipt, outcome):
 def unresolved(checkout, plan_id, state_dir):
     """Unresolved entries; attempting/unknown require reconciliation, not liveness.
 
-    Submitted entries are included; terminal entries remain on disk.
+    Submitted entries are included; terminal entries remain on disk. Unreadable
+    entries produce file/error diagnostics requiring reconciliation; bytes stay put.
     """
     _active()
     registration = registry.lookup(checkout, plan_id, state_dir)
@@ -339,8 +328,12 @@ def unresolved(checkout, plan_id, state_dir):
     with _access(registration["record_dir"], create=True) as (record, fd):
         for name in sorted(os.listdir(fd)):
             if not name.endswith(".json"):
-                continue  # Unpublished temporaries.
-            entry = _load(fd, name, record)
+                continue
+            try:
+                entry = _load(fd, name, record)
+            except (EffectError, OSError):
+                result.append(dict(file=name, error=INVALID, reconciliation_required=True))
+                continue
             if entry["state"] in ("attempting", "unknown", "submitted"):
                 entry.pop("receipt_verifier")
                 entry["reconciliation_required"] = entry["state"] != "submitted"
