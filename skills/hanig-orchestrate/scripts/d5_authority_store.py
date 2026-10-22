@@ -9,8 +9,11 @@ D must be a directory owned by the effective UID with owner read, write and
 search permission (st_mode & 0o700 == 0o700). The registry creates D with
 mode 0700. The store checks this envelope before opening lock files; symlinked
 D retains the safe-opening refusal.
-A liveness callback that writes its own record is unsupported. claim refuses
-with `record: changed during liveness observation`.
+A liveness callback that writes its own record is unsupported. `claim` refuses
+with (b) when the record's device, inode, size, change time (`st_ctime_ns`) or
+bytes differ after the callback. A filesystem whose change time does not
+advance on a write is outside the supported host (macOS APFS).
+Refusal (b) is `record: changed during liveness observation`.
 
 Does not serialize arbitrary mandate-file editors.
 Does not claim all repository writers use these entry points.
@@ -238,15 +241,18 @@ def claim(directory, now, mandate_bytes, session_id, anchor, liveness):
             if (session_id, anchor) != (custody["session_id"], identity):
                 path = directory / RECORD_NAME
                 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-                # Keep the old inode alive so a write/restore cannot reuse it.
+                # Snapshot metadata and bytes without holding an extra record
+                # descriptor across the callback or the subsequent read.
                 with _file(fd, "rb") as handle:
                     before = os.fstat(fd)
                     raw = handle.read()
-                    holder = observe_liveness(identity, liveness)
-                    after = _present(path, "record")
-                    _require(after and (before.st_dev, before.st_ino) ==
-                             (after.st_dev, after.st_ino) and read_bytes(path) == raw,
-                             "record", "changed during liveness observation")
+                holder = observe_liveness(identity, liveness)
+                after = _present(path, "record")
+                _require(after and
+                         (before.st_dev, before.st_ino, before.st_size, before.st_ctime_ns) ==
+                         (after.st_dev, after.st_ino, after.st_size, after.st_ctime_ns) and
+                         read_bytes(path) == raw,
+                         "record", "changed during liveness observation")
         updated = claimed(record, session_id, anchor.pid, anchor.start_us, now, holder)
         if updated != record:
             _write(directory / RECORD_NAME, encode(updated))

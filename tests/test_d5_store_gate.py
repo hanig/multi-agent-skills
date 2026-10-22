@@ -722,7 +722,13 @@ with tempfile.TemporaryDirectory() as left, tempfile.TemporaryDirectory() as rig
         Path(d).chmod(0o700)
         store.create(d, held())
     saved = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (8, saved[1]))
+    # Five free slots: directory, DRAIN, START, STATE and one record.
+    # Apple Python 3.9 keeps an additional interpreter descriptor open.
+    slots = [os.open(os.devnull, os.O_RDONLY) for _ in range(5)]
+    limit = max(slots) + 1
+    for fd in slots:
+        os.close(fd)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (limit, saved[1]))
     try:
         args = (103, MANDATE, 'next', ProcessIdentity(43, 9000002), lambda _: 'dead')
         expected = old.claim(left, *args)
@@ -735,6 +741,45 @@ with tempfile.TemporaryDirectory() as left, tempfile.TemporaryDirectory() as rig
         result = subprocess.run([sys.executable, "-c", script], cwd=str(ROOT),
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_record_descriptors_do_not_overlap(self):
+        opening, closing = os.open, os.close
+        for name in WRITERS + ("read",):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                d = Path(tmp)
+                if name != "create":
+                    store.create(d, held())
+                active, counts, callback_counts = set(), [], []
+
+                def opened(path, *args, **kwargs):
+                    fd = opening(path, *args, **kwargs)
+                    # Include record, archive and temporary publication files.
+                    basename = os.path.basename(path)
+                    if basename.endswith(".json") or basename.startswith(".authority-"):
+                        active.add(fd)
+                        counts.append(len(active))
+                    return fd
+
+                def closed(fd):
+                    closing(fd)
+                    active.discard(fd)
+
+                def probe(_):
+                    callback_counts.append(len(active))
+                    return "dead"
+
+                with mock.patch.object(os, "open", side_effect=opened), \
+                        mock.patch.object(os, "close", side_effect=closed):
+                    if name == "claim":
+                        result = store.claim(d, 103, MANDATE, "next",
+                                             ProcessIdentity(43, 9000002), probe)
+                        self.assertEqual(result["custody"]["generation"], 2)
+                    else:
+                        operation(d, name)
+                self.assertEqual(max(counts), 1)
+                self.assertEqual(active, set())
+                if name == "claim":
+                    self.assertEqual(callback_counts, [0])
 
     def test_review_inplace_callback_restore_is_refused(self):
         for change in (False, True):
