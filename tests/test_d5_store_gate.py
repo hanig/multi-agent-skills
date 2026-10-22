@@ -416,12 +416,12 @@ class TestD5StoreGate(unittest.TestCase):
             raise OSError(errno.ENOSPC, "close")
         for primary in (locks.LockError("D5 lock refused: unsafe lock file"),
                         OSError(errno.EIO, "verify")):
-            with self.subTest(primary=primary), \
-                    mock.patch.object(locks, "_safe", side_effect=[True, primary]), \
-                    mock.patch.object(os, "close", closing), \
-                    self.assertRaises(store.AuthorityError) as caught:
-                store.read(d)
-            self.assertIs(caught.exception.__cause__, primary)
+            with self.subTest(primary=primary):
+                with mock.patch.object(locks, "_safe", side_effect=[True, primary]), \
+                        mock.patch.object(os, "close", closing), \
+                        self.assertRaises(store.AuthorityError) as caught:
+                    store.read(d)
+                self.assertIs(caught.exception.__cause__, primary)
 
     def test_pre_u3b_differential_records_results_and_errors(self):
         # The recorded base predates this integration. CI fetches full history.
@@ -478,9 +478,10 @@ class TestD5StoreGate(unittest.TestCase):
         d = self.seed("permissions")
         (d / STATE).chmod(0o400)
         for module in (old, store):
-            with self.subTest(module=module.__name__), self.assertRaises(store.AuthorityError) as caught:
-                module.revoke(d, 102, "stop")
-            self.assertEqual(caught.exception.__cause__.errno, errno.EACCES)
+            with self.subTest(module=module.__name__):
+                with self.assertRaises(store.AuthorityError) as caught:
+                    module.revoke(d, 102, "stop")
+                self.assertEqual(caught.exception.__cause__.errno, errno.EACCES)
 
     def test_threads_share_store_start_guard(self):
         d = self.seed("revoke")
