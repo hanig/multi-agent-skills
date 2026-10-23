@@ -1,4 +1,4 @@
-"""R8 test children: local setup, ancestor, worker and real R3 installation."""
+"""R8 setup, ancestor, worker and installer fixtures."""
 from contextlib import ExitStack
 import json
 import os
@@ -12,6 +12,7 @@ from tests import test_d5_submission as t
 import d5_process as process
 import d5_install as install
 from tests.fixtures.d5.r7_child import emit, wait_for
+from tests.test_d5_process import designated, spawn_spy, descriptors, LOW_CONTROL
 
 BOOTSTRAP = str(Path(__file__).with_name('r7_child.py'))
 
@@ -46,7 +47,7 @@ def setup(root):
 def ancestor(raw):
     data = json.loads(raw)
     with t.protocol.pin(data['directory']) as record, record.drain() as fd:
-        with mock.patch.object(process, 'DESIGNATED_BOOTSTRAPS', frozenset([BOOTSTRAP])):
+        with designated():
             proc = process.protected_spawn(data['directory'], fd, BOOTSTRAP,
                 ['child', raw, str(fd), 'close-barrier'],
                 stdin=None, stdout=None, stderr=None)
@@ -54,27 +55,20 @@ def ancestor(raw):
 
 
 def worker(raw):
-    observed = {}
-    for fd in json.loads(raw):
-        try:
-            info = os.fstat(fd)
-            observed[str(fd)] = [info.st_dev, info.st_ino]
-        except OSError:
-            observed[str(fd)] = None
-    emit('ready', observed=observed)
+    snapshot = descriptors()
+    emit('ready', observed={str(fd): snapshot.get(fd) for fd in json.loads(raw)})
     wait_for('exit')
 
 
 def standard_slots(root):
-    from tests.test_d5_process import descriptors
+    case = t.unittest.TestCase()
     with t.protocol.pin(root) as record, record.drain() as fd:
         for standard in (0, 1, 2):
             saved = os.dup(standard)
             try:
                 os.dup2(fd, standard)
                 before = descriptors()
-                with mock.patch.object(process, 'DESIGNATED_BOOTSTRAPS', frozenset([BOOTSTRAP])), \
-                        mock.patch.object(process.subprocess, 'Popen') as popen:
+                with designated(), spawn_spy() as popen:
                     try:
                         process.protected_spawn(root, standard, BOOTSTRAP)
                         error = None
@@ -92,7 +86,7 @@ def standard_slots(root):
                     process.protected_spawn(root, fd, BOOTSTRAP, **{stream: None})
                     popen.assert_called_once()
                     if standard == 1:
-                        with t.unittest.TestCase().assertRaises(process.AuthorityError):
+                        with case.assertRaises(process.AuthorityError):
                             process.protected_spawn(root, fd, BOOTSTRAP, stdout=None, stderr=subprocess.STDOUT)
                 unchanged = descriptors() == before
             finally:
@@ -104,25 +98,23 @@ def standard_slots(root):
             read, write = os.pipe()
             try:
                 os.dup2(read, standard)
-                with mock.patch.object(process, 'DESIGNATED_BOOTSTRAPS', frozenset([BOOTSTRAP])), \
-                        mock.patch.object(process.subprocess, 'Popen') as popen:
-                    try:
-                        process.protected_spawn(root, fd, BOOTSTRAP, pass_fds=(standard,))
-                        error = None
-                    except process.AuthorityError as exc:
-                        error = str(exc)
-                    assert not popen.called, 'overwrote control descriptor'
+                before = descriptors()
+                with designated(), spawn_spy() as popen:
                     stream = ('stdin', 'stdout', 'stderr')[standard]
-                    process.protected_spawn(root, fd, BOOTSTRAP, pass_fds=(standard,), **{stream: None})
-                    popen.assert_called_once()
+                    mappings = [{}, {stream: None}, {stream: standard}, {stream: read}]
                     if standard == 2:
-                        process.protected_spawn(root, fd, BOOTSTRAP, pass_fds=(2,), stdout=2, stderr=subprocess.STDOUT)
-                        assert popen.call_count == 2
+                        mappings.append(dict(stdout=2, stderr=subprocess.STDOUT))
+                    for kwargs in mappings:
+                        with case.assertRaisesRegex(process.AuthorityError,
+                                '^' + LOW_CONTROL + '$'):
+                            process.protected_spawn(root, fd, BOOTSTRAP, pass_fds=(standard,), **kwargs)
+                        popen.assert_not_called()
+                        assert descriptors() == before, 'leaked descriptor'
             finally:
                 os.dup2(saved, standard)
                 for opened in (saved, read, write):
                     os.close(opened)
-            emit('control-slot', error=error)
+            emit('control-slot', refused=True)
 
 
 def closed_streams(root, low_first=False):
@@ -151,20 +143,17 @@ def closed_streams(root, low_first=False):
                 os.close(copy)
         case.event(proc, 'adopted')
         case.stack.close()
-        case.assertEqual(case.probe(), 'blocked')
+        case.eq(case.probe(), 'blocked')
         case.complete_effect(proc)
-        case.assertEqual(case.probe(), 'available')
-        case.send(proc, 'exit')
-        stdout, stderr = proc.communicate(timeout=20)
-        case.assertEqual((proc.returncode, stdout, stderr), (0, b'', None))
+        case.eq(case.probe(), 'available')
+        case.finish(proc, None)
         _, fd = case.holding()
         for stream in ('stdin', 'stdout', 'stderr'):
             saved = [(n, os.dup(n)) for n in (0, 1, 2)]
             try:
                 for target, _ in saved:
                     os.close(target)
-                with mock.patch.object(process, 'DESIGNATED_BOOTSTRAPS', frozenset([BOOTSTRAP])), \
-                        mock.patch.object(process.subprocess, 'Popen') as popen:
+                with designated(), spawn_spy() as popen:
                     process.protected_spawn(case.directory, fd, BOOTSTRAP, **{stream: None})
                     popen.assert_called_once()
             finally:

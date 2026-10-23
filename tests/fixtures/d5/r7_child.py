@@ -85,6 +85,22 @@ def effect(data, inherited, mode):
         stack.enter_context(mock.patch.object(child, 'os', local_os))
         stack.enter_context(mock.patch.object(t.submission, 'submit', side_effect=submit))
         stack.enter_context(mock.patch.object(t.protocol, 'pin', pin))
+        if data.get('probe_start'):
+            flock = t.protocol.locks.fcntl.flock
+            start = (directory / 'authority.start.lock').stat()
+            def acquire(fd, mode):
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) != (start.st_dev, start.st_ino):
+                    return flock(fd, mode)
+                try:
+                    flock(fd, mode | t.protocol.locks.fcntl.LOCK_NB)
+                except BlockingIOError:
+                    emit('start-blocked', calls=calls)
+                else:
+                    raise AssertionError('START was available before peer release')
+                flock(fd, mode)
+                emit('start-acquired', calls=calls)
+            stack.enter_context(mock.patch.object(t.protocol.locks.fcntl, 'flock', acquire))
         if mode == 'accounting-error':
             stack.enter_context(mock.patch.object(t.completion._Completion, 'complete',
                 side_effect=t.ledger.EffectError(t.ledger.DURABILITY)))

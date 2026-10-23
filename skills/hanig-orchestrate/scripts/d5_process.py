@@ -8,6 +8,13 @@ Worker role means no inheritance of orchestrator protection; it does not mean
 the worker is cancelled or harmless. No handling of raw fork or descendants
 launched outside these role-specific helpers.
 
+Control descriptors, including DRAIN, must be numbered above 2; duplicate a
+standard-slot source above 2 (for example with F_DUPFD_CLOEXEC, minimum 3) before
+constructing the child's descriptor-bearing argv.
+START refusal means the launching thread's own ownership. Another thread may
+hold START during launch; the child's independent START acquisition blocks its
+admission until that holder releases START. No protected work precedes admission.
+
 R8 does not define a designated bootstrap's argument protocol or adapter
 construction; each designated bootstrap, supplied by U4–U7, owns them. The
 production allowlist is empty until then. No Boundary, Attempt, Receipt or
@@ -27,7 +34,7 @@ DESIGNATED_BOOTSTRAPS = frozenset()
 
 
 def _communication(record, pass_fds, streams):
-    """Check stable exported identities without opening STATE."""
+    """Check exports without opening STATE."""
     protected = set()
     for name in locks._NAMES.values():
         try:
@@ -41,8 +48,6 @@ def _communication(record, pass_fds, streams):
         if standard == 2 and stream == subprocess.STDOUT:
             fd = 1 if streams[1] is None else streams[1]
         fd = fd if isinstance(fd, int) else fd.fileno()
-        if standard in pass_fds and stream is not None and fd != standard:
-            raise AuthorityError("D5 control descriptor conflicts with standard stream")
         if fd >= 0:
             descriptors.append((fd, stream is None))
     for fd, inherited_standard in descriptors:
@@ -61,11 +66,10 @@ def _communication(record, pass_fds, streams):
 def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE):
-    """Call outside STATE with caller-owned shared DRAIN above fd 2.
+    """Call outside STATE; caller owns shared DRAIN and controls above fd 2.
 
-    R1 closes its duplicate on return/failure; R7 adopts the child copy.
-    Duplicate low sources before constructing opaque args. Caller drains and
-    reaps Popen and closes its original without unlocking."""
+    R1 closes its duplicate on return/failure; R7 adopts the child copy. Caller
+    drains/reaps Popen and closes its original without unlocking."""
     if bootstrap not in DESIGNATED_BOOTSTRAPS:
         raise AuthorityError("D5 protected bootstrap is not designated")
     command = [sys.executable]
@@ -75,8 +79,8 @@ def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
     with protocol.pin(directory) as pinned:
         if pinned._record._prior(1) is not None:
             raise AuthorityError("D5 protected launch inside START is forbidden")
-        if inherited_fd in (0, 1, 2):
-            raise AuthorityError("D5 protected DRAIN uses a standard descriptor")
+        if any(fd <= 2 for fd in (inherited_fd,) + pass_fds):
+            raise AuthorityError("D5 control descriptors must be above 2; duplicate before constructing child argv")
         _communication(pinned._record, pass_fds, (stdin, stdout, stderr))
         with pinned.drain(inherited_fd=inherited_fd):
             return subprocess.Popen(command, close_fds=True,
