@@ -204,6 +204,27 @@ class TestAdmission(unittest.TestCase):
                     self.mandate.unlink()
                 self.mandate.write_bytes(MANDATE)
 
+    def test_renamed_checkout_retains_registered_mandate_locator(self):
+        # Round 1 counterexample: OD18 requires the now-missing registered
+        # source to refuse. Rebinding to the caller would violate that rule.
+        before = self.path.read_bytes()
+        moved = self.root / "repo-moved"
+        self.repo.rename(moved)
+        self.assertEqual(registry.lookup(moved, "p", self.state), self.entry)
+        self.assertEqual((moved / "docs/orchestrator-mandate.md").read_bytes(), MANDATE)
+        with mock.patch.object(store, "read", side_effect=AssertionError("store read")), \
+                mock.patch.object(store, "check", side_effect=AssertionError("store check")):
+            with self.assertRaises(FileNotFoundError) as caught:
+                self.consume(args=(moved, "p", self.state))
+        self.assertEqual(caught.exception.filename, str(self.mandate))
+        self.assertEqual(self.boundaries, [])
+        self.assertEqual(self.path.read_bytes(), before)
+        # Measured operator recovery: restore the registered locator intact.
+        moved.rename(self.repo)
+        self.consume()
+        self.assertEqual(self.boundaries, ["started"])
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_identity_verification_is_fresh_and_unknown_refused(self):
         # R5-SKIP-HOST / R5-UNKNOWN-ANCHOR-ACCEPTED. Real verify_anchor consumes
         # changing native observations, not a supplied Boolean authorization.
