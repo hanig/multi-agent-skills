@@ -93,3 +93,9 @@ def worker_spawn(argv):
     return subprocess.Popen(argv, close_fds=True, pass_fds=(),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         bufsize=0)
+
+
+def worker_launch(argv, *, options=None):
+    """Additive R8a async transport; legacy worker_spawn keeps its pipe contract."""
+    from d5_process_launcher import launch
+    return launch(argv, options=options)
