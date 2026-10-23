@@ -1,6 +1,7 @@
 """R8 consumer tests with real execs, pipe barriers and nonblocking flock."""
 from contextlib import ExitStack
 import fcntl
+import errno
 import json
 import os
 from pathlib import Path
@@ -239,6 +240,32 @@ class TestProcess(unittest.TestCase):
             self.assertTrue(event['unchanged'])
         stdout, stderr = proc.communicate(timeout=20)
         self.assertEqual((proc.returncode, stdout, stderr), (0, b'', b''))
+
+    def test_closed_inherited_streams_allow_valid_effect(self):
+        # R8-REJECT-CLOSED-STDIO: retained round-1 counterexample, fresh child.
+        result = subprocess.run([sys.executable, PEER, 'closed-streams', str(self.directory)],
+                                capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(json.loads(result.stdout)['event'], 'closed-streams-completed')
+        self.assertEqual(result.stderr, b'')
+
+    def test_descriptor_inspection_errors_are_not_hidden(self):
+        # R8-IGNORE-EXPLICIT-BAD-FD / R8-IGNORE-STDIO-INSPECTION-ERROR.
+        _, fd = self.holding()
+        real_fstat = os.fstat
+        for number, error, kwargs in ((1000000, errno.EBADF, {'pass_fds': (1000000,)}),
+                                     (2, errno.EIO, {'stderr': None})):
+            def stat(n):
+                if n == number:
+                    raise OSError(error, 'fixture inspection')
+                return real_fstat(n)
+            with mock.patch.object(process, 'DESIGNATED_BOOTSTRAPS', frozenset([BOOTSTRAP])), \
+                    mock.patch.object(os, 'fstat', side_effect=stat), \
+                    mock.patch.object(process.subprocess, 'Popen') as popen:
+                with self.assertRaises(OSError) as caught:
+                    process.protected_spawn(self.directory, fd, BOOTSTRAP, **kwargs)
+                self.assertEqual(caught.exception.errno, error)
+                popen.assert_not_called()
 
     def test_protocol_locks_cannot_be_communication(self):
         # R8-ACCEPT-LOCK-AS-COMM: direct and dup aliases, explicit/stdio paths.
