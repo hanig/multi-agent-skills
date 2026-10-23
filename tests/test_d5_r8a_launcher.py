@@ -84,7 +84,7 @@ class TestLauncher(unittest.TestCase):
     def test_launch_returns_at_barrier_and_timeout_is_not_completion(self):
         handle, release = self.barrier()
         self.assertIsNone(handle.poll(), 'launch waited for exit')
-        with self.assertRaises(subP.TimeoutExpired):
+        with self.assertRaises(subprocess.TimeoutExpired):
             handle.wait(.01)
         self.assertIsNone(handle.poll())
         release.touch()
@@ -116,7 +116,7 @@ class TestLauncher(unittest.TestCase):
         path.write_bytes(b'prior\n')
         for mode, expected in (('ab', b'prior\ninputerror'), ('wb', b'inputerror')):
             h = self.launch('echo', stdin=b'input', stdout=L.Log(path, mode),
-                            stderr=subP.STDOUT)
+                            stderr=subprocess.STDOUT)
             self.eq(h.wait(5), 0)
             self.eq(path.read_bytes(), expected)
             with self.assertRaises(ValueError):
@@ -124,14 +124,14 @@ class TestLauncher(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.launch('echo', stdout=L.Log(path, 'xb'))
         fresh = self.root / 'fresh'
-        h = self.launch('echo', stdout=L.Log(fresh, 'xb'), stdin=subP.PIPE,
-                        stderr=subP.DEVNULL)
+        h = self.launch('echo', stdout=L.Log(fresh, 'xb'), stdin=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL)
         h.stdin.write(b'pipe input')
         h.close_stdin()
         self.assertTrue(h.stdin.closed)
         self.eq(h.wait(5), 0)
         self.eq(fresh.read_bytes(), b'pipe input')
-        h = self.launch('echo', stdout=subP.DEVNULL)
+        h = self.launch('echo', stdout=subprocess.DEVNULL)
         self.eq(h.wait(5), 0)  # DEVNULL stdin delivers EOF.
 
     def test_cancel_close_and_launch_failure_cleanup(self):
@@ -153,7 +153,7 @@ class TestLauncher(unittest.TestCase):
                 L.launch([str(self.root / 'absent')])
         self.eq(len(files), 2)
         self.assertTrue(all(f.closed for f in files))
-        h = self.launch('barrier', self.root / 'r2', self.root / 'never', stdin=subP.PIPE)
+        h = self.launch('barrier', self.root / 'r2', self.root / 'never', stdin=subprocess.PIPE)
         h.close()
         self.assertLess(h.poll(), 0)
         self.assertTrue(h.stdin.closed)
@@ -205,7 +205,7 @@ class TestLauncher(unittest.TestCase):
             h = L._launch(self.argv('barrier', self.root / 'r', self.root / 'x'),
                                  _protected_fd=fd)
             self.addCleanup(h.close)
-            with self.assertRaises(subP.TimeoutExpired):
+            with self.assertRaises(subprocess.TimeoutExpired):
                 h.wait(.01)
             h.close()
             probe = os.open(directory / 'authority.drain.lock', os.O_RDWR)
@@ -222,7 +222,7 @@ class TestLauncher(unittest.TestCase):
         directory = self.root / 'record'
         directory.mkdir(mode=0o700)
         seen = []
-        popen = subP.Popen
+        popen = subprocess.Popen
         def real_spawn(*args, **kwargs):
             child = popen(*args, **kwargs)
             seen.append(child)
@@ -239,7 +239,7 @@ class TestLauncher(unittest.TestCase):
         self.assertFalse((self.root / 'effect').exists())
 
     def test_legacy_defaults_equivalent_to_pinned_base(self):
-        source = subP.check_output(['git', 'show', BASE + ':skills/hanig-orchestrate/scripts/d5_P.py'], cwd=ROOT)
+        source = subprocess.check_output(['git', 'show', BASE + ':skills/hanig-orchestrate/scripts/d5_process.py'], cwd=ROOT)
         path = self.root / 'base_P.py'
         path.write_bytes(source)
         spec = importlib.util.spec_from_file_location('r8a_base', path)
