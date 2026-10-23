@@ -1,5 +1,6 @@
 """Pinned U4 inventory evidence, not an effect-enforcement or call-graph proof."""
 import ast
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -91,13 +92,19 @@ class TestManifest(unittest.TestCase):
             for o, n in nodes:
                 self.assertIn(('linear_sync.py', o, n), cited)
 
-    def test_manifest_citations_and_coverage(self):
-        text = MANIFEST.read_text()
+    def manifest(self, text):
         self.citations(text)
         self.coverage(text)
+        self.assertEqual(hashlib.sha256(repr(sorted(CITATION.findall(text))).encode()).hexdigest(),
+            '233c59f60d5de783248d4cc769f1bd7d20bf665d0c278be95536dcb4bc044a8e', 'citation set drift')
+
+    def test_manifest_citations_and_coverage(self):
+        self.manifest(MANIFEST.read_text())
 
     def test_citation_drift(self):
         text = MANIFEST.read_text()
+        with self.assertRaisesRegex(AssertionError, 'citation set drift'):
+            self.manifest(text.replace('S:_submit:1564,1569,1572', 'S:_submit:1564,1569,1573'))
         with self.assertRaisesRegex(AssertionError, 'unpinned'):
             self.citations(text.replace(BASE, 'HEAD'))
         with self.assertRaisesRegex(AssertionError, 'stale citation'):
