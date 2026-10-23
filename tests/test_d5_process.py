@@ -135,13 +135,16 @@ class TestProcess(unittest.TestCase):
             os.set_inheritable(extra, True)
         before = {str(n): identity(n) for n in (fd, read) + forbidden}
         self.data['inspect_fds'] = list(map(int, before))
-        proc = self.launch(fd, pass_fds=(read,))
+        with mock.patch.object(process.subprocess, 'Popen', wraps=subprocess.Popen) as launched:
+            proc = self.launch(fd, pass_fds=(read,))
         adopted = self.event(proc, 'adopted')
         self.assertFalse(adopted['inheritable'])
         for n in (fd, read):
             self.assertEqual(adopted['observed'][str(n)], before[str(n)])
         for n in forbidden:
             self.assertNotEqual(adopted['observed'][str(n)], before[str(n)])
+        self.assertIs(launched.call_args.kwargs['close_fds'], True)
+        self.assertEqual(launched.call_args.kwargs['pass_fds'], (fd, read))
         self.complete_effect(proc)
         self.finish(proc)
 
@@ -181,14 +184,12 @@ class TestProcess(unittest.TestCase):
         before = descriptors()
         imported = []
         duplicate = os.dup
-        local_os = mock.Mock(wraps=os)
         def observe(original):
             result = duplicate(original)
             imported.append(result)
             return result
-        local_os.dup.side_effect = observe
         with mock.patch.object(process, 'DESIGNATED_BOOTSTRAPS', frozenset([BOOTSTRAP])), \
-                mock.patch.object(protocol.locks, 'os', local_os), \
+                mock.patch.object(os, 'dup', side_effect=observe), \
                 mock.patch.object(process.sys, 'executable', str(self.root / 'absent')):
             with self.assertRaises(FileNotFoundError):
                 process.protected_spawn(self.directory, fd, BOOTSTRAP)
@@ -201,7 +202,7 @@ class TestProcess(unittest.TestCase):
     def test_protected_spawn_inside_start_refused(self):
         # R8-SPAWN-UNDER-START: with and without a preexisting shared holder.
         with protocol.pin(self.directory) as record:
-            for held in (False, True):
+            for held in (True, False):
                 with ExitStack() as stack:
                     fd = stack.enter_context(record.drain()) if held else -1
                     stack.enter_context(record.start())

@@ -24,11 +24,19 @@ def wait_for(word):
 def effect(data, inherited, mode):
     directory = Path(data['directory'])
     calls, order = [], []
+    observed = {}
     real_submit, real_pin = t.submission.submit, t.protocol.pin
     local_os = mock.Mock(wraps=os)
     def noninherit(fd, flag):
         order.append('set_inheritable')
-        return os.set_inheritable(fd, flag)
+        os.set_inheritable(fd, flag)
+        # Inspect before R1 reopens the directory or reuses closed fd numbers.
+        for candidate in data.get('inspect_fds', []):
+            try:
+                info = os.fstat(candidate)
+                observed[str(candidate)] = [info.st_dev, info.st_ino]
+            except OSError:
+                observed[str(candidate)] = None
     local_os.set_inheritable.side_effect = noninherit
 
     @contextmanager
@@ -41,13 +49,6 @@ def effect(data, inherited, mode):
 
     def submit(*args, **kwargs):
         assert not any(rank > 0 for _, rank, _, _ in t.protocol.locks._held())
-        observed = {}
-        for fd in data.get('inspect_fds', []):
-            try:
-                info = os.fstat(fd)
-                observed[str(fd)] = [info.st_dev, info.st_ino]
-            except OSError:
-                observed[str(fd)] = None
         emit('adopted', inheritable=os.get_inheritable(inherited), pid=os.getpid(),
              observed=observed)
         wait_for('request')
