@@ -1,6 +1,7 @@
 """Pinned U4 inventory evidence, not an effect-enforcement or call-graph proof."""
 import ast
 import copy
+from collections import Counter
 from functools import lru_cache
 import hashlib
 import io
@@ -88,6 +89,16 @@ D.run_merge_preconditions C.run_pinned C.output_evidence C.rmtree*2 D.run_pinned
 C.copyfile C.chmod C.mkdir C.symlink_to C._observe_execution C.runner C.rmtree C._isolated_git*2
 """
 
+# Minimum occurrence counts in the same sorted-site order. Extra repetitions
+# and regrouped comma lists remain valid; replacing a duplicate must not vanish
+# when citations are deduplicated for semantic and sink checks.
+MULTIPLICITIES = """
+1*20 2 1*25 2 1 2 1*6 2 1*3 2 1*32 2*2 1*11 2 1 3 1*3 3 1*2 2*2 1*94
+2 1*18 3 1*11 3 1*2 3 1*5 2 1*3 2 1*3 3 1*8 2 1*9 2 1*6 2 1*6 2 1*7 2
+1*3 2 1*7 2 1 2*3 1*8 2 1*2 2 1*3 4 1*8 2*2 1 3*2 4 2 1*2 2 1 2 1*9 3
+1*18 2 1*4 2*2 1*46 2 1*32
+"""
+
 
 def construct(node):
     if isinstance(node, ast.Call):
@@ -131,6 +142,23 @@ def calls(tree):
         for child in ast.iter_child_nodes(node):
             yield from visit(child, owner)
     return list(visit(tree))
+
+
+def citation_mutations(text):
+    """Mutate each expanded occurrence, including duplicates, independently."""
+    for occurrence, match in enumerate(CITATION.finditer(text)):
+        alias, owner, numbers = match.groups()
+        for item, digits in enumerate(re.finditer(r'\d+', numbers)):
+            start, end = match.start(3) + digits.start(), match.start(3) + digits.end()
+            label = '%s/%s %s:%s:%s' % (occurrence, item, alias, owner, digits[0])
+            for delta in (-1, 1):
+                yield label + ' shift %s' % delta, (
+                    text[:start] + str(int(digits[0]) + delta) + text[end:])
+            # Change only this expanded citation, retaining its siblings.
+            changed = ['%s:%s:%s' % (alias, '__wrong_function__' if i == item else owner, n)
+                       for i, n in enumerate(numbers.split(','))]
+            yield label + ' wrong function', (
+                text[:match.start()] + '; '.join(changed) + text[match.end():])
 
 
 class TestManifest(unittest.TestCase):
@@ -212,11 +240,58 @@ class TestManifest(unittest.TestCase):
         sites = self.citations(text)
         self.assertEqual(hashlib.sha256(repr(sorted(sites)).encode()).hexdigest(),
             'f3174e9e753a31e4d5171d04566f42cc5e11f0a93b7f810f095b24b586f53740', 'citation set drift')
+        counts = Counter()
+        for alias, owner, numbers in CITATION.findall(text):
+            file = ALIASES.get(alias, alias)
+            if not file.endswith('.py'):
+                file += '.py'
+            counts.update((file, owner, int(n)) for n in numbers.split(','))
+        minimums = []
+        for word in MULTIPLICITIES.split():
+            count, _, repeat = word.partition('*')
+            minimums.extend([int(count)] * int(repeat or 1))
+        self.assertEqual(len(sites), len(minimums), 'occurrence coverage drift')
+        for site, minimum in zip(sorted(sites), minimums):
+            self.assertGreaterEqual(counts[site], minimum, 'citation occurrence drift: %s' % (site,))
         self.semantics(sites)
         self.coverage(text)
 
     def test_manifest_citations_and_coverage(self):
         self.manifest(MANIFEST.read_text())
+
+    def test_every_citation_mutation(self):
+        for label, changed in citation_mutations(MANIFEST.read_text()):
+            with self.subTest(mutation=label), self.assertRaises(AssertionError):
+                self.manifest(changed)
+
+    def test_every_construct_mutation(self):
+        sites = self.citations(MANIFEST.read_text())
+        tokens = []
+        for word in TOKENS.split():
+            name, _, count = word.partition('*')
+            tokens.extend([name] * int(count or 1))
+        self.semantics(sites, ' '.join(tokens))
+        for i, site in enumerate(sorted(sites)):
+            changed = tokens[:]
+            changed[i] = 'C.__wrong_construct__'
+            with self.subTest(site=site), self.assertRaisesRegex(AssertionError, 'expects'):
+                self.semantics(sites, ' '.join(changed))
+
+    def test_corrected_anchor_semantics(self):
+        # Destinations came from the enhanced guard's BASE spans, not guesses.
+        repairs = '''d5_admission.py:_validate_locked:90:91
+        d5_admission.py:_validate_locked:98:92 d5_effect_child.py:bootstrap:50:51
+        d5_submission.py:submit:110:111 d5_submission.py:submit:124:126
+        d5_submission.py:submit:144:145 linear_sync.py:confirm_comment:760:757
+        linear_sync.py:drain_locked:1009:1012 linear_sync.py:drain_locked:1030:1033
+        skill_paths.py:loaded_skill_root:45:46 swarm_dispatch.py:_isolation_submission:184:185
+        verify.py:candidate_merge_basis:670:671'''
+        sites = self.citations(MANIFEST.read_text())
+        for repair in repairs.split():
+            file, owner, old, new = repair.split(':')
+            changed = sites - {(file, owner, int(new))} | {(file, owner, int(old))}
+            with self.subTest(repair=repair), self.assertRaisesRegex(AssertionError, 'expects'):
+                self.semantics(changed)
 
     def test_citation_drift(self):
         text = MANIFEST.read_text()
