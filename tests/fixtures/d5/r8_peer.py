@@ -91,6 +91,51 @@ def standard_slots(root):
                  spawned=spawned, unchanged=unchanged)
 
 
+def closed_streams(root):
+    from tests.test_d5_process import TestProcess
+    case = TestProcess()
+    case.setUp()
+    try:
+        case.setup_effect()
+        _, fd = case.holding()
+        saved = [(n, os.dup(n)) for n in (0, 2)]
+        try:
+            os.close(0)
+            os.close(2)
+            proc = case.launch(fd, stderr=None)
+        finally:
+            for target, copy in saved:
+                os.dup2(copy, target)
+                os.close(copy)
+        case.event(proc, 'adopted')
+        case.stack.close()
+        case.assertEqual(case.probe(), 'blocked')
+        case.complete_effect(proc)
+        case.assertEqual(case.probe(), 'available')
+        case.send(proc, 'exit')
+        stdout, stderr = proc.communicate(timeout=20)
+        case.assertEqual((proc.returncode, stdout, stderr), (0, b'', None))
+        # Sweep the other inherited slots in an isolated process. Popen is a
+        # spy here because R7's fixture protocol needs usable stdin/stdout.
+        _, fd = case.holding()
+        for stream in ('stdin', 'stdout', 'stderr'):
+            saved = [(n, os.dup(n)) for n in (0, 1, 2)]
+            try:
+                for target, _ in saved:
+                    os.close(target)
+                with mock.patch.object(process, 'DESIGNATED_BOOTSTRAPS', frozenset([BOOTSTRAP])), \
+                        mock.patch.object(process.subprocess, 'Popen') as popen:
+                    process.protected_spawn(case.directory, fd, BOOTSTRAP, **{stream: None})
+                    popen.assert_called_once()
+            finally:
+                for target, copy in saved:
+                    os.dup2(copy, target)
+                    os.close(copy)
+    finally:
+        case.doCleanups()
+    emit('closed-streams-completed')
+
+
 def installer(raw):
     directory = Path(json.loads(raw)['directory'])
     record = t.store.read(directory)
@@ -126,4 +171,5 @@ def installer(raw):
 
 if __name__ == '__main__':
     {'setup': setup, 'ancestor': ancestor, 'worker': worker,
-     'installer': installer, 'standard-slots': standard_slots}[sys.argv[1]](sys.argv[2])
+     'installer': installer, 'standard-slots': standard_slots,
+     'closed-streams': closed_streams}[sys.argv[1]](sys.argv[2])

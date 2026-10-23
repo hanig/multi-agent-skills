@@ -13,6 +13,7 @@ construction; each designated bootstrap, supplied by U4–U7, owns them. The
 production allowlist is empty until then. No Boundary, Attempt, Receipt or
 completion capability is transferred by this module.
 """
+import errno
 import os
 import subprocess
 import sys
@@ -38,14 +39,21 @@ def _communication(record, pass_fds, streams):
         except FileNotFoundError:
             continue
         protected.add((info.st_dev, info.st_ino))
-    descriptors = list(pass_fds)
+    descriptors = [(fd, False) for fd in pass_fds]
     for standard, stream in enumerate(streams):
         fd = standard if stream is None else stream
         fd = fd if isinstance(fd, int) else fd.fileno()
         if fd >= 0:
-            descriptors.append(fd)
-    for fd in descriptors:
-        info = os.fstat(fd)
+            descriptors.append((fd, stream is None))
+    for fd, inherited_standard in descriptors:
+        try:
+            info = os.fstat(fd)
+        except OSError as exc:
+            # None preserves a closed standard stream too. Explicit fds and
+            # other inspection failures must still fail before spawning.
+            if inherited_standard and exc.errno == errno.EBADF:
+                continue
+            raise
         if (info.st_dev, info.st_ino) in protected:
             raise AuthorityError("D5 communication descriptor is a protocol lock")
 
