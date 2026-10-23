@@ -353,6 +353,19 @@ class TestAdmission(unittest.TestCase):
                     self.refuse("^D5 is inactive$", lambda: self.validate(pinned))
                     self.active.return_value = True
         self.refuse("^D5 admission requires START$", lambda: self.validate(pinned))
+        with protocol.pin(self.directory) as live, live.start():
+            self.refuse("^D5 admission requires START$", lambda: self.validate(pinned))
+
+    def test_invalidation_persistence_failure_propagates(self):
+        # R5-HIDE-PERSISTENCE-FAILURE: no successful decision or generic mandate
+        # refusal can conceal an unconfirmed invalidation write.
+        self.mandate.write_bytes(b"changed")
+        with mock.patch.object(store, "_write", side_effect=OSError("fixture durability")):
+            with self.assertRaisesRegex(authority.AuthorityError, "durability is unconfirmed"):
+                self.consume()
+        self.assertEqual(self.boundaries, [])
+        self.assertIsNone(store.read(self.directory)["invalidation"])
+        self.refuse("^D5 mandate changed$")
 
     def test_validation_result_cannot_submit(self):
         # R5-PERMISSION-TICKET: no returned capability or effect from checking.
