@@ -1,14 +1,13 @@
-"""R8a transport; no production callers or effect completion.
+"""Opt-in transport; no production callers or effect completion.
 
 Supported envelope and accepted limits
 -------------------------------------
-Only required option families. Cancellation covers the live child/group;
-escaped descendants and writes after leader exit are excluded. Timeout proves
-neither descendant nor remote termination. Capture is file-backed; disk capacity
-is caller-budgeted. Logs require regular files, with no final symlink or fd alias.
-No inherited stdio/fds, shell text or callbacks. stdin is bytes/DEVNULL/PIPE;
-the pipe is borrowed, closed by close_stdin()/close(). Captures live until close.
-R8b must authorize the private borrowed fd and retain parent custody.
+Single-owner. Capture is file-backed; caller budgets disk; reads are bounded.
+Wait returns local status or TimeoutExpired. Cancel covers the live child/group;
+escaped descendants and post-exit writes are excluded. Logs append; wb truncates,
+xb exclusively creates, ab reuses. Only regular logs, no final symlinks/fd aliases.
+stdin: bytes/DEVNULL/borrowed PIPE. close owns stdin/captures, never the private fd;
+R8b must authorize that fd and retain parent custody.
 """
 from dataclasses import dataclass
 import os
@@ -17,16 +16,13 @@ import stat
 import subprocess
 import tempfile
 
-
 CAPTURE = object()
 MAX_READ = 1024 * 1024
-
 
 @dataclass(frozen=True)
 class Log:
     path: object
     mode: str = "ab"
-
 
 @dataclass(frozen=True)
 class Options:
@@ -37,91 +33,81 @@ class Options:
     stderr: object = CAPTURE
     new_session: bool = False
 
-
 class Handle:
-    """Single-owner transport. Use a context or explicitly close after use."""
 
     def __init__(self, process, captures, new_session):
-        self._process = process
-        self._captures = captures
-        self._new_session = new_session
+        self._p = process
+        self._files = captures
+        self._session = new_session
         self._closed = False
 
     @property
-    def pid(self):
-        return self._process.pid
+    def pid(self): return self._p.pid
 
     @property
-    def stdin(self):
-        return self._process.stdin
+    def stdin(self): return self._p.stdin
 
     def close_stdin(self):
         if self.stdin is not None and not self.stdin.closed:
             self.stdin.close()
 
-    def poll(self):
-        """None means local running/unknown; an integer is local exit only."""
-        return self._process.poll()
+    def poll(self): return self._p.poll()
 
-    def wait(self, timeout=None):
-        """Reap the local child; TimeoutExpired leaves it alive and owned."""
-        return self._process.wait(timeout=timeout)
+    def wait(self, timeout=None): return self._p.wait(timeout=timeout)
 
     def read(self, stream, *, offset=0, limit=65536):
-        """Read at most MAX_READ bytes; empty while running need not mean EOF."""
         if type(offset) is not int or offset < 0:
-            raise ValueError("offset must be a nonnegative integer")
+            raise ValueError("invalid offset")
         if type(limit) is not int or not 0 < limit <= MAX_READ:
-            raise ValueError("limit must be in 1..MAX_READ")
+            raise ValueError("invalid read limit")
         return os.pread(self._capture(stream).fileno(), limit, offset)
 
-    def size(self, stream):
-        return os.fstat(self._capture(stream).fileno()).st_size
+    def size(self, stream): return os.fstat(self._capture(stream).fileno()).st_size
 
     def _capture(self, stream):
         if self._closed:
             raise ValueError("transport is closed")
-        if stream not in self._captures:
+        if stream not in self._files:
             raise ValueError("stream was not captured")
-        return self._captures[stream]
+        return self._files[stream]
 
     def cancel(self):
-        """SIGKILL the live child/group; wait() still must reap the child."""
         if self.poll() is None:
             try:
-                if self._new_session:
+                if self._session:
                     os.killpg(self.pid, signal.SIGKILL)
                 else:
-                    self._process.kill()
+                    self._p.kill()
             except ProcessLookupError:
                 pass
 
     def close(self):
-        """Cancel/reap, then close owned streams; never close borrowed protection."""
         if not self._closed:
             self.cancel()
             self.wait()
             self.close_stdin()
-            for file in self._captures.values():
+            for file in self._files.values():
                 file.close()
             self._closed = True
 
-    def __enter__(self):
-        return self
+    def __enter__(self): return self
 
-    def __exit__(self, *exc):
-        self.close()
-
+    def __exit__(self, *exc): self.close()
 
 def _log(log):
     path = os.fspath(log.path)
-    directory = os.open(os.path.dirname(path) or '.', os.O_RDONLY | os.O_DIRECTORY)
+    directory = os.open(os.path.dirname(path) or '.', os.O_DIRECTORY |
+                        getattr(os, 'O_SEARCH', getattr(os, 'O_PATH', os.O_RDONLY)))
     try:
-        here, magic = os.fstat(directory), os.stat('/dev/fd')
-        if (here.st_dev, here.st_ino) == (magic.st_dev, magic.st_ino):
+        here = os.fstat(directory)
+        try:
+            magic = os.stat('/dev/fd')
+        except FileNotFoundError:
+            magic = None
+        if magic and (here.st_dev, here.st_ino) == (magic.st_dev, magic.st_ino):
             raise ValueError('logs cannot export descriptors')
-        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
-        flags |= {'ab': os.O_APPEND, 'wb': os.O_TRUNC, 'xb': os.O_EXCL}[log.mode]
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_APPEND
+        flags |= {'ab': 0, 'wb': os.O_TRUNC, 'xb': os.O_EXCL}[log.mode]
         fd = os.open(os.path.basename(path), flags, 0o666, dir_fd=directory)
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -133,45 +119,40 @@ def _log(log):
     finally:
         os.close(directory)
 
-
 def launch(argv, *, options=None):
-    """Worker launch: argv only, no inherited protection or arbitrary fds."""
     return _launch(argv, options=options)
 
-
 def _launch(argv, *, options=None, _protected_fd=None):
-    """Private R8b seam: borrow one already-authorized, caller-retained fd."""
     options = Options() if options is None else options
     if not isinstance(options, Options):
-        raise TypeError("options must be Options")
+        raise TypeError("expected Options")
     if isinstance(argv, (str, bytes)):
-        raise TypeError("argv must be a sequence, not shell text")
+        raise TypeError("argv requires a sequence")
     argv = tuple(argv)
     if not argv or any(not isinstance(arg, (str, bytes, os.PathLike)) for arg in argv):
-        raise ValueError("argv must contain executable and arguments")
+        raise ValueError("invalid argv")
     if type(options.new_session) is not bool:
         raise ValueError("new_session must be bool")
-    # Reject descriptor options before opening logs.
     if not (isinstance(options.stdin, bytes) or
             type(options.stdin) is int and options.stdin in
             (subprocess.DEVNULL, subprocess.PIPE)):
-        raise ValueError("stdin requires bytes, PIPE or DEVNULL")
+        raise ValueError("invalid stdin option")
     for name, value in (("stdout", options.stdout), ("stderr", options.stderr)):
         if isinstance(value, Log):
             if value.mode not in ("ab", "wb", "xb"):
-                raise ValueError("log mode requires ab, wb or xb")
+                raise ValueError("invalid log mode")
             os.fspath(value.path)
         elif not (value is CAPTURE or type(value) is int and
                   (value == subprocess.DEVNULL or
                    name == "stderr" and value == subprocess.STDOUT)):
-            raise ValueError("output requires CAPTURE, Log, DEVNULL or stderr STDOUT")
+            raise ValueError("invalid output option")
     cwd = None if options.cwd is None else os.fspath(options.cwd)
     env = None if options.env is None else dict(options.env)
     if env is not None and any(not isinstance(k, str) or not isinstance(v, str)
                                for k, v in env.items()):
-        raise ValueError("environment requires string keys and values")
+        raise ValueError("environment requires str keys/values")
     if _protected_fd is not None and (type(_protected_fd) is not int or _protected_fd <= 2):
-        raise ValueError("private handoff requires a descriptor above 2")
+        raise ValueError("private fd must be above 2")
     owned, captures = [], {}
     proc = None
     try:
