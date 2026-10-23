@@ -56,7 +56,7 @@ class Operation:
 
 
 class Boundary(ABC):
-    """Trusted explicit adapter."""
+    """Explicit adapter: subclass or register a named, trusted implementation."""
 
     @abstractmethod
     def start(self, operation):
@@ -100,8 +100,8 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
         capability, accounting_error = None, None
         outcome, response_error = None, None
         try:
-            try:
-                with pinned.start():
+            with pinned.start():
+                try:
                     admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
                     attempt = ledger.prepare(checkout, plan_id, state_dir,
                         record_id=grant_id, custody=dict(generation=generation,
@@ -111,27 +111,27 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                     admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
                     A = True
                     state = boundary.start(operation)
-                S = True
-            except BaseException as exc:
-                if not A:
-                    if attempt is not None:
-                        ledger._classify(attempt, "not_submitted")
-                    raise
-                start_error = exc
-            if type(state) is not Initiation:
-                state = Initiation.UNCERTAIN
-                start_error = ValueError("D5 boundary returned an invalid initiation")
-            try:
-                if state is Initiation.SUBMITTED:
-                    capability = completion.bind(ledger._classify(attempt, "submitted"))
-                elif state is Initiation.NOT_SUBMITTED:
+                except BaseException as exc:
+                    start_error = exc
+            S = True
+            if not A:
+                if attempt is not None:
                     ledger._classify(attempt, "not_submitted")
-                    N = True
-            except BaseException as exc:
-                accounting_error = exc
+            else:
+                if type(state) is not Initiation:
+                    state = Initiation.UNCERTAIN
+                    start_error = ValueError("D5 boundary returned an invalid initiation")
+                try:
+                    if state is Initiation.SUBMITTED:
+                        capability = completion.bind(ledger._classify(attempt, "submitted"))
+                    elif state is Initiation.NOT_SUBMITTED:
+                        ledger._classify(attempt, "not_submitted")
+                        N = True
+                except BaseException as exc:
+                    accounting_error = exc
         finally:
             # Drain the initiated operation on interruption too.
-            if A and state is not Initiation.NOT_SUBMITTED:
+            if S and A and state is not Initiation.NOT_SUBMITTED:
                 try:
                     outcome = boundary.finish()
                     ledger._outcome(outcome)
@@ -144,8 +144,6 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                     else:
                         outcome = capability.complete(outcome)
                         C = True
-        # No handler/finalizer closes the holder. Missing facts retain it even
-        # when uncertainty was durably recorded or an interrupt was caught.
         if H and S and (not A or N or (F and C)):
             os.close(holder)
         if accounting_error is not None:
