@@ -164,6 +164,7 @@ class TestLauncher(unittest.TestCase):
         fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
         self.stack.callback(os.close, fd)
         h = self.launch('group', ready, fifo, new_session=True)
+        drained = False
         try:
             self.await_file(ready)
             self.eq(os.read(fd, 1), b'r')
@@ -172,11 +173,13 @@ class TestLauncher(unittest.TestCase):
             readable, _, _ = select.select([fd], [], [], 3)
             self.eq(readable, [fd], 'descendant writer survived cancellation')
             self.eq(os.read(fd, 1), b'')
+            drained = True
         finally:
-            try:
-                os.killpg(h.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            if not drained:
+                try:
+                    os.killpg(h.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def test_worker_options_refuse_descriptor_exports_before_logs(self):
         directory = self.root / 'record'
