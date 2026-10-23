@@ -3,6 +3,7 @@ from contextlib import contextmanager, ExitStack
 from dataclasses import FrozenInstanceError
 import fcntl
 import json
+import inspect
 import os
 from pathlib import Path
 import subprocess
@@ -121,7 +122,6 @@ class TestSubmission(unittest.TestCase):
         return results[0]
 
     def test_boundary_after_fresh_validation_under_start(self):
-        # R6-RELEASE-START-BEFORE-BOUNDARY / R6-SUBMIT-BEFORE-PREPARE.
         events = []
         validate, prepare = admission._validate_locked, ledger.prepare
 
@@ -155,7 +155,6 @@ class TestSubmission(unittest.TestCase):
         self.assertEqual(row["binding"]["custody"]["generation"], 1)
 
     def test_revocation_wins_before_boundary(self):
-        # U3-M1/M2: pause outside START, record control, then admit afresh.
         for invalidation in (False, True):
             (self.directory / store.RECORD_NAME).write_bytes(authority.encode(self.original))
             ready, resume = threading.Event(), threading.Event()
@@ -203,7 +202,6 @@ class TestSubmission(unittest.TestCase):
         self.assertEqual([r["state"] for r in self.rows()], ["attempting"])
 
     def test_final_time_after_prepare_including_equality(self):
-        # U3-M8 / R6-CACHE-ADMISSION. Preparation consumes the remaining lease.
         prepare = ledger.prepare
 
         def prepared(*args, **kwargs):
@@ -218,7 +216,6 @@ class TestSubmission(unittest.TestCase):
         self.assertEqual([r["state"] for r in self.rows()], ["not_submitted"])
 
     def test_response_wait_does_not_hold_start(self):
-        # U3-M3/M4 / R6-WAIT-UNDER-START. Real revoke persists before release.
         waiting, release, persisted = threading.Event(), threading.Event(), threading.Event()
 
         def finish():
@@ -251,7 +248,6 @@ class TestSubmission(unittest.TestCase):
         self.assertEqual(self.boundary.calls, [])
 
     def test_submission_lifetime_retains_drain(self):
-        # R6-DROP-DRAIN: independent EX probes, including all ledger writes.
         seen = []
         write = ledger._write
 
@@ -271,7 +267,6 @@ class TestSubmission(unittest.TestCase):
         self.assertEqual(self.probe("drain"), "available")
 
     def test_ambiguous_start_is_not_not_submitted(self):
-        # R6-EXCEPTION-MEANS-NOT-SUBMITTED, including BaseException siblings.
         for exception in (RuntimeError("ambiguous"), KeyboardInterrupt("interrupted")):
             self.boundary = DeterministicBoundary()
 
@@ -299,7 +294,6 @@ class TestSubmission(unittest.TestCase):
                              state is submission.Initiation.NOT_SUBMITTED else ["start", "finish"])
 
     def test_opaque_helper_refused(self):
-        # R6-OPAQUE-ACCEPTED: even a duck-typed opaque helper is not opted in.
         class Opaque:
             start = mock.Mock(return_value=submission.Initiation.SUBMITTED)
             finish = mock.Mock(return_value=dict(OK))
@@ -314,7 +308,6 @@ class TestSubmission(unittest.TestCase):
         self.assertEqual(self.rows(), [])
 
     def test_next_effect_requires_fresh_admission(self):
-        # R6-CHAIN-EFFECT: response data supplies no automatic next submission.
         self.boundary.on_finish = lambda: dict(OK, detail="next effect B requested")
         self.submit()
         self.assertEqual([c[0] for c in self.boundary.calls], ["start", "finish"])
@@ -341,7 +334,6 @@ class TestSubmission(unittest.TestCase):
         self.assertEqual(self.probe("drain"), "available")
 
     def test_accounting_failure_still_finishes_and_never_reports_success(self):
-        # R6-HIDE-ACCOUNTING / R6-ABANDON-RESPONSE: sweep bind/classify/complete.
         for phase in ("submitted", "completed", "bind"):
             for published in (False, True):
                 self.boundary = DeterministicBoundary()
@@ -384,7 +376,6 @@ class TestSubmission(unittest.TestCase):
         self.active.return_value = True
 
     def test_inactive_and_absent_registration_refuse_before_work(self):
-        # R6-BYPASS-INACTIVE / R6-ABSENT-REGISTRATION.
         self.active.return_value = False
         with mock.patch.object(registry, "lookup", side_effect=AssertionError("inactive lookup")):
             with self.assertRaisesRegex(authority.AuthorityError, "^D5 is inactive$"):
@@ -396,10 +387,46 @@ class TestSubmission(unittest.TestCase):
                 self.submit()
         self.assertEqual(self.boundary.calls, [])
 
+    def test_ambient_start_refused_before_effect(self):
+        with protocol.pin(self.directory) as record, record.drain(), record.start():
+            with self.assertRaisesRegex(authority.AuthorityError, "^D5 submission inside START is forbidden$"):
+                self.submit()
+            self.assertEqual(self.probe("start"), "blocked")
+        self.assertEqual(self.boundary.calls, [])
+        self.assertEqual(self.rows(), [])
+
+    def test_post_start_interrupt_finishes_under_drain(self):
+        lines, first = inspect.getsourcelines(submission.submit)
+        target = first + next(i for i, line in enumerate(lines)
+                              if line.strip() == "if type(state) is not Initiation:")
+        fired = []
+        def interrupt(frame, event, arg):
+            if event == "line" and frame.f_code is submission.submit.__code__ and frame.f_lineno == target:
+                sys.settrace(None)
+                fired.append(True)
+                raise KeyboardInterrupt("post-start")
+            return interrupt
+        def finish():
+            self.assertEqual(self.probe("drain"), "blocked")
+            self.assertEqual(self.probe("start"), "available")
+            return dict(OK)
+        self.boundary.on_finish = finish
+        previous = sys.gettrace()
+        try:
+            sys.settrace(interrupt)
+            with self.assertRaisesRegex(KeyboardInterrupt, "post-start"):
+                self.submit()
+        finally:
+            sys.settrace(previous)
+        self.assertEqual(fired, [True])
+        self.assertEqual([c[0] for c in self.boundary.calls], ["start", "finish"])
+        self.assertEqual(self.rows()[0]["state"], "unknown")
+        self.assertEqual(self.probe("drain"), "available")
+
     def test_immutable_operation_subclass(self):
-        class MyOp(submission.Operation):
-            pass
-        self.operation = MyOp("A", "fixture", self.operation.scope, self.operation.intent)
+        class MyOp(submission.Operation): pass
+        class MyBytes(bytes): pass
+        self.operation = MyOp("A", "fixture", self.operation.scope, MyBytes(self.operation.intent))
         with self.assertRaises(FrozenInstanceError):
             self.operation.intent = b"changed"
         self.assertEqual(self.submit().initiation, submission.Initiation.SUBMITTED)
@@ -407,7 +434,6 @@ class TestSubmission(unittest.TestCase):
         self.assertEqual(self.rows()[0]["state"], "completed")
 
     def test_immutable_operation_and_invalid_initiation(self):
-        # R6-MUTABLE-INTENT / R6-INVALID-INITIATION.
         with self.assertRaises(FrozenInstanceError):
             self.operation.intent = b"changed"
         fields = dict(request_id="A", kind="fixture", scope=self.operation.scope, intent=b"effect")
