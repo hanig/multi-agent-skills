@@ -122,7 +122,6 @@ class TestProcess(unittest.TestCase):
         self.assertFalse(result['retained'])
 
     def test_protected_spawn_descriptor_allowlist(self):
-        # R8-PASS-START / R8-PASS-STATE / R8-CLOSE-FDS: observe actual child fds.
         self.setup_effect()
         record, fd = self.holding()
         start = self.opened('authority.start.lock')
@@ -150,7 +149,6 @@ class TestProcess(unittest.TestCase):
         self.finish(proc)
 
     def test_parent_cleanup_preserves_child_drain(self):
-        # R8-PARENT-UNLOCK; also exercise the designated -m module form.
         self.setup_effect()
         _, fd = self.holding()
         proc = self.launch(fd, bootstrap='tests.fixtures.d5.r7_child')
@@ -162,7 +160,6 @@ class TestProcess(unittest.TestCase):
         self.finish(proc)
 
     def test_live_worker_does_not_hold_drain(self):
-        # U3-M7 / R8-PASS-DRAIN-TO-WORKER: ready worker stays at pipe barrier.
         _, fd = self.holding()
         alias = os.dup(fd)
         self.stack.callback(os.close, alias)
@@ -180,7 +177,6 @@ class TestProcess(unittest.TestCase):
         self.finish(proc)
 
     def test_failed_spawn_releases_parent_reference(self):
-        # R8-LEAK-FAILED-SPAWN: real Popen failure after R1 imports its duplicate.
         _, fd = self.holding()
         before = descriptors()
         imported = []
@@ -201,7 +197,6 @@ class TestProcess(unittest.TestCase):
         self.assertEqual(self.probe(), 'available')
 
     def test_protected_spawn_inside_start_refused(self):
-        # R8-SPAWN-UNDER-START: with and without a preexisting shared holder.
         with protocol.pin(self.directory) as record:
             for held in (True, False):
                 with ExitStack() as stack:
@@ -217,7 +212,6 @@ class TestProcess(unittest.TestCase):
                     self.assertEqual(descriptors(), before)
 
     def test_unlisted_bootstrap_refused(self):
-        # R8-ACCEPT-UNLISTED-BOOTSTRAP: no process, no extra reference.
         self.assertEqual(process.DESIGNATED_BOOTSTRAPS, frozenset())
         self.assertIsInstance(process.DESIGNATED_BOOTSTRAPS, frozenset)
         _, fd = self.holding()
@@ -229,7 +223,6 @@ class TestProcess(unittest.TestCase):
         self.assertEqual(descriptors(), before)
 
     def test_standard_descriptor_collision_refused(self):
-        # R8-ACCEPT-STANDARD-DRAIN: subprocess stdio remaps these slots.
         proc = self.own(process.worker_spawn([sys.executable, PEER,
                                              'standard-slots', str(self.directory)]))
         for standard in (0, 1, 2):
@@ -238,19 +231,21 @@ class TestProcess(unittest.TestCase):
             self.assertEqual(event['error'], 'D5 protected DRAIN uses a standard descriptor')
             self.assertFalse(event['spawned'])
             self.assertTrue(event['unchanged'])
+            self.assertEqual(event['implicit'], 'D5 communication descriptor is a protocol lock')
+            self.assertEqual(self.event(proc, 'control-slot')['error'],
+                             'D5 control descriptor conflicts with standard stream')
         stdout, stderr = proc.communicate(timeout=20)
         self.assertEqual((proc.returncode, stdout, stderr), (0, b'', b''))
 
     def test_closed_inherited_streams_allow_valid_effect(self):
-        # R8-REJECT-CLOSED-STDIO: retained round-1 counterexample, fresh child.
-        result = subprocess.run([sys.executable, PEER, 'closed-streams', str(self.directory)],
-                                capture_output=True, timeout=60)
-        self.assertEqual(result.returncode, 0, result.stderr.decode())
-        self.assertEqual(json.loads(result.stdout)['event'], 'closed-streams-completed')
-        self.assertEqual(result.stderr, b'')
+        for mode in ('closed-streams', 'closed-streams-low'):
+            result = subprocess.run([sys.executable, PEER, mode, str(self.directory)],
+                                    capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertEqual(json.loads(result.stdout)['event'], 'closed-streams-completed')
+            self.assertEqual(result.stderr, b'')
 
     def test_descriptor_inspection_errors_are_not_hidden(self):
-        # R8-IGNORE-EXPLICIT-BAD-FD / R8-IGNORE-STDIO-INSPECTION-ERROR.
         _, fd = self.holding()
         real_fstat = os.fstat
         for number, error, kwargs in ((1000000, errno.EBADF, {'pass_fds': (1000000,)}),
@@ -268,7 +263,6 @@ class TestProcess(unittest.TestCase):
                 popen.assert_not_called()
 
     def test_protocol_locks_cannot_be_communication(self):
-        # R8-ACCEPT-LOCK-AS-COMM: direct and dup aliases, explicit/stdio paths.
         _, drain = self.holding()
         for fd in (drain, self.opened('authority.start.lock'), self.opened('authority.lock')):
             alias = os.dup(fd)

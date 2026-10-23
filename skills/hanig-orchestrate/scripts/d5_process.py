@@ -27,11 +27,7 @@ DESIGNATED_BOOTSTRAPS = frozenset()
 
 
 def _communication(record, pass_fds, streams):
-    """Reject protection files masquerading as communication descriptors.
-
-    Compare identities, including dup aliases; never open or acquire STATE.
-    Stable inodes and caller-owned descriptors through spawn are prerequisites.
-    """
+    """Check stable exported identities without opening STATE."""
     protected = set()
     for name in locks._NAMES.values():
         try:
@@ -42,18 +38,22 @@ def _communication(record, pass_fds, streams):
     descriptors = [(fd, False) for fd in pass_fds]
     for standard, stream in enumerate(streams):
         fd = standard if stream is None else stream
+        if standard == 2 and stream == subprocess.STDOUT:
+            fd = 1 if streams[1] is None else streams[1]
         fd = fd if isinstance(fd, int) else fd.fileno()
+        if standard in pass_fds and stream is not None and fd != standard:
+            raise AuthorityError("D5 control descriptor conflicts with standard stream")
         if fd >= 0:
             descriptors.append((fd, stream is None))
     for fd, inherited_standard in descriptors:
         try:
             info = os.fstat(fd)
         except OSError as exc:
-            # None preserves a closed standard stream too. Explicit fds and
-            # other inspection failures must still fail before spawning.
             if inherited_standard and exc.errno == errno.EBADF:
                 continue
             raise
+        if inherited_standard and not os.get_inheritable(fd):
+            continue
         if (info.st_dev, info.st_ino) in protected:
             raise AuthorityError("D5 communication descriptor is a protocol lock")
 
@@ -61,20 +61,11 @@ def _communication(record, pass_fds, streams):
 def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE):
-    """Launch a designated entry with a caller-owned, held shared DRAIN fd.
+    """Call outside STATE with caller-owned shared DRAIN above fd 2.
 
-    Call outside STATE. Refuse this thread's ambient START via R6's ownership
-    check. R1 imports a temporary duplicate and closes it on success/failure;
-    the original number is passed unchanged, and remains owned by the caller.
-    Closing either parent reference must never unlock the shared description.
-    The designated child must adopt through R7 before effect admission.
-    DRAIN must use a descriptor above 2: stdio setup owns slots 0, 1 and 2.
-    For a source in those slots, duplicate it above 2 before constructing args.
-
-    args are opaque argv data. The caller names necessary communication fds
-    separately; they cannot name protocol locks. The returned Popen and its
-    default binary pipes are caller-owned: drain outputs and reap the child.
-    """
+    R1 closes its duplicate on return/failure; R7 adopts the child copy.
+    Duplicate low sources before constructing opaque args. Caller drains and
+    reaps Popen and closes its original without unlocking."""
     if bootstrap not in DESIGNATED_BOOTSTRAPS:
         raise AuthorityError("D5 protected bootstrap is not designated")
     command = [sys.executable]
@@ -94,12 +85,7 @@ def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
 
 
 def worker_spawn(argv):
-    """Launch a worker with no inherited protection or completion capability.
-
-    Fresh binary pipes replace standard streams, and the descriptor allowlist
-    is empty. The caller owns the returned Popen, drains its output and reaps it.
-    This helper supplies neither admission nor cancellation.
-    """
+    """Fresh pipes, no protection/cancellation. Caller drains and reaps."""
     return subprocess.Popen(argv, close_fds=True, pass_fds=(),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         bufsize=0)
