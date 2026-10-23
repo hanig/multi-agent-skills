@@ -108,3 +108,20 @@ This is the canonical ledger of reproduced findings deferred outside a task's de
   5. The same refusal on a supported full checkout's working-tree root, changed operator state, or failure of the written checkout recovery would falsify the bound.
 - Maintainer: The orchestrator.
 - Reassessment triggers: The orchestrator needs to triage a repository it holds only as a bare clone.
+
+### D5 admission: renamed registered checkout
+
+- Issue and unit: ARC-2870, `d5-u3r5-admission` and `d5-u3r5-admission-b`, the pull request that adds `d5_admission.py`.
+- Original verdict and round: REVIEW_FAIL in round 1 on 2026-10-23 (Luna, major, classified in scope; the honest-run counter-claim was refuted).
+- Tested revision: `42bb4d5`.
+- Reproduction: Measured by the worker on Python 3.12.15 and Apple 3.9.6. Renaming the registered checkout keeps the repository inode, so `d5_registry.lookup` through the moved path returns the stored entry with the old `checkout`. Admission raises FileNotFoundError at the old registered mandate path, with zero store reads, zero store checks and zero boundary calls.
+- Consequence bound: Admission refuses before any authority read or mutation. Grant, custody and mandate bytes are unchanged, and the error names the missing registered path. D5 is inactive and nothing calls admission in production.
+- Operator recovery (and demonstration, if required): Restore the checkout to its registered absolute path. Demonstrated by `test_renamed_checkout_retains_registered_mandate_locator`. Recovery remains subject to ordinary expiry and the other admission checks.
+- The five nonblocking answers:
+  1. Affects only D5 admission availability through a moved registered checkout.
+  2. Bounded by the measurement above: no authority read or mutation and no lost work.
+  3. No shared test, verifier or guard is weakened; the regression and mutation R5-REBOUND-REGISTERED-SOURCE are retained.
+  4. Permitted by the mandate's *Findings outside the supported envelope* section, with Sol's concurrence on 2026-10-23, because the orchestrator authored the source rule (ARC-2868-OD18).
+  5. Falsified if a supported workflow renames or moves a registered checkout while its registration is live, or if the refusal ever follows a store or boundary call.
+- Maintainer: The orchestrator.
+- Reassessment triggers: a relocatable mandate-source design, which must preserve the registered source binding rather than infer it from repository topology; a registry re-registration path; U8 activation review; or any reported checkout move under a live registration.

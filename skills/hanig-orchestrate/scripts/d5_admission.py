@@ -9,6 +9,8 @@ merged opener may repair owner permissions in place to 0600; no directory chmod
 or lock-file replacement. Uncontrolled mandate edits and direct store mutations
 are not serialized by this consumer. Unknown host information cannot admit.
 
+The registered checkout stays at the path recorded at registration for the registration's lifetime. A renamed or moved registered checkout makes admission refuse, before any store or boundary call, with the missing registered mandate path in the error; the grant, custody and mandate bytes are unchanged. Operator recovery: restore the checkout to its registered absolute path; recovery remains subject to ordinary expiry and the other admission checks.
+
 Non-claims: checking alone starts nothing and provides no later permission;
 no claim about checks performed by unrelated callers.
 
