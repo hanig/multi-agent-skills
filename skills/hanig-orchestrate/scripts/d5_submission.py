@@ -55,15 +55,15 @@ class Operation:
 
 
 class Boundary(ABC):
-    """Implement deliberately in a named, trusted adapter for one operation."""
+    """Trusted explicit adapter."""
 
     @abstractmethod
     def start(self, operation):
-        """Make one concrete initiation attempt, returning Initiation."""
+        """Return Initiation."""
 
     @abstractmethod
     def finish(self):
-        """Consume the started operation; return the ledger outcome dictionary."""
+        """Consume response; return outcome."""
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,6 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
     request = dict(grant_id=grant_id, session_id=session_id, anchor=anchor,
                    generation=generation, scope=operation.scope)
     with protocol.pin(entry["record_dir"]) as pinned, pinned.drain():
-        # R1 rank 1 is START.
         if pinned._record._prior(1) is not None:
             raise AuthorityError("D5 submission inside START is forbidden")
         attempt, began, state, start_error = None, False, Initiation.UNCERTAIN, None
@@ -102,7 +101,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                         record_id=grant_id, custody=dict(generation=generation,
                         session_id=session_id, anchor_pid=anchor.pid, anchor_start_us=anchor.start_us),
                         kind=operation.kind, scope=json.loads(operation.scope),
-                        correlation={"request_id": operation.request_id, "intent": operation.intent.hex()})
+                        correlation={"request_id": operation.request_id, "intent": bytes.hex(operation.intent)})
                     admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
                     began = True
                     state = boundary.start(operation)

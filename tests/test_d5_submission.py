@@ -425,12 +425,14 @@ class TestSubmission(unittest.TestCase):
 
     def test_immutable_operation_subclass(self):
         class MyOp(submission.Operation): pass
-        class MyBytes(bytes): pass
+        class MyBytes(bytes):
+            def hex(self): return "display"
         self.operation = MyOp("A", "fixture", self.operation.scope, MyBytes(self.operation.intent))
         with self.assertRaises(FrozenInstanceError):
             self.operation.intent = b"changed"
         self.assertEqual(self.submit().initiation, submission.Initiation.SUBMITTED)
         self.assertIs(self.boundary.calls[0][1], self.operation)
+        self.assertEqual(self.rows()[0]["binding"]["correlation"]["intent"], bytes.hex(self.operation.intent))
         self.assertEqual(self.rows()[0]["state"], "completed")
 
     def test_immutable_operation_and_invalid_initiation(self):
