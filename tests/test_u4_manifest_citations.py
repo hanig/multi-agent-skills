@@ -1,5 +1,6 @@
 """Pinned U4 inventory evidence, not an effect-enforcement or call-graph proof."""
 import ast
+import copy
 import hashlib
 import io
 import os
@@ -57,11 +58,11 @@ class TestManifest(unittest.TestCase):
         self.assertIn('Base **' + BASE + '**', text, 'unpinned manifest')
         result = set()
         for alias, owner, numbers in CITATION.findall(text):
-            filename = ALIASES.get(alias, alias)
-            if not filename.endswith('.py'):
-                filename += '.py'
-            self.assertIn(filename, self.trees, 'unknown source: ' + alias)
-            tree = self.trees[filename]
+            file = ALIASES.get(alias, alias)
+            if not file.endswith('.py'):
+                file += '.py'
+            self.assertIn(file, self.trees, 'unknown source: ' + alias)
+            tree = self.trees[file]
             nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef,
                      ast.AsyncFunctionDef)) and n.name == owner.split('.')[-1]]
             if owner == 'module':
@@ -70,18 +71,26 @@ class TestManifest(unittest.TestCase):
             for number in map(int, numbers.split(',')):
                 self.assertTrue(any(n.lineno <= number <= n.end_lineno for n in nodes),
                                 'stale citation: %s:%s:%s' % (alias, owner, number))
-                result.add((filename, owner, number))
+                result.add((file, owner, number))
         self.assertTrue(result)
         return result
 
     def coverage(self, text):
         rows = '\n'.join(line for line in text.splitlines() if line.startswith('|'))
         cited = self.citations('Base **' + BASE + '**\n' + rows)
-        for alias in ('V', 'RV'):
-            filename = ALIASES[alias] + '.py'
-            for owner, line, name in calls(self.trees[filename]):
-                if name in SINKS:
-                    self.assertIn((filename, owner, line), cited,
+        owners = {
+            'S': set(('advance _submit cmd_run cmd_advance cmd_continue cmd_stop_unit '
+                      'cmd_merge cmd_watch_code_terminal _start_code_terminal_watchers').split()),
+            'M': set(('main current_intent abandon cancel_before_request reconcile '
+                      'verify_integration print_tracker_drain').split())}
+        sinks = SINKS | set(('save_state _bind _allocate _archive_code_worktree '
+            'maybe_resume _capture_artifact_basis acquire_lease release_lease '
+            '_fsync_append durable_write acknowledge').split())
+        for alias in ('V', 'RV', 'S', 'M'):
+            file = ALIASES[alias] + '.py'
+            for owner, line, name in calls(self.trees[file]):
+                if name in sinks and (alias not in owners or owner in owners[alias]):
+                    self.assertIn((file, owner, line), cited,
                                   'unclassified sink: %s:%s:%s %s' % (alias, owner, line, name))
         for owner, name in (('confirm_comment', 'query'), ('reconcile_issue', 'query'),
                             ('record_drain_receipt', 'run'), ('project_lock', 'flock'),
@@ -93,10 +102,10 @@ class TestManifest(unittest.TestCase):
                 self.assertIn(('linear_sync.py', o, n), cited)
 
     def manifest(self, text):
-        self.citations(text)
+        sites = self.citations(text)
+        self.assertEqual(hashlib.sha256(repr(sorted(sites)).encode()).hexdigest(),
+            '9de1e65e32aa3c8189fbeb301afcc34d0dd3b01cd554b6235491f4c35561c40e', 'citation set drift')
         self.coverage(text)
-        self.assertEqual(hashlib.sha256(repr(sorted(CITATION.findall(text))).encode()).hexdigest(),
-            '233c59f60d5de783248d4cc769f1bd7d20bf665d0c278be95536dcb4bc044a8e', 'citation set drift')
 
     def test_manifest_citations_and_coverage(self):
         self.manifest(MANIFEST.read_text())
@@ -113,6 +122,30 @@ class TestManifest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, 'unclassified sink'):
             self.coverage(text.replace('V:_observe_execution:1016',
                                        'V:_observe_execution:1026'))
+
+    def test_equivalent_citations(self):
+        text = MANIFEST.read_text()
+        for changed in (text + '\nS:cmd_run:3646\n', text.replace(
+                'S:_submit:1564,1569,1572',
+                'S:_submit:1564; S:_submit:1569; S:_submit:1572')):
+            with self.subTest(changed=changed[-40:]):
+                self.assertEqual(self.citations(text), self.citations(changed))
+                self.manifest(changed)
+
+    def test_coordinator_sink_omission(self):
+        for file, owner in (('swarm.py', 'advance'), ('merge_unit.py', 'reconcile')):
+            with self.subTest(file=file):
+                self.trees = dict(type(self).trees)
+                self.trees[file] = copy.deepcopy(self.trees[file])
+                f = next(n for n in self.trees[file].body
+                         if isinstance(n, ast.FunctionDef) and n.name == owner)
+                extra = ast.parse('subprocess.Popen(["true"])').body[0]
+                ast.increment_lineno(extra, f.end_lineno)
+                f.end_lineno += 1
+                f.body.append(extra)  # AST only; never launch the synthetic child.
+                with self.assertRaisesRegex(AssertionError, 'unclassified sink'):
+                    self.manifest(MANIFEST.read_text())
+        self.trees = type(self).trees
 
     def test_cold_activation_import(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -138,13 +171,13 @@ class TestManifest(unittest.TestCase):
             'M.verify_integration': 'acquire_lease release_lease'}
         for item, names in required.items():
             alias, owner = item.split('.')
-            filename = ALIASES[alias] + '.py'
+            file = ALIASES[alias] + '.py'
             for call in names.split():
-                nodes = [(o, n) for o, n, c in calls(self.trees[filename])
+                nodes = [(o, n) for o, n, c in calls(self.trees[file])
                          if o == owner and c == call]
                 self.assertTrue(nodes, item)
                 for o, n in nodes:
-                    self.assertIn((filename, o, n), cited)
+                    self.assertIn((file, o, n), cited)
 
 
 if __name__ == "__main__":
