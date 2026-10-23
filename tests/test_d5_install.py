@@ -403,8 +403,8 @@ class TestInstall(unittest.TestCase):
         self.assertEqual(results[0]["custody"]["session_id"], "native")
         self.assertIsNone(store.read(directory)["invalidation"])
 
-    def test_locator_components_are_not_normalized(self):
-        # R3-NORMALIZE-LOCATOR: link/.. resolves through the filesystem.
+    def test_dotdot_locators_refused_before_work(self):
+        # R3-ALLOW-DOTDOT: neither possible resolution may acquire locks.
         nested = self.root / "nested"
         nested.mkdir()
         (nested / "child").mkdir()
@@ -414,11 +414,41 @@ class TestInstall(unittest.TestCase):
         prior = Path.cwd()
         try:
             os.chdir(self.root)
-            self.call("initial", "link/../record")
+            for kind, locator in [(k, "directory") for k in KINDS] + [("claim", "mandate")]:
+                for convert in (str, os.fsencode, Path):
+                    for prefix in ("", str(self.root) + "/"):
+                        with self.subTest(kind=kind, locator=locator, convert=convert, prefix=prefix):
+                            bad = convert(prefix + "link/../record")
+                            directory = bad if locator == "directory" else other
+                            self.mandate = bad if locator == "mandate" else self.root / "mandate.md"
+                            with ExitStack() as guards:
+                                for owner, name in [(protocol, "pin"), (os, "open"), (os, "getcwdb")] + [
+                                        (store, n) for n in ("create", "replace", "claim", "read_bytes")]:
+                                    guards.enter_context(mock.patch.object(
+                                        owner, name, side_effect=AssertionError("work before refusal: " + name)))
+                                with self.assertRaisesRegex(store.AuthorityError, r"^D5 locator contains \.\.$"):
+                                    self.call(kind, directory)
+                            for candidate in (intended, other):
+                                self.assertEqual(list(candidate.iterdir()), [])
         finally:
             os.chdir(prior)
+
+    def test_symlink_component_without_dotdot(self):
+        nested = self.root / "nested..safe"
+        nested.mkdir()
+        intended = self.directory("nested..safe/record")
+        (nested / "mandate.md").write_bytes(MANDATE)
+        (self.root / "link").symlink_to(nested, target_is_directory=True)
+        locator = str(self.root) + "/link//./record"
+        with mock.patch.object(store, "create", wraps=store.create) as create:
+            self.call("initial", locator)
+        self.assertEqual(create.call_args[0][0], locator)
         self.assertEqual(store.read(intended), grant())
-        self.assertFalse((other / store.RECORD_NAME).exists())
+        self.mandate = os.fsencode(str(self.root) + "/link//./mandate.md")
+        with mock.patch.object(store, "read_bytes", wraps=store.read_bytes) as read:
+            self.call("claim", locator)
+        self.assertEqual(read.call_args_list[0][0][0], os.fsdecode(self.mandate))
+        self.assertEqual(store.read(intended)["custody"]["session_id"], "native")
 
 
 if __name__ == "__main__":
