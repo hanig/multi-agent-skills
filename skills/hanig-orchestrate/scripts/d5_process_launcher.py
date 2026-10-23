@@ -1,16 +1,15 @@
 """Opt-in transport; no production callers or effect completion.
 
 Supported envelope and accepted limits
--------------------------------------
-Single-owner. Capture is file-backed; caller budgets disk; reads are bounded.
-Wait returns local status or TimeoutExpired. Cancel polls the leader first; signals
-only if that poll reports running. If it observes exit, or exit was recorded before,
+Single owner; file-backed capture, caller budgets disk, bounded reads.
+Wait: local status or TimeoutExpired. Cancel polls the leader first; signals
+only if running. If that poll sees exit, or exit was recorded before,
 surviving group members are not signalled. Cancel before wait cannot guarantee
 descendant shutdown; callers needing it must own an appropriate lifetime protocol.
-Never infer descendant termination from local exit. Escaped descendants and
-post-exit writes are excluded. Logs append; wb truncates,
+Local exit does not imply descendant termination. Escapes/post-exit writes excluded.
+Logs append; wb truncates,
 xb exclusively creates, ab reuses. Only regular logs, no final symlinks/fd aliases.
-stdin: bytes/DEVNULL/borrowed PIPE. close owns stdin/captures, never the private fd;
+stdin: bytes/DEVNULL/borrowed PIPE. close owns stdin/captures, not the private fd;
 R8b must authorize that fd and retain parent custody.
 """
 from dataclasses import dataclass

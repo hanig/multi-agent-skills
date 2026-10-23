@@ -223,14 +223,13 @@ class TestLauncher(unittest.TestCase):
         self.await_file(ready)
         self.eq(os.getpgid(int(ready.read_text())), h.pid)
         with lock.open('r+') as probe:
-            def locked():
+            def unlocked():
                 try:
                     fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    return True
-                fcntl.flock(probe, fcntl.LOCK_UN)
-                return False
-            self.assertTrue(locked())
+                    return False
+                return True
+            self.assertFalse(unlocked())
             if state != 'live':
                 until(lambda: sp.check_output(['ps', '-o', 'stat=', '-p',
                                      str(h.pid)]).strip().startswith(b'Z'))
@@ -240,10 +239,10 @@ class TestLauncher(unittest.TestCase):
                 h.cancel()
             if state == 'live':
                 self.assertLess(h.wait(5), 0)
-                until(lambda: not locked())
+                until(unlocked)
             else:
                 sent.assert_not_called()
-                self.assertTrue(locked())
+                self.assertFalse(unlocked())
 
     def test_cancel_live_lock(self): self.cancel_lock('live')
 
