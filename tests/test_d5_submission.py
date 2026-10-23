@@ -54,6 +54,7 @@ class DeterministicBoundary(submission.Boundary):
 
 class TestSubmission(unittest.TestCase):
     eq = unittest.TestCase.assertEqual
+    refuse = unittest.TestCase.assertRaisesRegex
 
     def setUp(self):
         isolate_pool(self)
@@ -86,8 +87,6 @@ class TestSubmission(unittest.TestCase):
                             anchor=ANCHOR, generation=1)
         self.operation = submission.Operation("A", "fixture", json.dumps(self.scope).encode(), b"exact\x00\xff")
         self.boundary = DeterministicBoundary()
-        # Track this module's raw holders for test teardown, never for judging
-        # a live probe. Production intentionally retains unconfirmed holders.
         holders = set()
         local_os = mock.Mock(wraps=os)
         def duplicate(fd):
@@ -214,7 +213,7 @@ class TestSubmission(unittest.TestCase):
                 raise ledger.EffectError(ledger.DURABILITY)
 
             with self.subTest(published=published), mock.patch.object(ledger, "_write", side_effect=failing):
-                with self.assertRaisesRegex(ledger.EffectError, ledger.DURABILITY):
+                with self.refuse(ledger.EffectError, ledger.DURABILITY):
                     self.submit()
             self.eq(self.boundary.calls, [])
         self.eq([r["state"] for r in self.rows()], ["attempting"])
@@ -228,7 +227,7 @@ class TestSubmission(unittest.TestCase):
             return result
 
         with mock.patch.object(ledger, "prepare", side_effect=prepared):
-            with self.assertRaisesRegex(authority.AuthorityError, "^D5 authority expired$"):
+            with self.refuse(authority.AuthorityError, "^D5 authority expired$"):
                 self.submit()
         self.eq(self.boundary.calls, [])
         self.eq([r["state"] for r in self.rows()], ["not_submitted"])
@@ -261,7 +260,7 @@ class TestSubmission(unittest.TestCase):
         self.eq(self.rows()[0]["state"], "completed")
         self.boundary = DeterministicBoundary()
         self.operation = submission.Operation("B", "fixture", self.operation.scope, b"next")
-        with self.assertRaisesRegex(authority.AuthorityError, "^D5 authority is invalidated$"):
+        with self.refuse(authority.AuthorityError, "^D5 authority is invalidated$"):
             self.submit()
         self.eq(self.boundary.calls, [])
 
@@ -318,7 +317,7 @@ class TestSubmission(unittest.TestCase):
 
         for boundary in (Opaque(), "fixture command", ["fixture"], None, lambda: None):
             self.boundary = boundary
-            with self.assertRaisesRegex(authority.AuthorityError,
+            with self.refuse(authority.AuthorityError,
                     "^D5 submission requires an explicit effect boundary$"):
                 self.submit()
         Opaque.start.assert_not_called()
@@ -332,7 +331,7 @@ class TestSubmission(unittest.TestCase):
         self.eq(len(self.rows()), 1)
         control.revoke(*self.args, 151, "stop")
         self.boundary = DeterministicBoundary()
-        with self.assertRaisesRegex(authority.AuthorityError, "invalidated"):
+        with self.refuse(authority.AuthorityError, "invalidated"):
             self.submit()
         self.eq(self.boundary.calls, [])
 
@@ -377,8 +376,6 @@ class TestSubmission(unittest.TestCase):
                         self.submit()
                 self.assertIs(caught.exception, error)
                 self.assertEqual([c[0] for c in self.boundary.calls], ["start", "finish"])
-                # None observed complete() return: C is false in all six rows.
-                # Durable unknown and an unconfirmed publication cannot release.
                 self.assertEqual(self.probe("drain"), "blocked")
                 os.close(holder[0])  # Test teardown AFTER live-process probe.
         self.assertEqual(len(self.rows()), 6)
@@ -395,7 +392,7 @@ class TestSubmission(unittest.TestCase):
                 return dict(OK)
 
             self.boundary.on_finish = finish
-            with self.assertRaisesRegex(ledger.EffectError, "^D5 inactive$"):
+            with self.refuse(ledger.EffectError, "^D5 inactive$"):
                 self.submit()
             self.assertTrue(all(r["state"] == "submitted" for r in self.rows()))
         self.active.return_value = True
@@ -403,18 +400,18 @@ class TestSubmission(unittest.TestCase):
     def test_inactive_and_absent_registration_refuse_before_work(self):
         self.active.return_value = False
         with mock.patch.object(registry, "lookup", side_effect=AssertionError("inactive lookup")):
-            with self.assertRaisesRegex(authority.AuthorityError, "^D5 is inactive$"):
+            with self.refuse(authority.AuthorityError, "^D5 is inactive$"):
                 self.submit()
         self.active.return_value = True
         with mock.patch.object(registry, "lookup", return_value=None), \
                 mock.patch.object(protocol, "pin", side_effect=AssertionError("unregistered pin")):
-            with self.assertRaisesRegex(authority.AuthorityError, "^not registered$"):
+            with self.refuse(authority.AuthorityError, "^not registered$"):
                 self.submit()
         self.eq(self.boundary.calls, [])
 
     def test_ambient_start_refused_before_effect(self):
         with protocol.pin(self.directory) as record, record.drain(), record.start():
-            with self.assertRaisesRegex(authority.AuthorityError, "^D5 submission inside START is forbidden$"):
+            with self.refuse(authority.AuthorityError, "^D5 submission inside START is forbidden$"):
                 self.submit()
             self.eq(self.probe("start"), "blocked")
         self.eq(self.boundary.calls, [])
@@ -439,7 +436,7 @@ class TestSubmission(unittest.TestCase):
         previous = sys.gettrace()
         try:
             sys.settrace(interrupt)
-            with self.assertRaisesRegex(KeyboardInterrupt, "post-start"):
+            with self.refuse(KeyboardInterrupt, "post-start"):
                 self.submit()
         finally:
             sys.settrace(previous)
@@ -456,46 +453,48 @@ class TestSubmission(unittest.TestCase):
             self.eq(result.returncode, 0, result.stdout + result.stderr)
 
     def test_exit_path_matrix(self):
-        # name, persisted state, live DRAIN, calls, expected error. Each row has
-        # a fresh record and probes before teardown and after local uncertainty.
+        both = ["start", "finish"]
+        E, K = ledger.EffectError, KeyboardInterrupt
         rows = [
-            ("no-start", None, "blocked", [], RuntimeError),
-            ("prepare-before", None, "blocked", [], ledger.EffectError),
-            ("prepare-after", "attempting", "blocked", [], ledger.EffectError),
-            ("revalidate", "not_submitted", "blocked", [], RuntimeError),
+            ("no-start", None, "available", [], RuntimeError),
+            ("prepare-before", None, "available", [], E),
+            ("prepare-after", "attempting", "available", [], E),
+            ("revalidate", "not_submitted", "available", [], RuntimeError),
             ("not-submitted", "not_submitted", "available", ["start"], None),
-            ("submitted", "completed", "available", ["start", "finish"], None),
-            ("uncertain-start", "unknown", "blocked", ["start", "finish"], None),
-            ("start-raises", "unknown", "blocked", ["start", "finish"], RuntimeError),
-            ("start-exit", "completed", "blocked", ["start", "finish"], RuntimeError),
-            ("complete-before", "submitted", "blocked", ["start", "finish"], ledger.EffectError),
-            ("complete-after", "completed", "blocked", ["start", "finish"], ledger.EffectError),
-            ("finish-raises", "unknown", "blocked", ["start", "finish"], RuntimeError),
-            ("finish-invalid", "unknown", "blocked", ["start", "finish"], ledger.EffectError),
-            ("inactive", "submitted", "blocked", ["start", "finish"], ledger.EffectError),
-            ("uncertainty-before", "attempting", "blocked", ["start", "finish"], ledger.EffectError),
-            ("uncertainty-after", "unknown", "blocked", ["start", "finish"], ledger.EffectError),
-            ("before-A", "not_submitted", "blocked", [], KeyboardInterrupt),
-            ("after-A", "unknown", "blocked", ["finish"], KeyboardInterrupt),
-            ("before-S", "completed", "blocked", ["start", "finish"], KeyboardInterrupt),
-            ("before-N", "not_submitted", "blocked", ["start"], KeyboardInterrupt),
-            ("cleanup-entry", "submitted", "blocked", ["start"], KeyboardInterrupt),
-            ("finish-entry", "unknown", "blocked", ["start"], KeyboardInterrupt),
-            ("before-F", "unknown", "blocked", ["start", "finish"], KeyboardInterrupt),
-            ("before-C", "completed", "blocked", ["start", "finish"], KeyboardInterrupt),
-            ("epilogue", "completed", "blocked", ["start", "finish"], KeyboardInterrupt),
+            ("submitted", "completed", "available", both, None),
+            ("uncertain-start", "unknown", "blocked", both, None),
+            ("start-raises", "unknown", "blocked", both, RuntimeError),
+            ("start-close", "attempting", "blocked", ["start"], OSError),
+            ("start-exit", "attempting", "blocked", ["start"], RuntimeError),
+            ("complete-before", "submitted", "blocked", both, E),
+            ("complete-after", "completed", "blocked", both, E),
+            ("finish-raises", "unknown", "blocked", both, RuntimeError),
+            ("finish-invalid", "unknown", "blocked", both, E),
+            ("inactive", "submitted", "blocked", both, E),
+            ("uncertainty-before", "attempting", "blocked", both, E),
+            ("uncertainty-after", "unknown", "blocked", both, E),
+            ("before-A", "not_submitted", "available", [], K),
+            ("after-A", "unknown", "blocked", ["finish"], K),
+            ("before-S", "attempting", "blocked", ["start"], K),
+            ("before-N", "not_submitted", "blocked", ["start"], K),
+            ("cleanup-entry", "submitted", "blocked", ["start"], K),
+            ("finish-entry", "unknown", "blocked", ["start"], K),
+            ("before-F", "unknown", "blocked", both, K),
+            ("before-C", "completed", "blocked", both, K),
+            ("epilogue", "completed", "blocked", both, K),
         ]
         sites = {"before-A": "A = True", "after-A": "state = boundary.start(operation)",
                  "before-S": "S = True", "before-N": "N = True", "before-F": "F = True",
                  "before-C": "C = True", "finish-entry": "outcome = boundary.finish()",
-                 "cleanup-entry": "if A and state is not Initiation.NOT_SUBMITTED:",
+                 "cleanup-entry": "if S and A and state is not Initiation.NOT_SUBMITTED:",
                  "epilogue": "if H and S and (not A or N or (F and C)):"}
         lines, first = inspect.getsourcelines(submission.submit)
         for name, state, drain, calls, error in rows:
             with self.subTest(path=name):
-                case = TestSubmission()
-                case.setUp()
+                c = TestSubmission()
+                c.setUp()
                 previous = sys.gettrace()
+                leaked = []
                 try:
                     attempts, fired = [], []
                     prepare, write = ledger.prepare, ledger._write
@@ -514,17 +513,17 @@ class TestSubmission(unittest.TestCase):
                             raise ledger.EffectError(ledger.DURABILITY)
                         return write(*args, **kwargs)
                     if name in ("not-submitted", "before-N"):
-                        case.boundary.state = submission.Initiation.NOT_SUBMITTED
+                        c.boundary.state = submission.Initiation.NOT_SUBMITTED
                     if name.startswith("uncertain"):
-                        case.boundary.state = submission.Initiation.UNCERTAIN
+                        c.boundary.state = submission.Initiation.UNCERTAIN
                     if name == "start-raises":
-                        case.boundary.on_start = fail
+                        c.boundary.on_start = fail
                     if name == "finish-raises":
-                        case.boundary.on_finish = fail
+                        c.boundary.on_finish = fail
                     if name == "finish-invalid":
-                        case.boundary.on_finish = lambda: None
+                        c.boundary.on_finish = lambda: None
                     if name == "inactive":
-                        case.boundary.on_finish = lambda: (setattr(case.active, "return_value", False), dict(OK))[1]
+                        c.boundary.on_finish = lambda: (setattr(c.active, "return_value", False), dict(OK))[1]
                     with ExitStack() as stack:
                         stack.enter_context(mock.patch.object(ledger, "prepare", side_effect=prepared))
                         stack.enter_context(mock.patch.object(ledger, "_write", side_effect=writing))
@@ -537,11 +536,19 @@ class TestSubmission(unittest.TestCase):
                                     fail()
                                 return validate(*args, **kwargs)
                             stack.enter_context(mock.patch.object(admission, "_validate_locked", side_effect=validating))
-                        if name == "start-exit":
-                            start = protocol._Protocol.start
+                        if name in ("start-exit", "start-close"):
+                            start, close = protocol._Protocol.start, os.close
                             @contextmanager
                             def exiting(pinned):
+                                if name == "start-close":
+                                    def closing(fd):
+                                        if leaked and fd == leaked[0]:
+                                            raise OSError("START close")
+                                        return close(fd)
+                                    stack.enter_context(mock.patch.object(os, "close", side_effect=closing))
                                 with start(pinned):
+                                    if name == "start-close":
+                                        leaked.append(pinned._record._prior(1)[3])
                                     yield
                                 fail()
                             stack.enter_context(mock.patch.object(protocol._Protocol, "start", exiting))
@@ -555,28 +562,26 @@ class TestSubmission(unittest.TestCase):
                                 return interrupt
                             sys.settrace(interrupt)
                         if error is None:
-                            case.submit()
+                            c.submit()
                         else:
                             with self.assertRaises(error):
-                                case.submit()
+                                c.submit()
                     sys.settrace(previous)
                     self.eq(fired, [True] if name in sites else [])
-                    self.eq([c[0] for c in case.boundary.calls], calls)
-                    self.eq([r["state"] for r in case.rows()], [] if state is None else [state])
-                    self.eq(case.probe("drain"), drain)
-                    case.active.return_value = True
-                    # Later uncertainty is accounting only. It cannot close this
-                    # invocation's holder, and terminal states refuse downgrade.
+                    self.eq([c[0] for c in c.boundary.calls], calls)
+                    self.eq([r["state"] for r in c.rows()], [] if state is None else [state])
+                    self.eq(c.probe("drain"), drain)
+                    c.active.return_value = True
                     if attempts:
                         if state in ("not_submitted", "completed"):
-                            with self.assertRaisesRegex(ledger.EffectError, ledger.CONFLICT):
+                            with self.refuse(ledger.EffectError, ledger.CONFLICT):
                                 completion.bind(attempts[0]).uncertain()
                         else:
                             completion.bind(attempts[0]).uncertain()
                             state = "unknown"
-                        self.eq(case.rows()[0]["state"], state)
-                    self.eq(case.probe("drain"), drain)
-                    unresolved = ledger.unresolved(*case.args)
+                        self.eq(c.rows()[0]["state"], state)
+                    self.eq(c.probe("drain"), drain)
+                    unresolved = ledger.unresolved(*c.args)
                     if state in ("attempting", "submitted", "unknown"):
                         self.eq([r["state"] for r in unresolved], [state])
                         self.assertIs(unresolved[0]["reconciliation_required"], state != "submitted")
@@ -584,7 +589,9 @@ class TestSubmission(unittest.TestCase):
                         self.eq(unresolved, [])
                 finally:
                     sys.settrace(previous)
-                    case.doCleanups()
+                    for fd in leaked:
+                        os.close(fd)
+                    c.doCleanups()
 
     def test_single_terminal_release_gate(self):
         tree = ast.parse(inspect.getsource(submission.submit))
@@ -609,6 +616,19 @@ class TestSubmission(unittest.TestCase):
                 for statement in node.finalbody:
                     self.eq(closes(statement), [])
 
+    def test_named_adapter_without_inheritance(self):
+        class NamedAdapter:
+            def start(self, operation):
+                return submission.Initiation.NOT_SUBMITTED
+            def finish(self):
+                raise AssertionError("not submitted")
+        self.assertNotIn(submission.Boundary, NamedAdapter.__mro__)
+        submission.Boundary.register(NamedAdapter)
+        self.boundary = NamedAdapter()
+        self.eq(self.submit().initiation, submission.Initiation.NOT_SUBMITTED)
+        self.eq(self.rows()[0]["state"], "not_submitted")
+        self.eq(self.probe("drain"), "available")
+
     def test_immutable_operation_subclass(self):
         class MyOp(submission.Operation): pass
         class MyBytes(bytes):
@@ -627,16 +647,16 @@ class TestSubmission(unittest.TestCase):
         fields = dict(request_id="A", kind="fixture", scope=self.operation.scope, intent=b"effect")
         for field, bad in (("scope", bytearray(fields["scope"])), ("intent", bytearray(b"effect")),
                            ("request_id", []), ("kind", [])):
-            with self.assertRaisesRegex(ValueError, "immutable fields"):
+            with self.refuse(ValueError, "immutable fields"):
                 submission.Operation(**dict(fields, **{field: bad}))
         self.operation = fields
-        with self.assertRaisesRegex(ValueError, "immutable fields"):
+        with self.refuse(ValueError, "immutable fields"):
             self.submit()
         self.operation = submission.Operation(**fields)
         for invalid in (None, "submitted", True):
             self.boundary = DeterministicBoundary()
             self.boundary.state = invalid
-            with self.assertRaisesRegex(ValueError, "invalid initiation"):
+            with self.refuse(ValueError, "invalid initiation"):
                 self.submit()
             self.eq([c[0] for c in self.boundary.calls], ["start", "finish"])
         self.eq([r["state"] for r in self.rows()], ["unknown"] * 3)

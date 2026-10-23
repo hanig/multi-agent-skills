@@ -17,7 +17,7 @@ def child(data):
     case.boundary = t.DeterministicBoundary()
     lines, first = inspect.getsourcelines(t.submission.submit)
     entry = ("outcome = boundary.finish()" if "--finish-entry" in sys.argv else
-             "if A and state is not Initiation.NOT_SUBMITTED:")
+             "if S and A and state is not Initiation.NOT_SUBMITTED:")
     target = first + next(i for i, line in enumerate(lines) if line.strip() == entry)
     def interrupt(frame, event, arg):
         if event == "line" and frame.f_code is t.submission.submit.__code__ and frame.f_lineno == target:
