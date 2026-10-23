@@ -69,10 +69,10 @@ class TestAdmission(unittest.TestCase):
     def validate(self, pinned, args=None):
         return admission._validate_locked(pinned, *(args or self.args), **self.request)
 
-    def consume(self, before=None, args=None):
+    def consume(self, before=None, args=None, directory=None):
         # Fixture submission critical section. R6 owns the production boundary
         # and ledger integration; this sentinel records arrival after validation.
-        with protocol.pin(self.directory) as pinned, pinned.drain(), pinned.start():
+        with protocol.pin(directory or self.directory) as pinned, pinned.drain(), pinned.start():
             if before is not None:
                 before()
             result = self.validate(pinned, args)
@@ -122,8 +122,7 @@ class TestAdmission(unittest.TestCase):
         self.consume()
         other = self.root / "other"
         other.mkdir(mode=0o700)
-        with protocol.pin(other) as pinned, pinned.start():
-            self.refuse("^D5 authority identity mismatch$", lambda: self.validate(pinned))
+        self.refuse("^D5 authority identity mismatch$", lambda: self.consume(directory=other))
         replacement = copy.deepcopy(self.original)
         replacement["grant_id"] = "b" * 32
         with protocol.pin(self.directory) as pinned, pinned.drain(shared=False), pinned.start():
