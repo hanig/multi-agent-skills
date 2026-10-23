@@ -29,6 +29,7 @@ def main():
     elif action == 'echo':
         data = sys.stdin.buffer.read()
         sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
         sys.stderr.buffer.write(b'error')
     elif action == 'fd':
         try:
