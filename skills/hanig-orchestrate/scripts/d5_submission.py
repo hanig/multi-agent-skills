@@ -14,21 +14,13 @@ The registered checkout stays at the path recorded at registration for the regis
 Non-claims: the helper cannot prove nonblocking behavior of arbitrary injected
 code; no exactly-once execution; no implicit retries.
 
-Boundary is an explicit trusted-adapter interface, not a sandbox or a transport.
-No production adapter is supplied here. A named implementation must expose one
-actual initiation in start(operation), report Initiation, and keep transport
-state for finish(). Start must not wait for a response or process completion,
-defer a request, retry, or commission another effect. Finish consumes the
-already-started operation, including after an ambiguous start exception; it
-must leave no unprotected effect-capable activity when it returns or raises.
-Managed surviving children require the separate protected-child protocol.
-
-An Operation contains immutable scope JSON and exact intent bytes understood
-by that named adapter; accurate effect/scope declaration is its obligation.
-The caller supplies a unique request_id; the ledger also assigns an effect_id.
-Neither identifier provides remote deduplication. No shell text is inspected.
-Completion/uncertainty failures, including D5 inactive, propagate and retain
-the ledger entry. No local accounting success is inferred from a response.
+Named trusted Boundary adapters expose one initiation in start(operation).
+Start must not wait for a response or completion, defer a request, retry, or
+commission another effect. Finish consumes the started operation even after
+ambiguous initiation; it must leave no unprotected effect-capable activity on return or
+error. Surviving children require the separate protected-child protocol.
+The caller supplies a unique request_id and accurate immutable scope/intent.
+Accounting failures, including inactive D5, propagate and retain the entry.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -58,7 +50,7 @@ class Operation:
 
     def __post_init__(self):
         if (type(self.request_id) is not str or type(self.kind) is not str or
-                type(self.scope) is not bytes or type(self.intent) is not bytes):
+                type(self.scope) is not bytes or not isinstance(self.intent, bytes)):
             raise ValueError("D5 operation requires immutable fields")
 
 
@@ -83,12 +75,7 @@ class Result:
 
 def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
            generation, operation, boundary):
-    """Freshly admit one immutable operation and account for its response.
-
-    Uses R1's lexical, thread-owned contexts. A nested call from Finish gets
-    its own fresh admission and accounting. Start cannot recursively wait for
-    another submission: that would violate the adapter's short-Start contract.
-    """
+    """Admit one operation; ambient START ownership is refused before work."""
     if not registry.d5_active():
         raise AuthorityError("D5 is inactive")
     if not isinstance(boundary, Boundary):
@@ -101,58 +88,54 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
     request = dict(grant_id=grant_id, session_id=session_id, anchor=anchor,
                    generation=generation, scope=operation.scope)
     with protocol.pin(entry["record_dir"]) as pinned, pinned.drain():
+        # R1 rank 1 is START.
+        if pinned._record._prior(1) is not None:
+            raise AuthorityError("D5 submission inside START is forbidden")
         attempt, began, state, start_error = None, False, Initiation.UNCERTAIN, None
-        try:
-            with pinned.start():
-                # Preflight keeps authority/refusal precedence before ledger
-                # schema checks. It never authorizes the eventual boundary.
-                admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
-                attempt = ledger.prepare(checkout, plan_id, state_dir,
-                    record_id=grant_id, custody=dict(generation=generation,
-                    session_id=session_id, anchor_pid=anchor.pid, anchor_start_us=anchor.start_us),
-                    kind=operation.kind, scope=json.loads(operation.scope),
-                    correlation={"request_id": operation.request_id, "intent": operation.intent.hex()})
-                admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
-                began = True
-                state = boundary.start(operation)
-        except BaseException as exc:
-            if not began:
-                # A durable intent may exist after final admission refuses.
-                # There was no boundary invocation in this branch.
-                if attempt is not None:
-                    ledger._classify(attempt, "not_submitted")
-                raise
-            start_error = exc
-        if type(state) is not Initiation:
-            state = Initiation.UNCERTAIN
-            start_error = ValueError("D5 boundary returned an invalid initiation")
-
-        # START is closed before accounting or response work. Classification
-        # failures must still drain the started operation before releasing SH.
         capability, accounting_error = None, None
-        try:
-            if state is Initiation.SUBMITTED:
-                capability = completion.bind(ledger._classify(attempt, "submitted"))
-            elif state is Initiation.UNCERTAIN:
-                completion.bind(attempt).uncertain()
-            else:
-                ledger._classify(attempt, "not_submitted")
-        except BaseException as exc:
-            accounting_error = exc
-
         outcome, response_error = None, None
-        if state is not Initiation.NOT_SUBMITTED:
+        try:
             try:
-                outcome = boundary.finish()
+                with pinned.start():
+                    admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
+                    attempt = ledger.prepare(checkout, plan_id, state_dir,
+                        record_id=grant_id, custody=dict(generation=generation,
+                        session_id=session_id, anchor_pid=anchor.pid, anchor_start_us=anchor.start_us),
+                        kind=operation.kind, scope=json.loads(operation.scope),
+                        correlation={"request_id": operation.request_id, "intent": operation.intent.hex()})
+                    admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
+                    began = True
+                    state = boundary.start(operation)
             except BaseException as exc:
-                response_error = exc
+                if not began:
+                    if attempt is not None:
+                        ledger._classify(attempt, "not_submitted")
+                    raise
+                start_error = exc
+            if type(state) is not Initiation:
+                state = Initiation.UNCERTAIN
+                start_error = ValueError("D5 boundary returned an invalid initiation")
+            try:
+                if state is Initiation.SUBMITTED:
+                    capability = completion.bind(ledger._classify(attempt, "submitted"))
+                elif state is Initiation.NOT_SUBMITTED:
+                    ledger._classify(attempt, "not_submitted")
+            except BaseException as exc:
+                accounting_error = exc
+        finally:
+            # Drain the initiated operation on interruption too.
+            if began and state is not Initiation.NOT_SUBMITTED:
+                try:
+                    outcome = boundary.finish()
+                except BaseException as exc:
+                    response_error = exc
+                finally:
+                    if capability is None or response_error is not None:
+                        completion.bind(attempt).uncertain()
+                    else:
+                        outcome = capability.complete(outcome)
         if accounting_error is not None:
             raise accounting_error
-        if capability is not None:
-            if response_error is not None:
-                capability.uncertain()
-            else:
-                outcome = capability.complete(outcome)
         if start_error is not None:
             raise start_error
         if response_error is not None:
