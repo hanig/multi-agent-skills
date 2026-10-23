@@ -393,5 +393,54 @@ class TestManifest(unittest.TestCase):
 
 PROBE = '"""Cold pinned-source activation probe; ordinary import reads are permitted."""\nimport os\nfrom pathlib import Path\nimport sys\n\nroot = Path(sys.argv[1])\nsys.path.insert(0, str(root / \'skills/hanig-orchestrate/scripts\'))\nassert not any(n.startswith(\'d5_\') for n in sys.modules)\n\n\ndef audit(event, args):\n    if event == \'open\':\n        path, mode, flags = args\n        if flags & (os.O_CREAT | os.O_TRUNC | os.O_APPEND | os.O_WRONLY | os.O_RDWR):\n            raise AssertionError(\'activation write: \' + str(path))\n        if not isinstance(path, str) or not path.endswith((\'.py\', \'.pyc\')):\n            raise AssertionError(\'activation non-source read: \' + str(path))\n    if event.startswith((\'subprocess.\', \'socket.\')) or event in (\n            \'fcntl.flock\', \'fcntl.lockf\', \'os.mkdir\', \'os.rename\', \'os.remove\',\n            \'os.rmdir\', \'os.chmod\', \'os.link\', \'os.symlink\', \'os.system\'):\n        raise AssertionError(\'activation effect: \' + event)\n\n\ndef profile(frame, event, arg):\n    if event == \'call\' and frame.f_globals.get(\'__name__\') == \'d5_registry\':\n        if frame.f_code.co_name not in (\'<module>\', \'d5_active\'):\n            raise AssertionError(\'activation registry access: \' + frame.f_code.co_name)\n\n\nsys.addaudithook(audit)\nsys.setprofile(profile)\nimport d5_registry\nassert d5_registry.d5_active() is False\nsys.setprofile(None)\nprint(\'inactive; no storage/process/lock effects\')\n'
 
+
+class TestParkedReviewRegressions(unittest.TestCase):
+    """Unrepaired round-1 counterexamples; this recovery must not merge."""
+    @classmethod
+    def setUpClass(cls):
+        TestManifest.setUpClass()
+        cls.guard = TestManifest()
+        cls.text = MANIFEST.read_text()
+
+    def test_single_code_row(self):
+        changed = self.text.replace('| S:_prepare_command_paths:3520 |',
+                                    '    | S:_prepare_command_paths:3520 |', 1)
+        self.assertNotEqual(changed, self.text)
+        self.assertFalse(any('S:_prepare_command_paths:3520' in r for r in table_rows(changed)))
+        with self.assertRaises(AssertionError):
+            self.guard.manifest(changed)
+
+    def check_format(self, changed, check):
+        self.guard.manifest(changed)
+        with patch(__name__ + '.MANIFEST') as path:
+            path.read_text.return_value = changed
+            check()
+
+    def test_valid_indentation(self):
+        self.check_format('\n'.join(' ' + s if s.startswith('|') else s
+                          for s in self.text.splitlines()), self.guard.test_indented_tables)
+
+    def test_regrouped_sbatch(self):
+        self.check_format(self.text.replace('S:_submit:1564,1569,1572',
+            'S:_submit:1564; S:_submit:1569; S:_submit:1572'), self.guard.test_reviewed_rows)
+
+    def test_replacement_ref(self):
+        env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        with tempfile.TemporaryDirectory() as tmp:
+            def git(*args, data=None):
+                return subprocess.check_output(['git', '-C', tmp, *args], input=data,
+                    env=env, stderr=subprocess.PIPE, timeout=60).strip().decode()
+            git('init', '-q')
+            common = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse',
+                '--git-common-dir'], env=env, timeout=60).decode().strip()
+            (Path(tmp) / '.git/objects/info/alternates').write_text(
+                str((ROOT / common / 'objects').resolve()) + '\n')
+            tree = git('mktree', data=b'')
+            alternate = git('-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid',
+                            'commit-tree', tree, '-m', 'fixture')
+            git('replace', BASE, alternate)
+            with patch(__name__ + '.ROOT', Path(tmp)):
+                TestManifest.setUpClass()
+
 if __name__ == "__main__":
     unittest.main()
