@@ -6,11 +6,6 @@ If the object is missing, recover with:
 git fetch origin 276e76af05a83846ea9c45ae7d030cf11a2e4e94
 Missing history is an error, never a skipped baseline.
 
-Supported envelope and accepted limits
-This prevents competing sessions from initiating operations. It does not
-prevent planning mistakes by the valid holder or replace existing crash
-reconciliation.
-
 Oracle scope: the deterministic scenarios below, with synthetic Git/Paseo and
 verifier services. State writers, launch/record/seed helpers and preservation
 execute from each isolated tree. Directory inode inputs are fixed before
@@ -40,11 +35,14 @@ from unittest import mock
 BASE = '276e76af05a83846ea9c45ae7d030cf11a2e4e94'
 ROOT = Path(__file__).resolve().parents[1]
 SELF = Path(__file__).resolve()
-SCENARIOS = ('run-ok', 'run-fail', 'run-noop', 'run-dry', 'advance-ok', 'advance-fail', 'advance-noop', 'advance-dry', 'continue-write', 'continue-preview', 'continue-fail', 'abandon-ok', 'abandon-repeat', 'abandon-fail', 'supersede-ok', 'supersede-repeat', 'supersede-fail', 'merge-ok', 'merge-merged', 'merge-dry', 'merge-fail', 'merge-pending', 'merge-cancel', 'merge-abandon', 'pipeline-ok', 'pipeline-fail', 'record-ok', 'record-fail',
-  'code-ok', 'code-fail', 'code-dry', 'watch-start', 'watch-repeat',
-  'watch-ok', 'watch-fail', 'watch-coordinator-fail',
-  'resume-ok', 'resume-fail', 'resume-backoff', 'resume-disabled',
-  'verify-ok', 'verify-fail', 'verify-refuse', 'verify-checkout')
+SCENARIOS = """run-ok run-fail run-noop run-dry advance-ok advance-fail
+advance-noop advance-dry continue-write continue-preview continue-fail abandon-ok
+abandon-repeat abandon-fail supersede-ok supersede-repeat supersede-fail merge-ok
+merge-merged merge-dry merge-fail merge-pending merge-cancel merge-abandon
+pipeline-ok pipeline-fail record-ok record-fail code-ok code-fail
+code-dry watch-start watch-repeat watch-ok watch-fail watch-coordinator-fail
+resume-ok resume-fail resume-backoff resume-disabled verify-ok verify-fail
+verify-refuse verify-checkout""".split()
 
 class TestPreactivation(unittest.TestCase):
 
@@ -59,7 +57,9 @@ class TestPreactivation(unittest.TestCase):
     with tempfile.TemporaryDirectory() as tmp:
       root = Path(tmp).resolve()
       results = []
-      for (side, files) in (('oracle', self.base_files), ('candidate', self.current_files)):
+      # Mutation calibration uses fixed source; the normal matrix uses HEAD.
+      candidate = self.base_files if mutation else self.current_files
+      for (side, files) in (('oracle', self.base_files), ('candidate', candidate)):
         (source, work) = (root / 'source', root / 'work')
         for directory in (source, work):
           if directory.exists():
@@ -83,7 +83,7 @@ class TestPreactivation(unittest.TestCase):
             node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_seed_reachability_problem')
             replacement = 'def _seed_reachability_problem(*args): return None'
           elif mutation == 'baseline-drop-subprocess':
-            nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'run' and n.args and isinstance(n.args[0], ast.List) and any(isinstance(x, ast.Constant) and x.value == 'sbatch' for x in n.args[0].elts)]
+            nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n).startswith("U.run(['sbatch',")]
             self.assertEqual(len(nodes), 1)
             node, replacement = nodes[0], '(0, "123", "")'
           else:
@@ -158,6 +158,18 @@ class TestPreactivation(unittest.TestCase):
     self.assertNotEqual(before['files'], after['files'])
 
 
+  def test_equivalent_dispatch_refactor(self):
+    name = 'skills/hanig-swarm/scripts/swarm.py'
+    files = dict(self.base_files)
+    old = b'        rc, out, err = U.run(["sbatch", "--parsable", str(script)],'
+    new = b'        argv = ["sbatch", "--parsable", str(script)]\n        rc, out, err = U.run(argv,'
+    self.assertEqual(files[name].count(old), 1)
+    files[name] = files[name].replace(old, new, 1)
+    self.current_files = files
+    a, b = self.pair('run-ok')
+    self.assertEqual(a, b)
+    self.test_baseline_drop_subprocess()
+
   def test_added_family_sensitivity(self):
     for scenario, module, function, value in (
         ('code-ok', 'swarm_code_launch', '_create_code_worktree', '(None, None, "stopped")'),
@@ -170,13 +182,14 @@ class TestPreactivation(unittest.TestCase):
 
   def test_comment_only_candidate(self):
     name = 'skills/hanig-swarm/scripts/swarm.py'
-    files = dict(self.current_files)
+    files = dict(self.base_files)
     lines = files[name].decode().splitlines(keepends=True)
     lines.insert(1, '# Receipt fields: "merged": True, "attested": True,\n')
     files[name] = ''.join(lines).encode()
     self.current_files = files
     before, after = self.pair('record-ok')
     self.assertEqual(before, after)
+    self.base_files = files
     self.test_baseline_change_record_bytes()
 
   def test_seed_effect_sensitivity(self):
