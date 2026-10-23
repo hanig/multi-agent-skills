@@ -1,23 +1,19 @@
-"""R8a asynchronous transport, with no production callers.
+"""R8a transport; no production callers or effect completion.
 
 Supported envelope and accepted limits
 -------------------------------------
-Only required option families. Timeout proves neither descendant nor remote
-termination. Cancellation kills the live local child, or its group with
-new_session=True, while the leader is unreaped. Escaped descendants and writes
-after leader exit are outside that policy. Local exit is not effect completion.
-
-Capture is file-backed from creation; disk capacity is the caller's budget.
-read() is bounded and preserves the writer's offset. No existing descriptors,
-inherited stdio, shell text or callbacks are options. Logs are opened by path
-in explicit modes. stdin accepts bytes, DEVNULL or a pipe borrowed by the caller;
-close_stdin()/close() owns closing it. Captures live until close().
-The private seam borrows one fd, never closes it or admits an effect. R8b must
-check designation/START and retain parent custody. No protected route is added.
+Only required option families. Cancellation covers the live child/group;
+escaped descendants and writes after leader exit are excluded. Timeout proves
+neither descendant nor remote termination. Capture is file-backed; disk capacity
+is caller-budgeted. Logs require regular files, with no final symlink or fd alias.
+No inherited stdio/fds, shell text or callbacks. stdin is bytes/DEVNULL/PIPE;
+the pipe is borrowed, closed by close_stdin()/close(). Captures live until close.
+R8b must authorize the private borrowed fd and retain parent custody.
 """
 from dataclasses import dataclass
 import os
 import signal
+import stat
 import subprocess
 import tempfile
 
@@ -35,7 +31,7 @@ class Log:
 @dataclass(frozen=True)
 class Options:
     cwd: object = None
-    env: object = None  # None inherits; a mapping, including {}, replaces.
+    env: object = None  # None inherits; mappings replace.
     stdin: object = subprocess.DEVNULL
     stdout: object = CAPTURE
     stderr: object = CAPTURE
@@ -101,11 +97,7 @@ class Handle:
                 pass
 
     def close(self):
-        """Cancel/reap if necessary, then close only owned transport resources.
-
-        This never closes the protected handoff reference or releases DRAIN.
-        If reaping fails, resources remain owned for an explicit retry.
-        """
+        """Cancel/reap, then close owned streams; never close borrowed protection."""
         if not self._closed:
             self.cancel()
             self.wait()
@@ -119,6 +111,27 @@ class Handle:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def _log(log):
+    path = os.fspath(log.path)
+    directory = os.open(os.path.dirname(path) or '.', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        here, magic = os.fstat(directory), os.stat('/dev/fd')
+        if (here.st_dev, here.st_ino) == (magic.st_dev, magic.st_ino):
+            raise ValueError('logs cannot export descriptors')
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+        flags |= {'ab': os.O_APPEND, 'wb': os.O_TRUNC, 'xb': os.O_EXCL}[log.mode]
+        fd = os.open(os.path.basename(path), flags, 0o666, dir_fd=directory)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError('logs require regular files')
+            return os.fdopen(fd, log.mode)
+        except BaseException:
+            os.close(fd)
+            raise
+    finally:
+        os.close(directory)
 
 
 def launch(argv, *, options=None):
@@ -138,8 +151,7 @@ def _launch(argv, *, options=None, _protected_fd=None):
         raise ValueError("argv must contain executable and arguments")
     if type(options.new_session) is not bool:
         raise ValueError("new_session must be bool")
-    # Validate everything before opening a log. No existing fd is an option:
-    # even redirecting one to fd 0/1/2 would inherit its lock description.
+    # Reject descriptor options before opening logs.
     if not (isinstance(options.stdin, bytes) or
             type(options.stdin) is int and options.stdin in
             (subprocess.DEVNULL, subprocess.PIPE)):
@@ -170,7 +182,7 @@ def _launch(argv, *, options=None, _protected_fd=None):
                 captures[name] = value
                 owned.append(value)
             elif isinstance(value, Log):
-                value = open(value.path, value.mode)
+                value = _log(value)
                 owned.append(value)
             streams[name] = value
         stdin = options.stdin
