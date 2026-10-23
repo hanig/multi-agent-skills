@@ -1,6 +1,8 @@
 # U4.0a pinned effect manifest
 
-Base **276e76af05a83846ea9c45ae7d030cf11a2e4e94** for every file:function:line.
+Base **276e76af05a83846ea9c45ae7d030cf11a2e4e94** for every file:function:line. Lines are frozen at 276e76a; later units cite
+function+construct against the live tree. Named constructs are in the guard's TOKENS,
+cross-checked against this frozen citation set and the BASE AST.
 Aliases: S=swarm.py, SS=swarm_state.py, SW=swarm_workspaces.py,
 SD=swarm_dispatch.py, SP=swarm_preflight.py, SO=swarm_outbox.py,
 SC=swarm_continue.py, SCL=swarm_code_launch.py, M=merge_unit.py, V=verify.py, RV=remote_verify.py,
@@ -43,7 +45,7 @@ S:cmd_run:3646 calls advance; S:cmd_advance:3669 delegates.
 | S:advance:2503; swarm_provider_resume.py:maybe_resume:108,116,134,144 snapshot/save/send/save; S:advance:2694; S:maybe_continue:1976,1977,1984 save/send/save | I/send + C/ack (resend is new I). | continuation |
 | S:advance:3060,3140 backfill/emit; S:cmd_stop_unit:3759 emit | I/outbox. SO:emit_intent:611,646 sequence/append; | swarm_outbox |
 | S:_submit:1440,1451 capture/write launch; S:_submit:1487,1510,1541,1684,1713,1723,1734,1737,1804,1834,1856,1863,1879,1892,1896 | I/preparation; C/launch. | swarm_code_launch |
-| S:_submit:1527 renders only (SD:_isolation_submission:184 returns); S:_submit:1530 | R/render + I/marker. SD:_clear_isolation_marker:206 unlink. | SDT |
+| S:_submit:1527 renders only (SD:_isolation_submission:185 returns); S:_submit:1530 | R/render + I/marker. SD:_clear_isolation_marker:206 unlink. | SDT |
 | S:_submit:1564,1569,1572 | I/script/sbatch; C/job ID. | swarm_dispatch |
 | S:_submit:1594,1614,1626 | I/log/engine; C/launch. | swarm_dispatch |
 | S:_submit:1716; S:_submit:1795,1809,1816; S:_submit:1826 | I/worktree/home/Paseo; C/handoff. SCL:_create_code_worktree:256 `worktree add`; codex_home.py:allocate:116 mkdir, codex_home.py:populate:151,155 symlink, codex_home.py:remove:182 rmtree. | attempt_worktrees, codex_home |
@@ -137,14 +139,14 @@ RV:cleanup_slurm:825,831 polling is R. Fresh launch: RV:run_remote:1454. Keep po
 | Evidence / ID | Contract | Test |
 |---|---|---|
 | LS:project_lock:823,824,826 | L/drain process; mkdir/open/flock → close on exit; retain outside per-issue boundaries. | linear_drain |
-| LS:drain_locked:1009; LS:confirm_comment:761 | I/U6 comment create → readback at LS:confirm_comment:769; split every intent. | linear_drain |
-| LS:drain_locked:1030; LS:reconcile_issue:927,935 | R/U6 query 927; I/U6 state 935 → readback at LS:reconcile_issue:938; separate from comment. | linear_drain |
+| LS:drain_locked:1012; LS:confirm_comment:761 | I/U6 comment create → readback at LS:confirm_comment:769; split every intent. | linear_drain |
+| LS:drain_locked:1033; LS:reconcile_issue:927,935 | R/U6 query 927; I/U6 state 935 → readback at LS:reconcile_issue:938; separate from comment. | linear_drain |
 | LS:drain_locked:1065; LS:record_drain_receipt:895,897,898,899 | C/U6 confirmed mutation; temp intent/observation/reconcile child → exit/cleanup. | linear_drain |
 | DC:record_reconciliation:115,124; SO:record_receipt:1016 | C/reconcile child; receipt THEN reconciliation → durable ack. | drain_contract |
 | SO:_append_receipt_atomic:912,914,917,923,952,954 | L/receipt inode; C/append/fsync after duplicate check. | outbox |
 | LA:request:127; LA:transport:101 | I/U6 mutation or R/query; HTTP → response; split submit/wait, no retry. | linear_drain |
 
-LS:confirm_comment:760,769 reads before/after ambiguous create.
+LS:confirm_comment:757,769 reads before/after ambiguous create.
 LS:drain_locked:1038,1051,1057,1061 withholds unresolved/superseded/dry/unconfirmed
 acks. LA:request:127 and LA:query:148 make one request, no HTTP retries. Later
 drains re-admit mutations. M:print_tracker_audit:897 only reads. **U4-T blocker:**
@@ -159,10 +161,10 @@ records disposition; S:cmd_stop_unit:3737,3741 requires DONE/bound successor);
 continue dispatch (SC:continue_plan:148,149,150 append/print/return). Preview
 skips append at SC:continue_plan:147, still fetches seeds. S:_submit:1576,1633,1897
 returns by kind. M:reconcile:560 returns dry; forge observations are R (table), unlike M:reconcile:647. Dry merge can still
-construct a candidate through V:candidate_merge_basis:670,674; R is not zero I/O.
+construct a candidate through V:candidate_merge_basis:671,674; R is not zero I/O.
 
 **P:** d5_registry.py:d5_active:68 is False, but import resolves siblings/changes
-sys.path (d5_registry.py:module:55,57; skill_paths.py:loaded_skill_root:40,45).
+sys.path (d5_registry.py:module:55,57; skill_paths.py:loaded_skill_root:40,46).
 Cold probe permits source discovery, rejects storage/process/network/lock effects
 and registry access. Missing siblings refuse. **Blocker P:** U3 errata (12,000,
 tests included) for the SAME predicate without discovery, or approved M6 amendment;
@@ -170,7 +172,7 @@ no alternate flag.
 
 **R4:** d5_completion.py:bind:73,76,77 accepts ledger handles; complete only calls
 ledger under DRAIN (d5_completion.py:complete:52,53,54; d5_effect_log.py:complete:313).
-No callback. R6 bind/Finish/complete: d5_submission.py:submit:124,136,144, AFTER
+No callback. R6 bind/Finish/complete: d5_submission.py:submit:126,136,145, AFTER
 Start. **Blocker R4:** U3 errata/amendment (24,000 with tests) binding the real
 S:cmd_merge:4656 journal before Start and settling child ownership. Inactive
 keeps old recorder. M4: success → revoke returned → recorder released; D5 active,
@@ -178,10 +180,10 @@ journal persists, next initiation denied. d5_control.py:revoke:55 does not
 deactivate; D5 receipt alone is insufficient. d5_completion.py:uncertain:63 and
 recorder failure retain existing reconciliation.
 
-R6 d5_submission.py:submit:91,97 holds DRAIN; d5_submission.py:submit:103,105,106,110,113
+R6 d5_submission.py:submit:91,97 holds DRAIN; d5_submission.py:submit:103,105,106,111,113
 START/admit/prepare/recheck/Start; Finish outside START. Sole release gate
 H/S/(not A or N or F+C) at d5_submission.py:submit:147,148; ambient START refused
-at d5_submission.py:submit:92,93. R5 d5_admission.py:_validate_locked:80,86,87,90,98,101
+at d5_submission.py:submit:92,93. R5 d5_admission.py:_validate_locked:80,86,87,91,92,101
 freshly checks registration/mandate/store/identity/scope/time. R3
 d5_install.py:_installation:63 orders DRAIN then START. R9 delegates:
 d5_lease.py:grant:69,72,73; d5_custody.py:claim:33; d5_custody.py:relinquish:40.
@@ -189,7 +191,7 @@ d5_lease.py:grant:69,72,73; d5_custody.py:claim:33; d5_custody.py:relinquish:40.
 **R8:** d5_process.py:worker_spawn:93,95: argv/pipes, no protected fds; drain/reap.
 Allowlist empty (d5_process.py:module:33); protected_spawn refuses undesignated
 and ambient START (d5_process.py:protected_spawn:73,80,86). Child owns admission
-(d5_effect_child.py:bootstrap:50), so no protected_spawn inside Boundary.start.
+(d5_effect_child.py:bootstrap:51), so no protected_spawn inside Boundary.start.
 R10 leaves designations to U4–U7. S:_submit:1572 sbatch is argv-compatible,
 handoff unproved; S:_submit:1614 and S:_start_code_terminal_watchers:3401 lack
 cwd/env/log/session support; S:_submit:1826 and S:maybe_continue:1977 need env/timeouts.
@@ -227,6 +229,6 @@ dispatch; no U3 edits here.
 | U4.9a | d5_submission.py:submit:113,136; cross-command M1/M2/M3/M6, U4.0b oracle | 25 |
 | U4.9m4 | M:reconcile:692 / S:cmd_merge:4656 / d5_control.py:revoke:55; M4/M5 barriers | 22 |
 
-Retain U4.0b oracle/locks. Guard pins citation sites/AST sinks, not semantics.
+Retain U4.0b oracle/locks. Guard checks frozen sites, named AST constructs and selected sinks, not a call graph.
 Missing base object fails:
 `git fetch origin 276e76af05a83846ea9c45ae7d030cf11a2e4e94`, rerun; no fallback.
