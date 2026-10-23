@@ -62,7 +62,7 @@ class TestLauncher(unittest.TestCase):
             cwd = self.root / str(i)
             cwd.mkdir()
             h = self.launch('inspect', 'literal;$(not-shell)', cwd=cwd,
-                                 env={'R8A': str(i)}, new_session=True)
+                        env={'R8A': str(i)}, new_session=True)
             self.done(h)
             data = json.loads(h.read('stdout'))
             self.eq(data['cwd'], str(cwd))
@@ -107,7 +107,7 @@ class TestLauncher(unittest.TestCase):
             self.eq(h.size(stream), 2 * 1024 * 1024)
             for offset in range(0, h.size(stream), L.MAX_READ):
                 self.eq(h.read(stream, offset=offset, limit=L.MAX_READ),
-                                 byte * L.MAX_READ)
+                        byte * L.MAX_READ)
             self.eq(h.read(stream, offset=h.size(stream)), b'')
             for bad in (-1, 0, L.MAX_READ + 1):
                 with self.assertRaises(ValueError):
@@ -179,7 +179,8 @@ class TestLauncher(unittest.TestCase):
         finally:
             if not drained:
                 try:
-                    os.killpg(h.pid, signal.SIGKILL)
+                    if ready.exists() and os.getpgid(int(ready.read_text())) == h.pid:
+                        os.killpg(h.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
 
@@ -203,6 +204,53 @@ class TestLauncher(unittest.TestCase):
             self.assertFalse((self.root / 'must-not-open').exists())
             self.assertFalse((self.root / 'effect').exists())
 
+    def cancel_lock(self, state):
+        def until(check):
+            deadline = time.monotonic() + 4
+            while not check():
+                self.assertLess(time.monotonic(), deadline, 'lock/exit watchdog')
+                time.sleep(.01)
+        lock, ready = self.root / 'lock', self.root / 'ready'
+        h = self.launch('lock', lock, ready, state, new_session=True)
+        def cleanup():
+            if ready.exists():
+                try:
+                    if os.getpgid(int(ready.read_text())) == h.pid:
+                        os.killpg(h.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        self.addCleanup(cleanup)
+        self.await_file(ready)
+        self.eq(os.getpgid(int(ready.read_text())), h.pid)
+        with lock.open('r+') as probe:
+            def locked():
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                fcntl.flock(probe, fcntl.LOCK_UN)
+                return False
+            self.assertTrue(locked())
+            if state != 'live':
+                until(lambda: sp.check_output(['ps', '-o', 'stat=', '-p',
+                                     str(h.pid)]).strip().startswith(b'Z'))
+                if state == 'reaped':
+                    self.done(h)
+            with mock.patch.object(L.os, 'killpg', wraps=os.killpg) as sent:
+                h.cancel()
+            if state == 'live':
+                self.assertLess(h.wait(5), 0)
+                until(lambda: not locked())
+            else:
+                sent.assert_not_called()
+                self.assertTrue(locked())
+
+    def test_cancel_live_lock(self): self.cancel_lock('live')
+
+    def test_cancel_unreaped_lock(self): self.cancel_lock('exited')
+
+    def test_cancel_reaped_lock(self): self.cancel_lock('reaped')
+
     def test_log_fd_alias(self):
         d = self.root / 'record'
         d.mkdir(mode=0o700)
@@ -218,7 +266,7 @@ class TestLauncher(unittest.TestCase):
         d.mkdir(mode=0o700)
         with protocol.pin(d) as pinned, pinned.drain() as fd:
             h = L._launch(self.argv('barrier', self.root / 'r', self.root / 'x'),
-                                 _protected_fd=fd)
+                        _protected_fd=fd)
             self.addCleanup(h.close)
             with self.assertRaises(sp.TimeoutExpired):
                 h.wait(.01)
@@ -274,7 +322,7 @@ class TestLauncher(unittest.TestCase):
         os.link(path, alias)
         for target in (path, alias):
             for out, err, prefix in (('wb', 'wb', b''), ('wb', 'ab', b''),
-                                     ('ab', 'wb', b''), ('ab', 'ab', b'prior')):
+                            ('ab', 'wb', b''), ('ab', 'ab', b'prior')):
                 path.write_bytes(b'prior')
                 h = self.launch('echo', stdin=b'abcde', stdout=L.Log(path, out),
                                 stderr=L.Log(target, err))

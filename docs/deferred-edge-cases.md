@@ -24,6 +24,23 @@ This is the canonical ledger of reproduced findings deferred outside a task's de
 
 ## Entries
 
+### D5 launcher: inaccessible /dev/fd
+
+- Issue and unit: ARC-3739, `d5-u3e-r8a-launcher`.
+- Original verdict and round: round 2 REVIEW_FAIL.
+- Tested revision: `c71768f`.
+- Reproduction: `27e8f49948f8a0fc/round2-reproduction.txt`: "NAMESPACE: PermissionError(13, 'Permission denied') bytes= b'control'"; patched `stat('/dev/fd')`.
+- Consequence bound: No log open, child or lost bytes. Promised macOS devfs `/dev/fd` is stat-able on both interpreters.
+- Operator recovery (and demonstration, if required): Run in the supported environment; do not bypass the protected-descriptor refusal. Success: ordinary log bytes append.
+- The five nonblocking answers:
+  1. Affects confined logging.
+  2. EACCES stops promptly, preserving work.
+  3. No guard or obligation is weakened.
+  4. The mandate's *Findings outside the supported envelope*, with Sol concurrence.
+  5. Supported-host refusal, lost bytes or a child falsifies this.
+- Maintainer: The orchestrator.
+- Reassessment triggers: Coordinator permissions/confinement change, or Linux joins the envelope.
+
 ### Scope-check subshell and GIT_CEILING_DIRECTORIES
 
 - Issue and unit: ARC-2208, `e3d-protocol-scope-check`, [PR #233](https://github.com/hanig/multi-agent-skills/pull/233).
