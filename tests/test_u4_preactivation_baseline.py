@@ -1,6 +1,8 @@
 """Pinned pre-U4 oracle: synthetic services, real state/plan/merge recording.
 No production helper supplies expectations; no production-readiness claim.
 """
+import ast
+import re
 import contextlib
 import datetime
 import hashlib
@@ -49,16 +51,28 @@ class TestPreactivation(unittest.TestCase):
                 hashes = {name: hashlib.sha256(data).hexdigest() for (name, data) in self.base_files.items()}
                 (root / 'pins.json').write_text(json.dumps(hashes))
                 if mutation and side == 'candidate':
-                    path = source / 'skills/hanig-swarm/scripts/swarm.py'
-                    text = path.read_text()
-                    if mutation == 'baseline-drop-subprocess':
-                        old = 'rc, out, err = U.run(["sbatch", "--parsable", str(script)],\n                             cwd=str(unit_dir), timeout=120)'
-                        new = 'rc, out, err = 0, "123", ""'
+                    name = 'swarm_preflight.py' if mutation == 'baseline-drop-seed' else 'swarm.py'
+                    path = source / 'skills/hanig-swarm/scripts' / name
+                    data = path.read_bytes()
+                    tree = ast.parse(data)
+                    if mutation == 'baseline-drop-seed':
+                        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_seed_reachability_problem')
+                        replacement = 'def _seed_reachability_problem(*args): return None'
+                    elif mutation == 'baseline-drop-subprocess':
+                        nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'run' and n.args and isinstance(n.args[0], ast.List) and any(isinstance(x, ast.Constant) and x.value == 'sbatch' for x in n.args[0].elts)]
+                        self.assertEqual(len(nodes), 1)
+                        node, replacement = nodes[0], '(0, "123", "")'
                     else:
-                        old = '"merged": True, "attested": True,'
-                        new = '"merged": True, "attested": True, "unexpected": True,'
-                    self.assertIn(old, text)
-                    path.write_text(text.replace(old, new, 1))
+                        nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Dict) and {'merged', 'attested'} <= {x.value for x in n.keys if isinstance(x, ast.Constant)}]
+                        self.assertEqual(len(nodes), 1)
+                        node = nodes[0]
+                        node.keys.append(ast.Constant('unexpected'))
+                        node.values.append(ast.Constant(True))
+                        replacement = ast.unparse(node)
+                    lines = data.splitlines(keepends=True)
+                    start = sum(map(len, lines[:node.lineno - 1])) + node.col_offset
+                    end = sum(map(len, lines[:node.end_lineno - 1])) + node.end_col_offset
+                    path.write_bytes(data[:start] + replacement.encode() + data[end:])
                 if mutation == 'oracle-uses-new-helper' and side == 'oracle':
                     scripts = source / 'skills/hanig-swarm/scripts'
                     (scripts / 'u4_unpinned_helper.py').write_text('VALUE = 1\n')
@@ -95,6 +109,36 @@ class TestPreactivation(unittest.TestCase):
     def test_baseline_change_record_bytes(self):
         (before, after) = self.pair('record-ok', 'baseline-change-record-bytes')
         self.assertNotEqual(before['files'], after['files'])
+
+
+    def test_comment_only_candidate(self):
+        name = 'skills/hanig-swarm/scripts/swarm.py'
+        files = dict(self.current_files)
+        lines = files[name].decode().splitlines(keepends=True)
+        lines.insert(1, '# Receipt fields: "merged": True, "attested": True,\n')
+        files[name] = ''.join(lines).encode()
+        self.current_files = files
+        before, after = self.pair('record-ok')
+        self.assertEqual(before, after)
+        self.test_baseline_change_record_bytes()
+
+    def test_seed_effect_sensitivity(self):
+        for mode in ('write', 'preview'):
+            before, after = self.pair('continue-' + mode, 'baseline-drop-seed')
+            self.assertNotEqual(before['calls'], after['calls'])
+
+    def test_inventory_regressions(self):
+        rows = '\n'.join(x for x in (ROOT / 'tests/d5_u4_effect_manifest.md').read_text().splitlines() if x.startswith('|'))
+        cited = {(a, f, int(n)) for a, f, ns in re.findall(r'(?<!\w)([SM]):(\w+):([0-9,]+)', rows) for n in ns.split(',') if n}
+        paths = {'S': 'skills/hanig-swarm/scripts/swarm.py', 'M': 'skills/hanig-orchestrate/scripts/merge_unit.py'}
+        for item in ('S.advance._bind', 'S.advance.renew_lease', 'S.advance.maybe_resume', 'S.advance._capture_artifact_basis', 'S.cmd_stop_unit.acquire_lease', 'S.cmd_stop_unit.release_lease', 'S.cmd_watch_code_terminal.run', 'S.cmd_merge._fsync_append', 'M.verify_integration.acquire_lease', 'M.verify_integration.release_lease'):
+            a, owner, call = item.split('.')
+            tree = ast.parse(self.base_files[paths[a]])
+            f = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == owner)
+            nodes = [n for n in ast.walk(f) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == call]
+            self.assertTrue(nodes, item)
+            for n in nodes:
+                self.assertIn((a, owner, n.lineno), cited)
 
 def probe(root, side, scenario):
     """Test driver only; all imported repository code comes from one materialization."""
@@ -186,6 +230,17 @@ def probe(root, side, scenario):
                 return (0, json.dumps({'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': target * 40}}), '')
             return (0, json.dumps({'sha': 'b' * 40, 'parents': [{'sha': 'c' * 40}]}), '')
         if argv[0] == 'git':
+            if scenario.startswith('continue'):
+                if any(x in argv for x in ('config', 'fetch', 'update-ref', '--is-ancestor')):
+                    return (0, '', '')
+                if 'cat-file' in argv:
+                    return (0, 'commit\n', '')
+                if 'symbolic-ref' in argv:
+                    return (0, 'refs/heads/main\n', '')
+                if 'merge-base' in argv:
+                    return (0, 'c' * 40, '')
+                if 'rev-parse' in argv and '--show-toplevel' not in argv:
+                    return (0, argv[-1] if '--verify' in argv else 'c' * 40, '')
             return (1, '', 'not a git repository')
         raise AssertionError('unexpected external command: ' + repr(argv))
 
@@ -217,6 +272,9 @@ def probe(root, side, scenario):
         patch('datetime.datetime', Clock)
         patch('os.getpid', return_value=4242)
         patch('os.urandom', side_effect=lambda n: b'\x01' * n)
+        (work / 'tmp').mkdir()
+        patch('tempfile.tempdir', str(work / 'tmp'))
+        patch('tempfile._RandomNameSequence.__next__', side_effect=(str(n).zfill(8) for n in range(1000)))
         patch('subprocess.Popen', Process)
         patch('subprocess.run', run)
         import d5_registry
@@ -258,8 +316,6 @@ def probe(root, side, scenario):
             record['units']['u'] = dict(attempt_dir=str(runs / 'u/a1'), attempt_launch_intents={'a1': intent}, attempt_produced_heads={'a1': head})
             target = dict(repo=unit['repo'], repository_remote='example/project', repository_remote_raw='example/project', target_commit='c' * 40, target_ref='refs/heads/main')
             patch('swarm_preflight._resolve_dispatch_target', return_value=(target, None))
-            patch('swarm_preflight._seed_reachability_problem', return_value=None)
-            patch('swarm_preflight._git', return_value=(0, 'c' * 40, ''))
             (work / 'prompt').write_bytes(b'new\r\n  prompt\t\n')
         plan_path.write_text(json.dumps(plan))
         (state / S.STATE_FILE).write_text(json.dumps(record))

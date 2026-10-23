@@ -24,7 +24,7 @@ S:cmd_run:3646 calls `advance`; S:cmd_advance:3669 is `return cmd_run(args)`.
 | ID / pinned evidence | Class, owner; Start → Finish; split decision | Test route |
 |---|---|---|
 | paths S:_prepare_command_paths:3520 `CP.migrate_legacy_defaults` | I/path. coordinator_paths.py:migrate_legacy_defaults:249,250,262 copies/publishes. | coordinator_paths |
-| lock S:cmd_run:3621,3656 `SS.acquire_lease/release_lease` | L/coordinator. | swarm_state |
+| lock S:cmd_stop_unit:3706,3769; M:verify_integration:735,815; S:cmd_run:3621,3656 `SS.acquire_lease/release_lease` | L/coordinator. | swarm_state |
 | watcher S:cmd_run:3644,3645,3653,3654 refresh/start/save; S:_start_code_terminal_watchers:3381,3387,3401,3409,3416 `save_state`/`Popen` | I/watch + C/status. | arc725_terminal_watcher |
 | state S:advance:2073,2115,2131,2169,2193,2215,2221,2228,2241,2263,2285,2295,2303,2310,2345,2350,2362,2375,2399,2416,2529,2696,2797,2803,2826,2861,2916,2939,3011,3024,3046,3049,3113 `SS.save_state` | I/state or bound C/state. SS:save_state:350 `U.write_json`. | swarm_state, swarm_evidence |
 | cleanup S:advance:2092,2101,2798 `SW._archive_code_worktree`; :2112 `_cleanup_codex_home` | I/preservation + I/removal. SW:_preserve_and_archive_code_worktree:464,499 Git remove/Paseo archive; SW:_cleanup_codex_home:306 `CH.remove`. | arc682_recovery, swarm_workspaces |
@@ -33,10 +33,10 @@ S:cmd_run:3646 calls `advance`; S:cmd_advance:3669 is `return cmd_run(args)`.
 | dispatch S:advance:2338,2957 `_submit` | I/dispatch (each retry). | attempt_worktrees |
 | check S:advance:2436,2438 `SE._check` | I/checker + C/receipt. swarm_evidence.py:_check:858 owns process protocol, not a pure read. | swarm_evidence, pre_dispatch_artifacts |
 | claim S:advance:2829,2950,2966,3030 release/take/note output claims | L/claim + I/namespace. SP:_take_output_claims:378,406,407,421 mkdir/rename/write; SP:_drop_claims:432 and _release_output_claims:448 remove; _note_claimed_attempt:463 writes. | dispatch_claims |
-| nudge S:advance:2694 `maybe_continue`; S:maybe_continue:1976,1977,1984 save/send/save | I/send + C/ack (resend is new I). | continuation |
+| nudge S:advance:2503 `SPRS.maybe_resume`; swarm_provider_resume.py:maybe_resume:108,115,134,146 snapshot/save/send/save; S:advance:2694 `maybe_continue`; S:maybe_continue:1976,1977,1984 save/send/save | I/send + C/ack (resend is new I). | continuation |
 | outbox S:advance:3060,3140 backfill/emit; S:cmd_stop_unit:3759 emit | I/outbox. SO:emit_intent:611,646 sequence/append; | swarm_outbox |
 | anchor S:_submit:1440,1451 capture/write launch; :1487,1510,1541,1684,1713,1723,1734,1737,1804,1834,1856,1863,1879,1892,1896 `SS.save_state` | I/preparation + C/launch facts. | swarm_code_launch |
-| isolation S:_submit:1530 `_clear_isolation_marker` | I/marker. SD:_clear_isolation_marker:206 unlink. | swarm_dispatch |
+| isolation S:_submit:1527 `SD._isolation_submission` renders only (SD:_isolation_submission:184 returns); S:_submit:1530 `_clear_isolation_marker` | R/render + I/marker. SD:_clear_isolation_marker:206 unlink. | swarm_dispatch |
 | slurm S:_submit:1564,1569,1572 `write_json`, `write_text`, `U.run` | I/script + I/sbatch + C/job ID. | swarm_dispatch; baseline run/advance |
 | pipeline S:_submit:1594,1614,1626 `open`, `Popen`, `write_json` | I/log + I/engine + C/launch. | swarm_dispatch; baseline pipeline |
 | code S:_submit:1716 `_create_code_worktree`; :1795,1809,1816 `CH.allocate/remove/populate`; :1826 `U.run(argv)` | I/worktree + I/home + I/Paseo + C/handoff. SCL:_create_code_worktree:256 `worktree add`; codex_home.py:allocate:116 mkdir, populate:151,155 symlink, remove:182 rmtree. | attempt_worktrees, codex_home |
@@ -44,6 +44,12 @@ S:cmd_run:3646 calls `advance`; S:cmd_advance:3669 is `return cmd_run(args)`.
 | seed SC:_continuation:77,81 and S:cmd_validate:3565 `_seed_reachability_problem` | I/Git metadata. SP:_seed_reachability_problem:848,877 `fetch`, `update-ref -d`; split from publication; preview also fetches. | validate_seeds |
 | publish SC:continue_plan:148 `_append`; SC:_append:121,126,130 write/replace/unlink | I/plan. | continue_command; baseline continue |
 | stop S:cmd_stop_unit:3749,3758 bump/save; :3759 emit | I/decision + I/outbox. | abandon_supersede; baseline stop |
+
+| bind S:advance:2223,2296,2351,3032 `SD._bind` | C/dispatch owner; record returned launch ID; split from launch. | swarm_dispatch |
+| lease check S:advance:2387 `SS.renew_lease`; SS:renew_lease:243 `return _holds_the_path` | R/coordinator; inspect held inode, no renewal write. | swarm_state |
+| basis S:advance:2937 `SE._capture_artifact_basis`; swarm_evidence.py:_capture_artifact_basis:539 populates dict | I/state owner; digest inputs, save at S:advance:2939. | pre_dispatch_artifacts |
+| watch child S:cmd_watch_code_terminal:3453,3477 `paseo wait`, `advance-code-terminal` | R/wait then I/advance child; split; child owns run's effects. | arc725_terminal_watcher |
+| journal S:cmd_merge:4656 `SJ._fsync_append` | C/merge child; parent M requests, child writes existing success journal; keep lease/lifetime across Finish. | baseline record |
 
 ## Merge effects
 
@@ -130,3 +136,14 @@ Estimated bytes including tests:
 | U4.9 | R10/M1–M6, separate M4 process/lock case | 25,000; U4.9m4 22,000 |
 
 U4-V/T/P/R4/R8 need separate contracts/budgets; no U3 edit authorized. Remeasure diffs.
+
+## Incomplete U4.0 delivery
+
+The coverage claim is not satisfied. U4-V still lacks a transitive remote-verifier
+ledger; U4-T still lacks per-issue tracker mutations and acknowledgments.
+The oracle exercises its 28 scenarios, not code dispatch, watcher/provider-resume,
+or verifier execution. Cold activation import purity remains U4-P.
+These require an inventory continuation and a separate baseline-expansion unit;
+no later integration unit may treat this artifact as dispatchable coverage.
+The original 14,000-byte estimate did not cover this work: even the repaired
+prefix exceeds 30,000 bytes before those remaining inventories and fixtures.
