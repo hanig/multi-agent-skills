@@ -3,8 +3,12 @@
 Supported envelope and accepted limits
 -------------------------------------
 Single-owner. Capture is file-backed; caller budgets disk; reads are bounded.
-Wait returns local status or TimeoutExpired. Cancel covers the live child/group;
-escaped descendants and post-exit writes are excluded. Logs append; wb truncates,
+Wait returns local status or TimeoutExpired. Cancel polls the leader first; signals
+only if that poll reports running. If it observes exit, or exit was recorded before,
+surviving group members are not signalled. Cancel before wait cannot guarantee
+descendant shutdown; callers needing it must own an appropriate lifetime protocol.
+Never infer descendant termination from local exit. Escaped descendants and
+post-exit writes are excluded. Logs append; wb truncates,
 xb exclusively creates, ab reuses. Only regular logs, no final symlinks/fd aliases.
 stdin: bytes/DEVNULL/borrowed PIPE. close owns stdin/captures, never the private fd;
 R8b must authorize that fd and retain parent custody.
