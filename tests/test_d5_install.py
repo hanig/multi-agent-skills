@@ -414,13 +414,11 @@ class TestInstall(unittest.TestCase):
         prior = Path.cwd()
         try:
             os.chdir(self.root)
-            for kind, locator in [(k, "directory") for k in KINDS] + [("claim", "mandate")]:
+            for kind in KINDS:
                 for convert in (str, os.fsencode, Path):
                     for prefix in ("", str(self.root) + "/"):
-                        with self.subTest(kind=kind, locator=locator, convert=convert, prefix=prefix):
-                            bad = convert(prefix + "link/../record")
-                            directory = bad if locator == "directory" else other
-                            self.mandate = bad if locator == "mandate" else self.root / "mandate.md"
+                        with self.subTest(kind=kind, convert=convert, prefix=prefix):
+                            directory = convert(prefix + "link/../record")
                             with ExitStack() as guards:
                                 for owner, name in [(protocol, "pin"), (os, "open"), (os, "getcwdb")] + [
                                         (store, n) for n in ("create", "replace", "claim", "read_bytes")]:
@@ -432,6 +430,33 @@ class TestInstall(unittest.TestCase):
                                 self.assertEqual(list(candidate.iterdir()), [])
         finally:
             os.chdir(prior)
+
+    def test_mandate_dotdot_is_read_without_normalization_under_locks(self):
+        # R3-REFUSE-MANDATE-DOTDOT: trusted read locators remain supported.
+        directory = self.directory("claim", "claim")
+        nested = self.root / "nested"
+        (nested / "child").mkdir(parents=True)
+        (nested / "mandate.md").write_bytes(MANDATE)
+        self.mandate.write_bytes(b"wrong lexical target")
+        (self.root / "link").symlink_to(nested / "child", target_is_directory=True)
+        read = store.read_bytes
+
+        def reading(path):
+            self.assertEqual([(rank, shared) for _, rank, shared, _ in locks._held()],
+                             [(0, False), (1, False)])
+            return read(path)
+
+        prior = Path.cwd()
+        try:
+            os.chdir(self.root)
+            with mock.patch.object(store, "read_bytes", side_effect=reading) as observed:
+                result = install.claim_custody(directory, mandate_path="link/../mandate.md")
+            self.assertEqual(observed.call_args_list[0][0][0],
+                             str(Path.cwd()) + "/link/../mandate.md")
+        finally:
+            os.chdir(prior)
+        self.assertEqual(result["custody"]["session_id"], "native")
+        self.assertEqual(store.read(directory), result)
 
     def test_symlink_component_without_dotdot(self):
         nested = self.root / "nested..safe"
