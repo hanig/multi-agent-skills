@@ -14,13 +14,13 @@ The registered checkout stays at the path recorded at registration for the regis
 Non-claims: the helper cannot prove nonblocking behavior of arbitrary injected
 code; no exactly-once execution; no implicit retries.
 
-Trusted Boundary adapters start one effect without response waits, deferral,
-retries or additional effects. Finish consumes ambiguous starts too, leaving
-no unprotected activity on return/error; children use the protected-child protocol.
+Named, trusted Boundary adapters start one effect without response waits,
+deferral, retries or additional effects. A normal Finish return means the
+started operation has terminated; children use the protected-child protocol.
 Callers supply unique request_id and accurate immutable scope/intent.
 Accounting errors, including inactive D5, propagate and retain the entry.
-A shared descriptor survives skipped accounting until process exit; it closes
-after confirmed accounting or established non-submission.
+A shared descriptor survives unconfirmed exits until process exit. Uncertainty
+accounting never authorizes release. The terminal epilogue is the release gate.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -64,7 +64,7 @@ class Boundary(ABC):
 
     @abstractmethod
     def finish(self):
-        """Consume response; return outcome."""
+        """Wait for termination, including ambiguous starts; return ledger outcome."""
 
 
 @dataclass(frozen=True)
@@ -91,8 +91,12 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
     with protocol.pin(entry["record_dir"]) as pinned, pinned.drain() as drain:
         if pinned._record._prior(1) is not None:
             raise AuthorityError("D5 submission inside START is forbidden")
+        # H: holder owned; A: Start may have run; N: durable not-submitted;
+        # S: normal START exit; F: valid Finish return; C: durable completion.
+        H = A = N = S = F = C = False
         holder = os.dup(drain)
-        attempt, began, state, start_error = None, False, Initiation.UNCERTAIN, None
+        H = True
+        attempt, state, start_error = None, Initiation.UNCERTAIN, None
         capability, accounting_error = None, None
         outcome, response_error = None, None
         try:
@@ -105,13 +109,13 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                         kind=operation.kind, scope=json.loads(operation.scope),
                         correlation={"request_id": operation.request_id, "intent": bytes.hex(operation.intent)})
                     admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
-                    began = True
+                    A = True
                     state = boundary.start(operation)
+                S = True
             except BaseException as exc:
-                if not began:
+                if not A:
                     if attempt is not None:
                         ledger._classify(attempt, "not_submitted")
-                    os.close(holder)
                     raise
                 start_error = exc
             if type(state) is not Initiation:
@@ -122,31 +126,28 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                     capability = completion.bind(ledger._classify(attempt, "submitted"))
                 elif state is Initiation.NOT_SUBMITTED:
                     ledger._classify(attempt, "not_submitted")
-                    os.close(holder)
+                    N = True
             except BaseException as exc:
                 accounting_error = exc
         finally:
             # Drain the initiated operation on interruption too.
-            if began and state is not Initiation.NOT_SUBMITTED:
+            if A and state is not Initiation.NOT_SUBMITTED:
                 try:
                     outcome = boundary.finish()
+                    ledger._outcome(outcome)
+                    F = True
                 except BaseException as exc:
                     response_error = exc
                 finally:
                     if capability is None or response_error is not None:
                         completion.bind(attempt).uncertain()
                     else:
-                        try:
-                            outcome = capability.complete(outcome)
-                        except BaseException as error:
-                            # Confirm via R4; retain the original failure.
-                            try:
-                                capability.complete(outcome)
-                            except BaseException:
-                                raise error
-                            os.close(holder)
-                            raise
-                    os.close(holder)
+                        outcome = capability.complete(outcome)
+                        C = True
+        # No handler/finalizer closes the holder. Missing facts retain it even
+        # when uncertainty was durably recorded or an interrupt was caught.
+        if H and S and (not A or N or (F and C)):
+            os.close(holder)
         if accounting_error is not None:
             raise accounting_error
         if start_error is not None:
