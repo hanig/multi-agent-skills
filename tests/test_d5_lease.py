@@ -13,12 +13,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
 import d5_authority as authority
 import d5_authority_store as store
+import d5_host as host
 import d5_lease as lease
 import d5_registry as registry
+from tests.test_d5_locks import isolate_pool
 
 
 class TestD5Lease(unittest.TestCase):
     def setUp(self):
+        isolate_pool(self)
+        anchor = mock.patch.object(host, "session_anchor", return_value=(
+            "native", host.ProcessIdentity(42, 9000001)))
+        anchor.start()
+        self.addCleanup(anchor.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name).resolve()

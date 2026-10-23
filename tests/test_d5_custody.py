@@ -1,8 +1,10 @@
 """Custody transitions through the locked store and inactive public API."""
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from contextlib import ExitStack
 import copy
 import fcntl
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,9 +18,11 @@ import d5_authority as authority
 import d5_authority_store as store
 import d5_custody as custody
 import d5_host as host
+import d5_install as install
 import d5_lease as lease
 import d5_registry as registry
 from tests.test_d5_authority import MANDATE, grant
+from tests.test_d5_locks import isolate_pool
 
 ANCHOR = host.ProcessIdentity(42, 9000001)
 OTHER = host.ProcessIdentity(43, 9000002)
@@ -26,6 +30,10 @@ OTHER = host.ProcessIdentity(43, 9000002)
 
 class TestCustodyStore(unittest.TestCase):
     def setUp(self):
+        isolate_pool(self)
+        anchor = mock.patch.object(host, "session_anchor", return_value=("native", ANCHOR))
+        anchor.start()
+        self.addCleanup(anchor.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
@@ -223,6 +231,7 @@ class TestCustodyStore(unittest.TestCase):
 
 class TestCustodyAPI(unittest.TestCase):
     def setUp(self):
+        isolate_pool(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name).resolve()
@@ -230,6 +239,11 @@ class TestCustodyAPI(unittest.TestCase):
         subprocess.run(["git", "init", str(self.repo)], check=True,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
         self.state.mkdir()
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs/orchestrator-mandate.md").write_bytes(MANDATE)
+        clock = mock.patch.object(install.time, "time", return_value=101)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.base = self.directory / "external"
         for name, target, value in (("base_patch", registry.CP, ("_external_base", self.base)),
                                     ("anchor", host, ("session_anchor", ("native", ANCHOR))),
@@ -282,14 +296,36 @@ class TestCustodyAPI(unittest.TestCase):
         self.assertEqual(self.tree(), before)
 
     def test_unknown_anchor_refuses_without_fallback(self):
-        self.register()
+        entry = self.register()
+        directory = Path(entry["record_dir"])
         before = self.tree()
         self.anchor.return_value = host.Unknown("no verified native anchor")
-        with mock.patch.object(registry, "d5_active", return_value=True):
-            for operation in (self.claim, self.relinquish):
-                with self.assertRaisesRegex(authority.AuthorityError, "no verified native anchor"):
+        with mock.patch.object(registry, "d5_active", return_value=True), ExitStack() as stack:
+            # R9-UNKNOWN-FALLBACK: no authority-store operation may be entered.
+            # Registry's strict byte reader remains available to resolve identity.
+            for name in ("claim", "relinquish", "create", "replace", "revoke", "check", "read"):
+                stack.enter_context(mock.patch.object(store, name, side_effect=AssertionError(name)))
+            for operation, reason in ((self.claim, "D5 anchor is not verifiable"),
+                                      (self.relinquish, "no verified native anchor")):
+                with self.assertRaisesRegex(authority.AuthorityError, "^" + reason + "$"):
                     operation()
-        self.assertEqual(self.tree(), before)
+        after = self.tree()
+        allowed = {str((directory / name).relative_to(self.directory))
+                   for name in ("authority.drain.lock", "authority.start.lock")}
+        self.assertLessEqual(set(after) - set(before), allowed)
+        for relative in set(after) - set(before):
+            info = (self.directory / relative).lstat()
+            self.assertTrue(stat.S_ISREG(info.st_mode), relative)
+            self.assertEqual(stat.S_IMODE(info.st_mode), 0o600, relative)
+            del after[relative]
+        # Creating the allowed entries changes their containing directory's mtime.
+        # Keep its inode/mode and all other paths' complete snapshots exact.
+        parent = str(directory.relative_to(self.directory))
+        self.assertEqual(after[parent][:2], before[parent][:2])
+        after[parent] = (after[parent][0], after[parent][1], before[parent][2], after[parent][3])
+        self.assertEqual(after, before)
+        record = str((directory / store.RECORD_NAME).relative_to(self.directory))
+        self.assertEqual(self.tree()[record], before[record])
         self.live.assert_not_called()
 
     def test_api_claim_and_relinquish_reinspect_identity(self):
