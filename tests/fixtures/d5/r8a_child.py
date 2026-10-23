@@ -1,10 +1,8 @@
-"""Finite real-process fixtures for R8a transport tests."""
 import json
 import os
 from pathlib import Path
 import sys
 import time
-
 
 def main():
     action, *args = sys.argv[1:]
@@ -50,7 +48,6 @@ def main():
     elif action == 'mark':
         Path(args[0]).write_text('unexpected launch')
     return 0
-
 
 if __name__ == '__main__':
     sys.exit(main())
