@@ -93,7 +93,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
         raise AuthorityError("D5 is inactive")
     if not isinstance(boundary, Boundary):
         raise AuthorityError("D5 submission requires an explicit effect boundary")
-    if type(operation) is not Operation:
+    if not isinstance(operation, Operation):
         raise ValueError("D5 operation requires immutable fields")
     entry = registry.lookup(checkout, plan_id, state_dir)
     if entry is None:
