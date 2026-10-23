@@ -41,7 +41,15 @@ def effect(data, inherited, mode):
 
     def submit(*args, **kwargs):
         assert not any(rank > 0 for _, rank, _, _ in t.protocol.locks._held())
-        emit('adopted', inheritable=os.get_inheritable(inherited), pid=os.getpid())
+        observed = {}
+        for fd in data.get('inspect_fds', []):
+            try:
+                info = os.fstat(fd)
+                observed[str(fd)] = [info.st_dev, info.st_ino]
+            except OSError:
+                observed[str(fd)] = None
+        emit('adopted', inheritable=os.get_inheritable(inherited), pid=os.getpid(),
+             observed=observed)
         wait_for('request')
         return real_submit(*args, **kwargs)
 
