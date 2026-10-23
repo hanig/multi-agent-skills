@@ -396,6 +396,16 @@ class TestSubmission(unittest.TestCase):
                 self.submit()
         self.assertEqual(self.boundary.calls, [])
 
+    def test_immutable_operation_subclass(self):
+        class MyOp(submission.Operation):
+            pass
+        self.operation = MyOp("A", "fixture", self.operation.scope, self.operation.intent)
+        with self.assertRaises(FrozenInstanceError):
+            self.operation.intent = b"changed"
+        self.assertEqual(self.submit().initiation, submission.Initiation.SUBMITTED)
+        self.assertIs(self.boundary.calls[0][1], self.operation)
+        self.assertEqual(self.rows()[0]["state"], "completed")
+
     def test_immutable_operation_and_invalid_initiation(self):
         # R6-MUTABLE-INTENT / R6-INVALID-INITIATION.
         with self.assertRaises(FrozenInstanceError):
