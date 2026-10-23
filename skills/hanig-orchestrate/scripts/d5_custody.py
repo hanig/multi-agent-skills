@@ -7,34 +7,37 @@ from pathlib import Path
 
 import d5_authority as authority
 import d5_authority_store as store
+import d5_control
 import d5_host
+import d5_install
 import d5_registry
 
 
-def _claimant(checkout, plan_id, state_dir):
+def _active():
     if not d5_registry.d5_active():
         raise authority.AuthorityError("D5 is not active")
-    entry = d5_registry.lookup(checkout, plan_id, state_dir)
-    if entry is None:
-        raise authority.AuthorityError("not registered")
-    anchor = d5_host.session_anchor()
-    if isinstance(anchor, d5_host.Unknown):
-        raise authority.AuthorityError(anchor.reason)
-    session_id, identity = anchor
-    return entry["record_dir"], session_id, identity
 
 
 def claim(checkout, plan_id, state_dir, *, now, mandate_bytes):
-    """Require activation, registration and the native session anchor."""
-    directory, session_id, identity = _claimant(checkout, plan_id, state_dir)
-    return store.claim(directory, now, mandate_bytes, session_id, identity,
-                       d5_host.liveness)
+    """Delegate to R3 using the freshly resolved registration's mandate source.
+
+    now and mandate_bytes remain for signature compatibility; the active branch
+    does not use them. R3 samples time, native identity and registered bytes
+    under its locks. Its store.read_bytes opens with O_NOFOLLOW and refuses
+    a non-regular mandate file.
+    """
+    _active()
+    entry = d5_registry.lookup(checkout, plan_id, state_dir)
+    if entry is None:
+        raise authority.AuthorityError("not registered")
+    return d5_install.claim_custody(entry["record_dir"], mandate_path=(
+        Path(entry["checkout"]) / "docs/orchestrator-mandate.md"))
 
 
 def relinquish(checkout, plan_id, state_dir, *, now):
     """Relinquishment disables this holder; it is not a live handoff."""
-    directory, session_id, identity = _claimant(checkout, plan_id, state_dir)
-    return store.relinquish(directory, now, session_id, identity)
+    _active()
+    return d5_control.relinquish(checkout, plan_id, state_dir, now=now)
 
 
 def status(checkout, plan_id, state_dir, *, now):

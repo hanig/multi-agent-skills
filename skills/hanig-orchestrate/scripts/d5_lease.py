@@ -1,7 +1,7 @@
 """Inert D5 lease management; no production callers, CLI or authorization.
 
-Registration owns placement and identity; the record store owns write locking
-and replacement rules. Status reads atomic snapshots without creating locks
+Registration owns placement and identity; R3/R2 serialize active mutations,
+and the record store owns replacement rules. Status reads atomic snapshots without creating locks
 or persisting invalidation. Its evaluation is diagnostic only.
 """
 from contextlib import contextmanager
@@ -12,6 +12,8 @@ import uuid
 
 import d5_authority as authority
 import d5_authority_store as store
+import d5_control
+import d5_install
 import d5_registry
 
 
@@ -64,17 +66,17 @@ def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
     authority.validate(record)
     entry = _registered(checkout, plan_id, state_dir)
     directory = Path(entry["record_dir"])
-    operation = (store.replace if store.present(directory / store.RECORD_NAME, "record")
-                 else store.create)
+    operation = (d5_install.replace_authority
+                 if store.present(directory / store.RECORD_NAME, "record")
+                 else d5_install.install_initial)
     with _grant_locked(directory):
         return operation(directory, record)
 
 
 def revoke(checkout, plan_id, state_dir, now, reason):
-    """Require activation and registration before the store's revocation."""
+    """Keep the inactive refusal; R2 resolves registration and serializes revoke."""
     _active()
-    entry = _registered(checkout, plan_id, state_dir)
-    return store.revoke(entry["record_dir"], now, reason)
+    return d5_control.revoke(checkout, plan_id, state_dir, now, reason)
 
 
 def status(checkout, plan_id, state_dir, *, now, mandate_bytes):
