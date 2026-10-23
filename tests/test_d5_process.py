@@ -227,6 +227,19 @@ class TestProcess(unittest.TestCase):
             popen.assert_not_called()
         self.assertEqual(descriptors(), before)
 
+    def test_standard_descriptor_collision_refused(self):
+        # R8-ACCEPT-STANDARD-DRAIN: subprocess stdio remaps these slots.
+        proc = self.own(process.worker_spawn([sys.executable, PEER,
+                                             'standard-slots', str(self.directory)]))
+        for standard in (0, 1, 2):
+            event = self.event(proc, 'standard-slot')
+            self.assertEqual(event['standard'], standard)
+            self.assertEqual(event['error'], 'D5 protected DRAIN uses a standard descriptor')
+            self.assertFalse(event['spawned'])
+            self.assertTrue(event['unchanged'])
+        stdout, stderr = proc.communicate(timeout=20)
+        self.assertEqual((proc.returncode, stdout, stderr), (0, b'', b''))
+
     def test_protocol_locks_cannot_be_communication(self):
         # R8-ACCEPT-LOCK-AS-COMM: direct and dup aliases, explicit/stdio paths.
         _, drain = self.holding()
