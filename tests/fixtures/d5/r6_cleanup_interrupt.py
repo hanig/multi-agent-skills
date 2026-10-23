@@ -1,52 +1,64 @@
-"""RECOVERY, NOT READY: expected-failing round-3 cleanup interruption regression."""
+"""R6-RELEASE-ON-UNWIND: interrupted accounting keeps protection until exit."""
 import inspect
+import json
+import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests import test_d5_submission as t
+
+
+def child(data):
+    case = t.TestSubmission()
+    case.args, directory, case.request, scope, external = data
+    case.directory = Path(directory)
+    case.request["anchor"] = t.ANCHOR
+    case.operation = t.submission.Operation("A", "fixture", scope.encode(), b"effect")
+    case.boundary = t.DeterministicBoundary()
+    lines, first = inspect.getsourcelines(t.submission.submit)
+    target = first + next(i for i, line in enumerate(lines)
+        if line.strip() == "if began and state is not Initiation.NOT_SUBMITTED:")
+    def interrupt(frame, event, arg):
+        if event == "line" and frame.f_code is t.submission.submit.__code__ and frame.f_lineno == target:
+            sys.settrace(None)
+            raise KeyboardInterrupt("cleanup-entry")
+        return interrupt
+    with mock.patch.object(t.registry.CP, "_external_base", return_value=Path(external)), \
+            mock.patch.object(t.registry, "d5_active", return_value=True), \
+            mock.patch.object(t.host, "session_anchor", return_value=("native", t.ANCHOR)), \
+            mock.patch.object(t.admission.time, "time", return_value=150):
+        try:
+            sys.settrace(interrupt)
+            case.submit()
+        except KeyboardInterrupt as exc:
+            assert str(exc) == "cleanup-entry"
+        else:
+            raise AssertionError("interrupt did not fire")
+        finally:
+            sys.settrace(None)
+        assert [c[0] for c in case.boundary.calls] == ["start"]
+        assert case.rows()[0]["outcome"] is None
+        assert case.probe("drain") == "blocked"
 
 
 def reproduce():
     case = t.TestSubmission()
     case.setUp()
-    previous = sys.gettrace()
     try:
-        pending = []
-        observations = []
-        case.boundary.on_start = lambda: pending.append('outstanding')
-        def finish():
-            observations.append((case.probe('drain'), case.probe('start')))
-            pending.clear()
-            return dict(t.OK)
-        case.boundary.on_finish = finish
-        lines, first = inspect.getsourcelines(t.submission.submit)
-        target = first + next(i for i, line in enumerate(lines)
-            if line.strip() == 'if began and state is not Initiation.NOT_SUBMITTED:')
-        def interrupt(frame, event, arg):
-            if (event == 'line' and frame.f_code is t.submission.submit.__code__
-                    and frame.f_lineno == target):
-                sys.settrace(None)
-                raise KeyboardInterrupt('cleanup-entry')
-            return interrupt
-        try:
-            sys.settrace(interrupt)
-            case.submit()
-        except KeyboardInterrupt as exc:
-            print('interrupt:', str(exc))
-        finally:
-            sys.settrace(previous)
-        calls = [call[0] for call in case.boundary.calls]
-        print('calls:', calls)
-        print('finish observations:', observations)
-        print('pending:', pending)
-        print('states:', [row['state'] for row in case.rows()])
-        print('drain:', case.probe('drain'))
-        assert calls == ['start', 'finish'] and not pending
-        assert observations == [('blocked', 'available')]
+        data = [list(map(str, case.args)), str(case.directory),
+                {k: v for k, v in case.request.items() if k != "anchor"},
+                case.operation.scope.decode(), str(case.root / "external")]
+        result = subprocess.run([sys.executable, __file__, json.dumps(data)], timeout=30)
+        assert result.returncode == 0
+        assert case.probe("drain") == "available"
+        row, = t.ledger.unresolved(*case.args)
+        assert row["state"] == "submitted" and row["outcome"] is None
+        assert row["reconciliation_required"] is False
+        print("held alive; released on exit; unresolved submitted/null/false")
     finally:
-        sys.settrace(previous)
         case.doCleanups()
 
 
 if __name__ == "__main__":
-    reproduce()
+    child(json.loads(sys.argv[1])) if len(sys.argv) > 1 else reproduce()
