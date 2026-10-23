@@ -9,8 +9,8 @@ Paths: skills/hanig-swarm/scripts except M/d5_*/skill_paths.py in
 hanig-orchestrate/scripts and LS/LA/DC in hanig-project/scripts.
 Tests: tests/test_NAME.py; IV=integration_verification, RVT=remote_verification,
 MVT=merge_verification_routing, SDT=swarm_dispatch, SST=swarm_state,
-AW=attempt_worktrees, WT=arc725_terminal_watcher; baseline routes belong to U4.0b. Tests are future D5 routes. IDs = row/citation/line; comma lists
-expand to individual sites and each loop/retry. 
+AW=attempt_worktrees, WT=arc725_terminal_watcher; baseline routes belong to U4.0b. Tests are future D5 routes. IDs = citation/line; comma lists
+expand to individual sites and each loop/retry.
 
 ## Supported envelope and accepted limits
 
@@ -30,49 +30,49 @@ S:cmd_run:3646 calls `advance`; S:cmd_advance:3669 is `return cmd_run(args)`.
 
 | Evidence / ID | Contract | Test |
 |---|---|---|
-| paths S:_prepare_command_paths:3520 `CP.migrate_legacy_defaults` | I/path. coordinator_paths.py:migrate_legacy_defaults:249,250,262 copies/publishes. | coordinator_paths |
-| lock S:cmd_stop_unit:3706,3769; M:verify_integration:735,815; S:cmd_run:3621,3656 | L/coordinator. | SST |
-| watcher S:cmd_run:3644,3645,3653,3654 refresh/start/save; S:_start_code_terminal_watchers:3381,3387,3401,3409,3416 | I/watch + C/status. | WT |
-| state S:advance:2073,2115,2131,2169,2193,2215,2221,2228,2241,2263,2285,2295,2303,2310,2345,2350,2362,2375,2399,2416,2529,2696,2797,2803,2826,2861,2916,2939,3011,3024,3046,3049,3113 | I/state or bound C/state. SS:save_state:350 `U.write_json`. | swarm_state, swarm_evidence |
-| cleanup S:advance:2092,2101,2798 `SW._archive_code_worktree`; S:advance:2112 `_cleanup_codex_home` | I/preserve/remove. SW:_preserve_and_archive_code_worktree:464,499 Git remove/Paseo archive; SW:_cleanup_codex_home:306 `CH.remove`. | arc682_recovery, swarm_workspaces |
-| recover S:advance:2195,2265 `_recover_code_launch`; S:advance:2223,2296,2351 `_bind` | C/recovery (binding required). SW:_recover_code_launch:155 `paseo inspect`; SD:_bind:279 `unit.py bind`. | swarm_code_launch, swarm_dispatch |
-| allocate S:advance:2912 `SD._allocate`; SD:_allocate:38 `U.run` | I/allocation. unit.py:cmd_allocate:924,955,958 mkdir/spec/event. | SDT |
-| dispatch S:advance:2338,2957 `_submit` | I/dispatch (each retry). | AW |
-| check S:advance:2436,2438 `SE._check` | I/checker; C/receipt. swarm_evidence.py:_check:858 owns checker process. | swarm_evidence, pre_dispatch_artifacts |
-| claim S:advance:2829,2950,2966,3030 release/take/note output claims | L/claim + I/namespace. SP:_take_output_claims:378,406,407,421 mkdir/rename/write; SP:_drop_claims:432 and SP:_release_output_claims:448 remove; SP:_note_claimed_attempt:463 writes. | dispatch_claims |
-| nudge S:advance:2503 `SPRS.maybe_resume`; swarm_provider_resume.py:maybe_resume:108,116,134,144 snapshot/save/send/save; S:advance:2694 `maybe_continue`; S:maybe_continue:1976,1977,1984 save/send/save | I/send + C/ack (resend is new I). | continuation |
-| outbox S:advance:3060,3140 backfill/emit; S:cmd_stop_unit:3759 emit | I/outbox. SO:emit_intent:611,646 sequence/append; | swarm_outbox |
-| anchor S:_submit:1440,1451 capture/write launch; S:_submit:1487,1510,1541,1684,1713,1723,1734,1737,1804,1834,1856,1863,1879,1892,1896 | I/preparation; C/launch. | swarm_code_launch |
-| isolation S:_submit:1527 `SD._isolation_submission` renders only (SD:_isolation_submission:184 returns); S:_submit:1530 `_clear_isolation_marker` | R/render + I/marker. SD:_clear_isolation_marker:206 unlink. | SDT |
-| slurm S:_submit:1564,1569,1572 `write_json`, `write_text`, `U.run` | I/script/sbatch; C/job ID. | swarm_dispatch |
-| pipeline S:_submit:1594,1614,1626 `open`, `Popen`, `write_json` | I/log/engine; C/launch. | swarm_dispatch |
-| code S:_submit:1716 `_create_code_worktree`; S:_submit:1795,1809,1816 `CH.allocate/remove/populate`; S:_submit:1826 `U.run(argv)` | I/worktree/home/Paseo; C/handoff. SCL:_create_code_worktree:256 `worktree add`; codex_home.py:allocate:116 mkdir, codex_home.py:populate:151,155 symlink, codex_home.py:remove:182 rmtree. | attempt_worktrees, codex_home |
-| continue S:cmd_continue:3532 `SC.continue_plan`; SC:_plan_file:104 `flock` | L/plan inode. | continue_command |
-| seed SC:_continuation:77,81 and S:cmd_validate:3565 `_seed_reachability_problem` | I/Git metadata. SP:_seed_reachability_problem:848,877 `fetch`, `update-ref -d`; split from publication; preview also fetches. | validate_seeds |
-| publish SC:continue_plan:148 `_append`; SC:_append:121,126,130 write/replace/unlink | I/plan. | continue_command |
-| stop S:cmd_stop_unit:3749,3758 bump/save; S:cmd_stop_unit:3759 emit | I/decision/outbox. | abandon_supersede |
+| S:_prepare_command_paths:3520 `CP.migrate_legacy_defaults` | I/path. coordinator_paths.py:migrate_legacy_defaults:249,250,262 copies/publishes. | coordinator_paths |
+| S:cmd_stop_unit:3706,3769; M:verify_integration:735,815; S:cmd_run:3621,3656 | L/coordinator. | SST |
+| S:cmd_run:3644,3645,3653,3654 refresh/start/save; S:_start_code_terminal_watchers:3381,3387,3401,3409,3416 | I/watch + C/status. | WT |
+| S:advance:2073,2115,2131,2169,2193,2215,2221,2228,2241,2263,2285,2295,2303,2310,2345,2350,2362,2375,2399,2416,2529,2696,2797,2803,2826,2861,2916,2939,3011,3024,3046,3049,3113 | I/state or bound C/state. SS:save_state:350 `U.write_json`. | swarm_state, swarm_evidence |
+| S:advance:2092,2101,2798 `SW._archive_code_worktree`; S:advance:2112 `_cleanup_codex_home` | I/preserve/remove. SW:_preserve_and_archive_code_worktree:464,499 Git remove/Paseo archive; SW:_cleanup_codex_home:306 `CH.remove`. | arc682_recovery, swarm_workspaces |
+| S:advance:2195,2265 `_recover_code_launch`; S:advance:2223,2296,2351 `_bind` | C/recovery (binding required). SW:_recover_code_launch:155 `paseo inspect`; SD:_bind:279 `unit.py bind`. | swarm_code_launch, swarm_dispatch |
+| S:advance:2912 `SD._allocate`; SD:_allocate:38 `U.run` | I/allocation. unit.py:cmd_allocate:924,955,958 mkdir/spec/event. | SDT |
+| S:advance:2338,2957 `_submit` | I/dispatch (each retry). | AW |
+| S:advance:2436,2438 `SE._check` | I/checker; C/receipt. swarm_evidence.py:_check:858 owns checker process. | swarm_evidence, pre_dispatch_artifacts |
+| S:advance:2829,2950,2966,3030 release/take/note output claims | L/claim + I/namespace. SP:_take_output_claims:378,406,407,421 mkdir/rename/write; SP:_drop_claims:432 and SP:_release_output_claims:448 remove; SP:_note_claimed_attempt:463 writes. | dispatch_claims |
+| S:advance:2503 `SPRS.maybe_resume`; swarm_provider_resume.py:maybe_resume:108,116,134,144 snapshot/save/send/save; S:advance:2694 `maybe_continue`; S:maybe_continue:1976,1977,1984 save/send/save | I/send + C/ack (resend is new I). | continuation |
+| S:advance:3060,3140 backfill/emit; S:cmd_stop_unit:3759 emit | I/outbox. SO:emit_intent:611,646 sequence/append; | swarm_outbox |
+| S:_submit:1440,1451 capture/write launch; S:_submit:1487,1510,1541,1684,1713,1723,1734,1737,1804,1834,1856,1863,1879,1892,1896 | I/preparation; C/launch. | swarm_code_launch |
+| S:_submit:1527 `SD._isolation_submission` renders only (SD:_isolation_submission:184 returns); S:_submit:1530 `_clear_isolation_marker` | R/render + I/marker. SD:_clear_isolation_marker:206 unlink. | SDT |
+| S:_submit:1564,1569,1572 `write_json`, `write_text`, `U.run` | I/script/sbatch; C/job ID. | swarm_dispatch |
+| S:_submit:1594,1614,1626 `open`, `Popen`, `write_json` | I/log/engine; C/launch. | swarm_dispatch |
+| S:_submit:1716 `_create_code_worktree`; S:_submit:1795,1809,1816 `CH.allocate/remove/populate`; S:_submit:1826 `U.run(argv)` | I/worktree/home/Paseo; C/handoff. SCL:_create_code_worktree:256 `worktree add`; codex_home.py:allocate:116 mkdir, codex_home.py:populate:151,155 symlink, codex_home.py:remove:182 rmtree. | attempt_worktrees, codex_home |
+| S:cmd_continue:3532 `SC.continue_plan`; SC:_plan_file:104 `flock` | L/plan inode. | continue_command |
+| SC:_continuation:77,81 and S:cmd_validate:3565 `_seed_reachability_problem` | I/Git metadata. SP:_seed_reachability_problem:848,877 `fetch`, `update-ref -d`; split from publication; preview also fetches. | validate_seeds |
+| SC:continue_plan:148 `_append`; SC:_append:121,126,130 write/replace/unlink | I/plan. | continue_command |
+| S:cmd_stop_unit:3749,3758 bump/save; S:cmd_stop_unit:3759 emit | I/decision/outbox. | abandon_supersede |
 
-| bind S:advance:2223,2296,2351,3032 `SD._bind` | C/dispatch; record launch ID; split. | SDT |
-| lease check S:advance:2387 `SS.renew_lease`; SS:renew_lease:243 `return _holds_the_path` | R/coordinator; inspect inode, no write. | SST |
-| basis S:advance:2937 `SE._capture_artifact_basis`; swarm_evidence.py:_capture_artifact_basis:539 populates dict | I/state; digest, save at S:advance:2939. | pre_dispatch_artifacts |
-| watch child S:cmd_watch_code_terminal:3453,3477 `paseo wait`, `advance-code-terminal` | R/wait; I/advance child owns effects; split. | WT |
-| observations S:_submit:1665; S:advance:2322; M:verify_integration:775 | R/caller; show-ref/PR view → observation. | MVT |
-| journal S:cmd_merge:4656 `SJ._fsync_append` | C/merge child; M requests, child journals; retain lease/lifetime in Finish. | baseline record |
+| S:advance:2223,2296,2351,3032 `SD._bind` | C/dispatch; record launch ID; split. | SDT |
+| S:advance:2387 `SS.renew_lease`; SS:renew_lease:243 `return _holds_the_path` | R/coordinator; inspect inode, no write. | SST |
+| S:advance:2937 `SE._capture_artifact_basis`; swarm_evidence.py:_capture_artifact_basis:539 populates dict | I/state; digest, save at S:advance:2939. | pre_dispatch_artifacts |
+| S:cmd_watch_code_terminal:3453,3477 `paseo wait`, `advance-code-terminal` | R/wait; I/advance child owns effects; split. | WT |
+| S:_submit:1665; S:advance:2322; M:verify_integration:775 | R/caller; show-ref/PR view → observation. | MVT |
+| S:cmd_merge:4656 `SJ._fsync_append` | C/merge child; M requests, child journals; retain lease/lifetime in Finish. | baseline record |
 
 ## Merge effects
 
 | Evidence / ID | Contract | Test |
 |---|---|---|
-| mlock M:main:984,990 | L/operator. | merge_unit contention |
-| repair M:current_intent:431,432,435,436,475 write/unlink | I/intent repair. | merge_unit recovery |
-| mabandon M:abandon:486,488 `durable_write` | I/sidecar/resolve. | baseline merge-abandon |
-| intent M:reconcile:632 `durable_write` | I/intent. | baseline merge |
-| cancel M:cancel_before_request:502,507,511,515,516 write/unlink | C/cancellation if bound. | baseline merge-cancel |
-| request M:reconcile:647 `run(cmd["merge"])` | I/squash; C/result. | baseline merge-ok/fail/pending |
-| record M:reconcile:686,692,706,708 write/receipt child/save/write | C/merge recorder if bound. | baseline merge/record |
-| next M:main:997 `run(advance)` | I/advance. | merge_unit |
-| tracker M:main:1001,1002 drain/audit; M:print_tracker_drain:886 `subprocess.run` | I/drain (U6) + R/audit. | merge_unit tracker |
-| verify M:verify_integration:724 `V.run_merge_preconditions`; M:verify_integration:808,810 append/acknowledge | I/verifier + C/evidence. | MVT |
+| M:main:984,990 | L/operator. | merge_unit contention |
+| M:current_intent:431,432,435,436,475 write/unlink | I/intent repair. | merge_unit recovery |
+| M:abandon:486,488 `durable_write` | I/sidecar/resolve. | baseline merge-abandon |
+| M:reconcile:632 `durable_write` | I/intent. | baseline merge |
+| M:cancel_before_request:502,507,511,515,516 write/unlink | C/cancellation if bound. | baseline merge-cancel |
+| M:reconcile:647 `run(cmd["merge"])` | I/squash; C/result. | baseline merge-ok/fail/pending |
+| M:reconcile:686,692,706,708 write/receipt child/save/write | C/merge recorder if bound. | baseline merge/record |
+| M:main:997 `run(advance)` | I/advance. | merge_unit |
+| M:main:1001,1002 drain/audit; M:print_tracker_drain:886 `subprocess.run` | I/drain (U6) + R/audit. | merge_unit tracker |
+| M:verify_integration:724 `V.run_merge_preconditions`; M:verify_integration:808,810 append/acknowledge | I/verifier + C/evidence. | MVT |
 
 
 ## Verifier and remote verifier expansion
@@ -137,13 +137,13 @@ RV:cleanup_slurm:825,831 polling is R. Fresh launch: RV:run_remote:1454. Keep po
 
 | Evidence / ID | Contract | Test |
 |---|---|---|
-| tlock LS:project_lock:823,824,826 | L/drain process; mkdir/open/flock → close on exit; retain outside per-issue boundaries. | linear_drain |
-| comment LS:drain_locked:1009; LS:confirm_comment:761 | I/U6 comment; one deterministic-ID create → exact readback at LS:confirm_comment:769; split every intent. | linear_drain |
-| state LS:drain_locked:1030; LS:reconcile_issue:927,935 | R/U6 workflow-state query at 927; I/U6 issueUpdate at 935 → readback at LS:reconcile_issue:938; separate from comment. | linear_drain |
-| acknowledgment LS:drain_locked:1065; LS:record_drain_receipt:895,897,898,899 | C/U6 receipt owner; temp/intent/observation + reconcile child → child exit and temp cleanup; bind to confirmed mutation. | linear_drain |
-| receipt DC:record_reconciliation:115,124; SO:record_receipt:1016 | C/reconcile child; record receipt then reconciliation journal → durable acknowledgment; keep ordering. | drain_contract |
-| receipt sink SO:_append_receipt_atomic:912,914,917,923,952,954 | L/receipt inode + C/receipt append/fsync → locked duplicate check and durable record; retain. | outbox |
-| transport LA:request:127; LA:transport:101 | I/U6 mutation or R/query according to caller; one HTTP request → response; expose submission/wait, no opaque retry. | linear_drain |
+| LS:project_lock:823,824,826 | L/drain process; mkdir/open/flock → close on exit; retain outside per-issue boundaries. | linear_drain |
+| LS:drain_locked:1009; LS:confirm_comment:761 | I/U6 comment; one deterministic-ID create → exact readback at LS:confirm_comment:769; split every intent. | linear_drain |
+| LS:drain_locked:1030; LS:reconcile_issue:927,935 | R/U6 workflow-state query at 927; I/U6 issueUpdate at 935 → readback at LS:reconcile_issue:938; separate from comment. | linear_drain |
+| LS:drain_locked:1065; LS:record_drain_receipt:895,897,898,899 | C/U6 receipt owner; temp/intent/observation + reconcile child → child exit and temp cleanup; bind to confirmed mutation. | linear_drain |
+| DC:record_reconciliation:115,124; SO:record_receipt:1016 | C/reconcile child; record receipt then reconciliation journal → durable acknowledgment; keep ordering. | drain_contract |
+| SO:_append_receipt_atomic:912,914,917,923,952,954 | L/receipt inode + C/receipt append/fsync → locked duplicate check and durable record; retain. | outbox |
+| LA:request:127; LA:transport:101 | I/U6 mutation or R/query according to caller; one HTTP request → response; expose submission/wait, no opaque retry. | linear_drain |
 
 LS:confirm_comment:760,769 reads before/after ambiguous create.
 LS:drain_locked:1038,1051,1057,1061 withholds unresolved/superseded/dry/unconfirmed
@@ -215,25 +215,24 @@ callback. M5 must admit authority before testing old-lock contention.
 Budgets include code + tests + reserve (bytes). Suffixes are separate units;
 remeasure each delta. Prerequisites block dispatch; no U3 edit authorized here.
 
-| Unit | Source family / split | Code+tests+reserve (1k=1,000 bytes) |
+| Unit | Source family / split | Code+tests+reserve=total (all ×1,000 bytes) |
 |---|---|---:|
-| U4.1 | R6 submit/R4 above; thin adapters after P/R4/R8 | 6k + 14k + 4k = 24k |
-| U4.2a | M:current_intent:395 / M:cancel_before_request:493; preparation | 7k + 14k + 3k = 24k |
-| U4.2v | V:run_merge_preconditions:768 / V:run_pinned:1202; local verifier | 8k + 15k + 4k = 27k |
-| U4.2r | RV:run_remote:1413 / RV:worker:539 / RV:supervise:624; remote launch prerequisite | 8k + 16k + 4k = 28k |
-| U4.2c | RV:cleanup_slurm_locked:839 / RV:cleanup:1012 / RV:finish_empty_stage:1138; cleanup/retry | 7k + 16k + 4k = 27k |
-| U4.3 | M:reconcile:632,647,692 / S:cmd_merge:4656; request/record, tracker U6 | 7k + 17k + 4k = 28k |
-| U4.4a | S:_submit:1716,1795,1826; code/home/worktree | 7k + 15k + 4k = 26k |
-| U4.4b | S:_submit:1572,1614; scheduler/pipeline | 6k + 16k + 4k = 26k |
-| U4.4c | S:advance:2092,2912,2937,2950,3060; state/allocation/claims/outbox/cleanup | 8k + 16k + 4k = 28k |
-| U4.4d | S:_start_code_terminal_watchers:3401 / S:advance:2503,2694; watcher/resume | 6k + 16k + 4k = 26k |
-| U4.5 | S:cmd_advance:3669 / S:cmd_watch_code_terminal:3477; shared/direct routes | 3k + 10k + 3k = 16k |
-| U4.6 | SC:continue_plan:148 / SP:_seed_reachability_problem:848,877; preview/fetch/publish | 6k + 14k + 4k = 24k |
-| U4.7 | S:cmd_stop_unit:3749,3758,3759; abandonment/outbox | 4k + 12k + 4k = 20k |
-| U4.8 | S:cmd_stop_unit:3737,3741; supersession binding | 3k + 11k + 4k = 18k |
-| U4.9a | d5_submission.py:submit:113,136; cross-command M1/M2/M3/M6, U4.0b oracle | 2k + 20k + 3k = 25k |
-| U4.9m4 | M:reconcile:692 / S:cmd_merge:4656 / d5_control.py:revoke:55; M4/M5 barriers | 2k + 17k + 3k = 22k |
+| U4.1 | R6 submit/R4 above; thin adapters after P/R4/R8 | 6+14+4=24 |
+| U4.2a | M:current_intent:395 / M:cancel_before_request:493; preparation | 7+14+3=24 |
+| U4.2v | V:run_merge_preconditions:768 / V:run_pinned:1202; local verifier | 8+15+4=27 |
+| U4.2r | RV:run_remote:1413 / RV:worker:539 / RV:supervise:624; remote launch prerequisite | 8+16+4=28 |
+| U4.2c | RV:cleanup_slurm_locked:839 / RV:cleanup:1012 / RV:finish_empty_stage:1138; cleanup/retry | 7+16+4=27 |
+| U4.3 | M:reconcile:632,647,692 / S:cmd_merge:4656; request/record, tracker U6 | 7+17+4=28 |
+| U4.4a | S:_submit:1716,1795,1826; code/home/worktree | 7+15+4=26 |
+| U4.4b | S:_submit:1572,1614; scheduler/pipeline | 6+16+4=26 |
+| U4.4c | S:advance:2092,2912,2937,2950,3060; state/allocation/claims/outbox/cleanup | 8+16+4=28 |
+| U4.4d | S:_start_code_terminal_watchers:3401 / S:advance:2503,2694; watcher/resume | 6+16+4=26 |
+| U4.5 | S:cmd_advance:3669 / S:cmd_watch_code_terminal:3477; shared/direct routes | 3+10+3=16 |
+| U4.6 | SC:continue_plan:148 / SP:_seed_reachability_problem:848,877; preview/fetch/publish | 6+14+4=24 |
+| U4.7 | S:cmd_stop_unit:3749,3758,3759; abandonment/outbox | 4+12+4=20 |
+| U4.8 | S:cmd_stop_unit:3737,3741; supersession binding | 3+11+4=18 |
+| U4.9a | d5_submission.py:submit:113,136; cross-command M1/M2/M3/M6, U4.0b oracle | 2+20+3=25 |
+| U4.9m4 | M:reconcile:692 / S:cmd_merge:4656 / d5_control.py:revoke:55; M4/M5 barriers | 2+17+3=22 |
 
-Retain U4.0b oracle/old contention tests. Guard proves pinned membership and
-enumerated AST sinks, not general call-flow/semantics. Missing base object fails:
+Retain U4.0b oracle/old contention tests. Guard pins the reviewed citation set plus AST membership/sinks, not semantics. Missing base object fails:
 `git fetch origin 276e76af05a83846ea9c45ae7d030cf11a2e4e94`, rerun; no fallback.
