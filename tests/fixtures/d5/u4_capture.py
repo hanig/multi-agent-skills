@@ -70,6 +70,14 @@ class SubprocessRecorder:
                 if options.get("shell", False):
                     raise ValueError("capture requires direct argv, not shell mode")
                 args = options["args"]
+                # Native scalar and sequence forms retain their semantics;
+                # one-shot iterables must be shared by capture and execution.
+                if not isinstance(args, (str, bytes, os.PathLike, list, tuple)):
+                    args = list(args)
+                    if positional:
+                        positional = (args,) + positional[1:]
+                    else:
+                        keywords["args"] = args
                 argv = ([args] if isinstance(args, (str, bytes, os.PathLike))
                         else args)
                 argv_bytes = tuple(os.fsencode(arg) for arg in argv)
