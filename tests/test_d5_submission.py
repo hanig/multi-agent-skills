@@ -588,6 +588,12 @@ class TestSubmission(unittest.TestCase):
 
     def test_single_terminal_release_gate(self):
         tree = ast.parse(inspect.getsource(submission.submit))
+        for fact in "HANSFC":
+            assignment, = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and isinstance(n.value, ast.Constant) and n.value.value is True
+                and any(isinstance(t, ast.Name) and t.id == fact for t in n.targets)]
+            for handler in (n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler)):
+                self.assertNotIn(assignment, list(ast.walk(handler)))
         def closes(node):
             return [n for n in ast.walk(node) if isinstance(n, ast.Call) and
                     isinstance(n.func, ast.Attribute) and n.func.attr == "close"]
