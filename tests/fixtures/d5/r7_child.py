@@ -24,11 +24,19 @@ def wait_for(word):
 def effect(data, inherited, mode):
     directory = Path(data['directory'])
     calls, order = [], []
+    observed = {}
     real_submit, real_pin = t.submission.submit, t.protocol.pin
     local_os = mock.Mock(wraps=os)
     def noninherit(fd, flag):
         order.append('set_inheritable')
-        return os.set_inheritable(fd, flag)
+        os.set_inheritable(fd, flag)
+        # Inspect before R1 reopens the directory or reuses closed fd numbers.
+        for candidate in data.get('inspect_fds', []):
+            try:
+                info = os.fstat(candidate)
+                observed[str(candidate)] = [info.st_dev, info.st_ino]
+            except OSError:
+                observed[str(candidate)] = None
     local_os.set_inheritable.side_effect = noninherit
 
     @contextmanager
@@ -41,7 +49,8 @@ def effect(data, inherited, mode):
 
     def submit(*args, **kwargs):
         assert not any(rank > 0 for _, rank, _, _ in t.protocol.locks._held())
-        emit('adopted', inheritable=os.get_inheritable(inherited), pid=os.getpid())
+        emit('adopted', inheritable=os.get_inheritable(inherited), pid=os.getpid(),
+             observed=observed)
         wait_for('request')
         return real_submit(*args, **kwargs)
 
@@ -76,6 +85,22 @@ def effect(data, inherited, mode):
         stack.enter_context(mock.patch.object(child, 'os', local_os))
         stack.enter_context(mock.patch.object(t.submission, 'submit', side_effect=submit))
         stack.enter_context(mock.patch.object(t.protocol, 'pin', pin))
+        if data.get('probe_start'):
+            flock = t.protocol.locks.fcntl.flock
+            start = (directory / 'authority.start.lock').stat()
+            def acquire(fd, mode):
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) != (start.st_dev, start.st_ino):
+                    return flock(fd, mode)
+                try:
+                    flock(fd, mode | t.protocol.locks.fcntl.LOCK_NB)
+                except BlockingIOError:
+                    emit('start-blocked', calls=calls)
+                else:
+                    raise AssertionError('START was available before peer release')
+                flock(fd, mode)
+                emit('start-acquired', calls=calls)
+            stack.enter_context(mock.patch.object(t.protocol.locks.fcntl, 'flock', acquire))
         if mode == 'accounting-error':
             stack.enter_context(mock.patch.object(t.completion._Completion, 'complete',
                 side_effect=t.ledger.EffectError(t.ledger.DURABILITY)))
