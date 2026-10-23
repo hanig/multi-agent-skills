@@ -1,4 +1,4 @@
-"""NOT READY: --finish-entry."""
+"""Live retained protection and kernel release at exit, at two interrupt sites."""
 import inspect
 import json
 import subprocess
@@ -17,7 +17,7 @@ def child(data):
     case.boundary = t.DeterministicBoundary()
     lines, first = inspect.getsourcelines(t.submission.submit)
     entry = ("outcome = boundary.finish()" if "--finish-entry" in sys.argv else
-             "if began and state is not Initiation.NOT_SUBMITTED:")
+             "if A and state is not Initiation.NOT_SUBMITTED:")
     target = first + next(i for i, line in enumerate(lines) if line.strip() == entry)
     def interrupt(frame, event, arg):
         if event == "line" and frame.f_code is t.submission.submit.__code__ and frame.f_lineno == target:
@@ -53,8 +53,9 @@ def reproduce():
         assert result.returncode == 0
         assert case.probe("drain") == "available"
         row, = t.ledger.unresolved(*case.args)
-        assert row["state"] == "submitted" and row["outcome"] is None
-        assert row["reconciliation_required"] is False
+        state = "unknown" if "--finish-entry" in sys.argv else "submitted"
+        assert row["state"] == state and row["outcome"] is None
+        assert row["reconciliation_required"] is (state != "submitted")
     finally:
         case.doCleanups()
 
