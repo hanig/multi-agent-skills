@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -40,11 +41,19 @@ def main():
         if pid == 0:
             with open(args[1], 'wb', buffering=0) as pipe:
                 pipe.write(b'r')
-                Path(args[0]).touch()
-                while True:
-                    time.sleep(1)
-        while True:
-            time.sleep(1)
+                Path(args[0]).write_text(str(os.getpid()))
+                time.sleep(20)
+        time.sleep(20)
+    elif action == 'lock':
+        if os.fork() == 0:
+            with open(args[0], 'a+') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                pending = Path(args[1] + '.tmp')
+                pending.write_text(str(os.getpid()))
+                pending.rename(args[1])
+                time.sleep(20)
+        elif args[2] == 'live':
+            time.sleep(20)
     elif action == 'mark':
         Path(args[0]).write_text('unexpected launch')
     return 0
