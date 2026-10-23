@@ -1,10 +1,9 @@
-"""R6-RELEASE-ON-UNWIND: interrupted accounting keeps protection until exit."""
+"""NOT READY: --finish-entry."""
 import inspect
 import json
 import subprocess
 import sys
 from pathlib import Path
-from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests import test_d5_submission as t
 
@@ -17,17 +16,18 @@ def child(data):
     case.operation = t.submission.Operation("A", "fixture", scope.encode(), b"effect")
     case.boundary = t.DeterministicBoundary()
     lines, first = inspect.getsourcelines(t.submission.submit)
-    target = first + next(i for i, line in enumerate(lines)
-        if line.strip() == "if began and state is not Initiation.NOT_SUBMITTED:")
+    entry = ("outcome = boundary.finish()" if "--finish-entry" in sys.argv else
+             "if began and state is not Initiation.NOT_SUBMITTED:")
+    target = first + next(i for i, line in enumerate(lines) if line.strip() == entry)
     def interrupt(frame, event, arg):
         if event == "line" and frame.f_code is t.submission.submit.__code__ and frame.f_lineno == target:
             sys.settrace(None)
             raise KeyboardInterrupt("cleanup-entry")
         return interrupt
-    with mock.patch.object(t.registry.CP, "_external_base", return_value=Path(external)), \
-            mock.patch.object(t.registry, "d5_active", return_value=True), \
-            mock.patch.object(t.host, "session_anchor", return_value=("native", t.ANCHOR)), \
-            mock.patch.object(t.admission.time, "time", return_value=150):
+    with t.mock.patch.object(t.registry.CP, "_external_base", return_value=Path(external)), \
+            t.mock.patch.object(t.registry, "d5_active", return_value=True), \
+            t.mock.patch.object(t.host, "session_anchor", return_value=("native", t.ANCHOR)), \
+            t.mock.patch.object(t.admission.time, "time", return_value=150):
         try:
             sys.settrace(interrupt)
             case.submit()
@@ -49,16 +49,15 @@ def reproduce():
         data = [list(map(str, case.args)), str(case.directory),
                 {k: v for k, v in case.request.items() if k != "anchor"},
                 case.operation.scope.decode(), str(case.root / "external")]
-        result = subprocess.run([sys.executable, __file__, json.dumps(data)], timeout=30)
+        result = subprocess.run([sys.executable, __file__, json.dumps(data)] + sys.argv[1:], timeout=30)
         assert result.returncode == 0
         assert case.probe("drain") == "available"
         row, = t.ledger.unresolved(*case.args)
         assert row["state"] == "submitted" and row["outcome"] is None
         assert row["reconciliation_required"] is False
-        print("held alive; released on exit; unresolved submitted/null/false")
     finally:
         case.doCleanups()
 
 
 if __name__ == "__main__":
-    child(json.loads(sys.argv[1])) if len(sys.argv) > 1 else reproduce()
+    child(json.loads(sys.argv[1])) if len(sys.argv) > 1 and sys.argv[1] != "--finish-entry" else reproduce()
