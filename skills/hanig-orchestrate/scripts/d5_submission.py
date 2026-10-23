@@ -14,18 +14,19 @@ The registered checkout stays at the path recorded at registration for the regis
 Non-claims: the helper cannot prove nonblocking behavior of arbitrary injected
 code; no exactly-once execution; no implicit retries.
 
-Named trusted Boundary adapters expose one initiation in start(operation).
-Start must not wait for a response or completion, defer a request, retry, or
-commission another effect. Finish consumes the started operation even after
-ambiguous initiation; it must leave no unprotected effect-capable activity on return or
-error. Surviving children require the separate protected-child protocol.
-The caller supplies a unique request_id and accurate immutable scope/intent.
-Accounting failures, including inactive D5, propagate and retain the entry.
+Trusted Boundary adapters start one effect without response waits, deferral,
+retries or additional effects. Finish consumes ambiguous starts too, leaving
+no unprotected activity on return/error; children use the protected-child protocol.
+Callers supply unique request_id and accurate immutable scope/intent.
+Accounting errors, including inactive D5, propagate and retain the entry.
+A shared descriptor survives skipped accounting until process exit; it closes
+after confirmed accounting or established non-submission.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 import json
+import os
 
 import d5_admission as admission
 from d5_authority import AuthorityError
@@ -87,9 +88,10 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
         raise AuthorityError("not registered")
     request = dict(grant_id=grant_id, session_id=session_id, anchor=anchor,
                    generation=generation, scope=operation.scope)
-    with protocol.pin(entry["record_dir"]) as pinned, pinned.drain():
+    with protocol.pin(entry["record_dir"]) as pinned, pinned.drain() as drain:
         if pinned._record._prior(1) is not None:
             raise AuthorityError("D5 submission inside START is forbidden")
+        holder = os.dup(drain)
         attempt, began, state, start_error = None, False, Initiation.UNCERTAIN, None
         capability, accounting_error = None, None
         outcome, response_error = None, None
@@ -109,6 +111,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                 if not began:
                     if attempt is not None:
                         ledger._classify(attempt, "not_submitted")
+                    os.close(holder)
                     raise
                 start_error = exc
             if type(state) is not Initiation:
@@ -119,6 +122,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                     capability = completion.bind(ledger._classify(attempt, "submitted"))
                 elif state is Initiation.NOT_SUBMITTED:
                     ledger._classify(attempt, "not_submitted")
+                    os.close(holder)
             except BaseException as exc:
                 accounting_error = exc
         finally:
@@ -132,7 +136,17 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                     if capability is None or response_error is not None:
                         completion.bind(attempt).uncertain()
                     else:
-                        outcome = capability.complete(outcome)
+                        try:
+                            outcome = capability.complete(outcome)
+                        except BaseException as error:
+                            # Confirm via R4; retain the original failure.
+                            try:
+                                capability.complete(outcome)
+                            except BaseException:
+                                raise error
+                            os.close(holder)
+                            raise
+                    os.close(holder)
         if accounting_error is not None:
             raise accounting_error
         if start_error is not None:

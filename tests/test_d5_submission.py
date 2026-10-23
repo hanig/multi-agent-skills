@@ -52,6 +52,8 @@ class DeterministicBoundary(submission.Boundary):
 
 
 class TestSubmission(unittest.TestCase):
+    eq = unittest.TestCase.assertEqual
+
     def setUp(self):
         isolate_pool(self)
         temporary = tempfile.TemporaryDirectory()
@@ -118,7 +120,7 @@ class TestSubmission(unittest.TestCase):
     def join(self, thread, results):
         thread.join(15)
         self.assertFalse(thread.is_alive(), "thread watchdog")
-        self.assertEqual(len(results), 1)
+        self.eq(len(results), 1)
         return results[0]
 
     def test_boundary_after_fresh_validation_under_start(self):
@@ -136,23 +138,23 @@ class TestSubmission(unittest.TestCase):
             return result
 
         def boundary():
-            self.assertEqual(events, ["validate", "prepare", "validate"])
-            self.assertEqual(self.probe("start"), "blocked")
-            self.assertEqual(self.rows()[0]["state"], "attempting")
+            self.eq(events, ["validate", "prepare", "validate"])
+            self.eq(self.probe("start"), "blocked")
+            self.eq(self.rows()[0]["state"], "attempting")
 
         self.boundary.on_start = boundary
         with mock.patch.object(admission, "_validate_locked", side_effect=validated), \
                 mock.patch.object(ledger, "prepare", side_effect=prepared):
             result = self.submit()
-        self.assertEqual(result.initiation, submission.Initiation.SUBMITTED)
-        self.assertEqual(result.outcome, OK)
+        self.eq(result.initiation, submission.Initiation.SUBMITTED)
+        self.eq(result.outcome, OK)
         row, = self.rows()
-        self.assertEqual(row["effect_id"], result.effect_id)
-        self.assertEqual(row["state"], "completed")
-        self.assertEqual(row["binding"]["correlation"], {"request_id": "A", "intent": self.operation.intent.hex()})
-        self.assertEqual(row["binding"]["scope"], self.scope)
-        self.assertEqual(row["binding"]["record_id"], self.request["grant_id"])
-        self.assertEqual(row["binding"]["custody"]["generation"], 1)
+        self.eq(row["effect_id"], result.effect_id)
+        self.eq(row["state"], "completed")
+        self.eq(row["binding"]["correlation"], {"request_id": "A", "intent": self.operation.intent.hex()})
+        self.eq(row["binding"]["scope"], self.scope)
+        self.eq(row["binding"]["record_id"], self.request["grant_id"])
+        self.eq(row["binding"]["custody"]["generation"], 1)
 
     def test_revocation_wins_before_boundary(self):
         for invalidation in (False, True):
@@ -175,7 +177,7 @@ class TestSubmission(unittest.TestCase):
                     self.assertTrue(ready.wait(10), "request watchdog")
                     if invalidation:
                         self.mandate.write_bytes(b"changed")
-                        self.assertEqual(control.record_mandate_invalidation(*self.args, now=150), "mandate_changed")
+                        self.eq(control.record_mandate_invalidation(*self.args, now=150), "mandate_changed")
                         self.mandate.write_bytes(MANDATE)
                     else:
                         control.revoke(*self.args, 150, "stop")
@@ -183,8 +185,8 @@ class TestSubmission(unittest.TestCase):
                     resume.set()
                     result = self.join(thread, results)
             self.assertIsInstance(result, authority.AuthorityError)
-            self.assertEqual(str(result), "D5 authority is invalidated")
-            self.assertEqual(self.boundary.calls, [])
+            self.eq(str(result), "D5 authority is invalidated")
+            self.eq(self.boundary.calls, [])
 
     def test_prepare_failure_has_no_effect(self):
         for published in (False, True):
@@ -198,8 +200,8 @@ class TestSubmission(unittest.TestCase):
             with self.subTest(published=published), mock.patch.object(ledger, "_write", side_effect=failing):
                 with self.assertRaisesRegex(ledger.EffectError, ledger.DURABILITY):
                     self.submit()
-            self.assertEqual(self.boundary.calls, [])
-        self.assertEqual([r["state"] for r in self.rows()], ["attempting"])
+            self.eq(self.boundary.calls, [])
+        self.eq([r["state"] for r in self.rows()], ["attempting"])
 
     def test_final_time_after_prepare_including_equality(self):
         prepare = ledger.prepare
@@ -212,8 +214,8 @@ class TestSubmission(unittest.TestCase):
         with mock.patch.object(ledger, "prepare", side_effect=prepared):
             with self.assertRaisesRegex(authority.AuthorityError, "^D5 authority expired$"):
                 self.submit()
-        self.assertEqual(self.boundary.calls, [])
-        self.assertEqual([r["state"] for r in self.rows()], ["not_submitted"])
+        self.eq(self.boundary.calls, [])
+        self.eq([r["state"] for r in self.rows()], ["not_submitted"])
 
     def test_response_wait_does_not_hold_start(self):
         waiting, release, persisted = threading.Event(), threading.Event(), threading.Event()
@@ -228,24 +230,24 @@ class TestSubmission(unittest.TestCase):
         thread, results = self.launch(self.submit)
         try:
             self.assertTrue(waiting.wait(10), "response watchdog")
-            self.assertEqual(self.probe("start"), "available")
+            self.eq(self.probe("start"), "available")
             control.revoke(*self.args, 151, "stop")
-            self.assertEqual(store.read(self.directory)["invalidation"]["kind"], "revoked")
+            self.eq(store.read(self.directory)["invalidation"]["kind"], "revoked")
             persisted.set()
             self.assertFalse(release.is_set())
-            self.assertEqual(self.rows()[0]["state"], "submitted")
+            self.eq(self.rows()[0]["state"], "submitted")
         finally:
             release.set()
             result = self.join(thread, results)
         self.assertTrue(persisted.is_set())
         self.assertIsInstance(result, submission.Result)
-        self.assertEqual(result.outcome, OK)
-        self.assertEqual(self.rows()[0]["state"], "completed")
+        self.eq(result.outcome, OK)
+        self.eq(self.rows()[0]["state"], "completed")
         self.boundary = DeterministicBoundary()
         self.operation = submission.Operation("B", "fixture", self.operation.scope, b"next")
         with self.assertRaisesRegex(authority.AuthorityError, "^D5 authority is invalidated$"):
             self.submit()
-        self.assertEqual(self.boundary.calls, [])
+        self.eq(self.boundary.calls, [])
 
     def test_submission_lifetime_retains_drain(self):
         seen = []
@@ -253,7 +255,7 @@ class TestSubmission(unittest.TestCase):
 
         def observe(phase):
             seen.append(phase)
-            self.assertEqual(self.probe("drain"), "blocked")
+            self.eq(self.probe("drain"), "blocked")
 
         def writing(*args, **kwargs):
             observe(args[2]["state"])
@@ -263,8 +265,8 @@ class TestSubmission(unittest.TestCase):
         self.boundary.on_finish = lambda: (observe("response"), dict(OK))[1]
         with mock.patch.object(ledger, "_write", side_effect=writing):
             self.submit()
-        self.assertEqual(seen, ["attempting", "boundary", "submitted", "response", "completed"])
-        self.assertEqual(self.probe("drain"), "available")
+        self.eq(seen, ["attempting", "boundary", "submitted", "response", "completed"])
+        self.eq(self.probe("drain"), "available")
 
     def test_ambiguous_start_is_not_not_submitted(self):
         for exception in (RuntimeError("ambiguous"), KeyboardInterrupt("interrupted")):
@@ -277,8 +279,8 @@ class TestSubmission(unittest.TestCase):
             with self.assertRaises(BaseException) as caught:
                 self.submit()
             self.assertIs(caught.exception, exception)
-            self.assertEqual([c[0] for c in self.boundary.calls], ["start", "finish"])
-        self.assertEqual([r["state"] for r in self.rows()], ["unknown", "unknown"])
+            self.eq([c[0] for c in self.boundary.calls], ["start", "finish"])
+        self.eq([r["state"] for r in self.rows()], ["unknown", "unknown"])
 
     def test_explicit_initiation_states(self):
         for state in submission.Initiation:
@@ -286,11 +288,11 @@ class TestSubmission(unittest.TestCase):
             self.boundary.state = state
             result = self.submit()
             row = next(r for r in self.rows() if r["effect_id"] == result.effect_id)
-            self.assertEqual(result.initiation, state)
+            self.eq(result.initiation, state)
             submitted = state is submission.Initiation.SUBMITTED
-            self.assertEqual(result.outcome, OK if submitted else None)
-            self.assertEqual(row["state"], "completed" if submitted else state.value)
-            self.assertEqual([c[0] for c in self.boundary.calls], ["start"] if
+            self.eq(result.outcome, OK if submitted else None)
+            self.eq(row["state"], "completed" if submitted else state.value)
+            self.eq([c[0] for c in self.boundary.calls], ["start"] if
                              state is submission.Initiation.NOT_SUBMITTED else ["start", "finish"])
 
     def test_opaque_helper_refused(self):
@@ -305,33 +307,33 @@ class TestSubmission(unittest.TestCase):
                 self.submit()
         Opaque.start.assert_not_called()
         Opaque.finish.assert_not_called()
-        self.assertEqual(self.rows(), [])
+        self.eq(self.rows(), [])
 
     def test_next_effect_requires_fresh_admission(self):
         self.boundary.on_finish = lambda: dict(OK, detail="next effect B requested")
         self.submit()
-        self.assertEqual([c[0] for c in self.boundary.calls], ["start", "finish"])
-        self.assertEqual(len(self.rows()), 1)
+        self.eq([c[0] for c in self.boundary.calls], ["start", "finish"])
+        self.eq(len(self.rows()), 1)
         control.revoke(*self.args, 151, "stop")
         self.boundary = DeterministicBoundary()
         with self.assertRaisesRegex(authority.AuthorityError, "invalidated"):
             self.submit()
-        self.assertEqual(self.boundary.calls, [])
+        self.eq(self.boundary.calls, [])
 
     def test_finish_failure_accounts_uncertainty(self):
         error = RuntimeError("response lost")
 
         def finish():
-            self.assertEqual(self.probe("start"), "available")
-            self.assertEqual(self.probe("drain"), "blocked")
+            self.eq(self.probe("start"), "available")
+            self.eq(self.probe("drain"), "blocked")
             raise error
 
         self.boundary.on_finish = finish
         with self.assertRaises(RuntimeError) as caught:
             self.submit()
         self.assertIs(caught.exception, error)
-        self.assertEqual(self.rows()[0]["state"], "unknown")
-        self.assertEqual(self.probe("drain"), "available")
+        self.eq(self.rows()[0]["state"], "unknown")
+        self.eq(self.probe("drain"), "available")
 
     def test_accounting_failure_still_finishes_and_never_reports_success(self):
         for phase in ("submitted", "completed", "bind"):
@@ -350,12 +352,22 @@ class TestSubmission(unittest.TestCase):
 
                 fault = (mock.patch.object(completion, "bind", side_effect=error) if phase == "bind" else
                          mock.patch.object(ledger, "_write", side_effect=writing))
-                with self.subTest(phase=phase, published=published), fault:
+                holder = []
+                local_os = mock.Mock(wraps=os)
+                local_os.dup.side_effect = lambda fd: holder.append(os.dup(fd)) or holder[-1]
+                with self.subTest(phase=phase, published=published), fault, \
+                        mock.patch.object(submission, "os", local_os):
                     with self.assertRaises(ledger.EffectError) as caught:
                         self.submit()
                 self.assertIs(caught.exception, error)
                 self.assertEqual([c[0] for c in self.boundary.calls], ["start", "finish"])
-                self.assertEqual(self.probe("drain"), "available")
+                # submitted (both): R4 confirms unknown; completed/published:
+                # duplicate R4 completion confirms durability. Others have no
+                # confirmed accounting: completed/unpublished and bind (both).
+                accounted = phase == "submitted" or (phase == "completed" and published)
+                self.assertEqual(self.probe("drain"), "available" if accounted else "blocked")
+                if not accounted:
+                    os.close(holder[0])  # Test teardown AFTER live-process probe.
         self.assertEqual(len(self.rows()), 6)
 
     def test_inactive_completion_refusal_is_unchanged(self):
@@ -385,15 +397,15 @@ class TestSubmission(unittest.TestCase):
                 mock.patch.object(protocol, "pin", side_effect=AssertionError("unregistered pin")):
             with self.assertRaisesRegex(authority.AuthorityError, "^not registered$"):
                 self.submit()
-        self.assertEqual(self.boundary.calls, [])
+        self.eq(self.boundary.calls, [])
 
     def test_ambient_start_refused_before_effect(self):
         with protocol.pin(self.directory) as record, record.drain(), record.start():
             with self.assertRaisesRegex(authority.AuthorityError, "^D5 submission inside START is forbidden$"):
                 self.submit()
-            self.assertEqual(self.probe("start"), "blocked")
-        self.assertEqual(self.boundary.calls, [])
-        self.assertEqual(self.rows(), [])
+            self.eq(self.probe("start"), "blocked")
+        self.eq(self.boundary.calls, [])
+        self.eq(self.rows(), [])
 
     def test_post_start_interrupt_finishes_under_drain(self):
         lines, first = inspect.getsourcelines(submission.submit)
@@ -407,8 +419,8 @@ class TestSubmission(unittest.TestCase):
                 raise KeyboardInterrupt("post-start")
             return interrupt
         def finish():
-            self.assertEqual(self.probe("drain"), "blocked")
-            self.assertEqual(self.probe("start"), "available")
+            self.eq(self.probe("drain"), "blocked")
+            self.eq(self.probe("start"), "available")
             return dict(OK)
         self.boundary.on_finish = finish
         previous = sys.gettrace()
@@ -418,10 +430,15 @@ class TestSubmission(unittest.TestCase):
                 self.submit()
         finally:
             sys.settrace(previous)
-        self.assertEqual(fired, [True])
-        self.assertEqual([c[0] for c in self.boundary.calls], ["start", "finish"])
-        self.assertEqual(self.rows()[0]["state"], "unknown")
-        self.assertEqual(self.probe("drain"), "available")
+        self.eq(fired, [True])
+        self.eq([c[0] for c in self.boundary.calls], ["start", "finish"])
+        self.eq(self.rows()[0]["state"], "unknown")
+        self.eq(self.probe("drain"), "available")
+
+    def test_cleanup_interrupt_retains_holder_until_exit(self):
+        result = subprocess.run([sys.executable, str(ROOT / "tests/fixtures/d5/r6_cleanup_interrupt.py")],
+                                capture_output=True, text=True, timeout=40)
+        self.eq(result.returncode, 0, result.stdout + result.stderr)
 
     def test_immutable_operation_subclass(self):
         class MyOp(submission.Operation): pass
@@ -430,10 +447,10 @@ class TestSubmission(unittest.TestCase):
         self.operation = MyOp("A", "fixture", self.operation.scope, MyBytes(self.operation.intent))
         with self.assertRaises(FrozenInstanceError):
             self.operation.intent = b"changed"
-        self.assertEqual(self.submit().initiation, submission.Initiation.SUBMITTED)
+        self.eq(self.submit().initiation, submission.Initiation.SUBMITTED)
         self.assertIs(self.boundary.calls[0][1], self.operation)
-        self.assertEqual(self.rows()[0]["binding"]["correlation"]["intent"], bytes.hex(self.operation.intent))
-        self.assertEqual(self.rows()[0]["state"], "completed")
+        self.eq(self.rows()[0]["binding"]["correlation"]["intent"], bytes.hex(self.operation.intent))
+        self.eq(self.rows()[0]["state"], "completed")
 
     def test_immutable_operation_and_invalid_initiation(self):
         with self.assertRaises(FrozenInstanceError):
@@ -452,8 +469,8 @@ class TestSubmission(unittest.TestCase):
             self.boundary.state = invalid
             with self.assertRaisesRegex(ValueError, "invalid initiation"):
                 self.submit()
-            self.assertEqual([c[0] for c in self.boundary.calls], ["start", "finish"])
-        self.assertEqual([r["state"] for r in self.rows()], ["unknown"] * 3)
+            self.eq([c[0] for c in self.boundary.calls], ["start", "finish"])
+        self.eq([r["state"] for r in self.rows()], ["unknown"] * 3)
 
     def test_registered_source_limit_and_recovery(self):
         before = (self.directory / store.RECORD_NAME).read_bytes()
@@ -464,30 +481,30 @@ class TestSubmission(unittest.TestCase):
                 mock.patch.object(ledger, "prepare", side_effect=AssertionError("prepare")):
             with self.assertRaises(FileNotFoundError) as caught:
                 self.submit()
-        self.assertEqual(caught.exception.filename, str(self.mandate))
-        self.assertEqual((self.directory / store.RECORD_NAME).read_bytes(), before)
-        self.assertEqual(self.boundary.calls, [])
+        self.eq(caught.exception.filename, str(self.mandate))
+        self.eq((self.directory / store.RECORD_NAME).read_bytes(), before)
+        self.eq(self.boundary.calls, [])
         moved.rename(self.repo)
         self.args = self.repo, "p", self.state_dir
-        self.assertEqual(self.submit().outcome, OK)
+        self.eq(self.submit().outcome, OK)
 
     def test_nested_response_call_has_distinct_admission_and_accounting(self):
         inner = DeterministicBoundary()
         outer = self.boundary
 
         def finish():
-            self.assertEqual(self.probe("start"), "available")
+            self.eq(self.probe("start"), "available")
             self.boundary = inner
             self.operation = submission.Operation("B", "fixture", self.operation.scope, b"inner")
             result = self.submit()
-            self.assertEqual(result.outcome, OK)
-            self.assertEqual(self.probe("drain"), "blocked")
+            self.eq(result.outcome, OK)
+            self.eq(self.probe("drain"), "blocked")
             return dict(OK)
 
         outer.on_finish = finish
-        self.assertEqual(self.submit().outcome, OK)
-        self.assertEqual({r["binding"]["correlation"]["request_id"] for r in self.rows()}, {"A", "B"})
-        self.assertEqual([r["state"] for r in self.rows()], ["completed", "completed"])
+        self.eq(self.submit().outcome, OK)
+        self.eq({r["binding"]["correlation"]["request_id"] for r in self.rows()}, {"A", "B"})
+        self.eq([r["state"] for r in self.rows()], ["completed", "completed"])
 
 
 if __name__ == "__main__":
