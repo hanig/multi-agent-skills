@@ -17,7 +17,6 @@ BOOTSTRAP = str(Path(__file__).with_name('r7_child.py'))
 
 
 def setup(root):
-    # These patches execute in this fresh child, never in the test runner.
     root = Path(root)
     repo, state = root / 'repo', root / 'state'
     subprocess.run(['git', 'init', str(repo)], capture_output=True,
@@ -51,7 +50,6 @@ def ancestor(raw):
             proc = process.protected_spawn(data['directory'], fd, BOOTSTRAP,
                 ['child', raw, str(fd), 'close-barrier'],
                 stdin=None, stdout=None, stderr=None)
-        # Child owns the standard pipes; ancestor remains until killed by M5.
         proc.wait(timeout=60)
 
 
@@ -83,27 +81,71 @@ def standard_slots(root):
                     except process.AuthorityError as exc:
                         error = str(exc)
                     spawned = popen.called
+                    stream = ('stdin', 'stdout', 'stderr')[standard]
+                    try:
+                        process.protected_spawn(root, fd, BOOTSTRAP, **{stream: None})
+                        implicit = None
+                    except process.AuthorityError as exc:
+                        implicit = str(exc)
+                    assert not popen.called, 'inherited protocol descriptor'
+                    os.set_inheritable(standard, False)
+                    process.protected_spawn(root, fd, BOOTSTRAP, **{stream: None})
+                    popen.assert_called_once()
+                    if standard == 1:
+                        with t.unittest.TestCase().assertRaises(process.AuthorityError):
+                            process.protected_spawn(root, fd, BOOTSTRAP, stdout=None, stderr=subprocess.STDOUT)
                 unchanged = descriptors() == before
             finally:
                 os.dup2(saved, standard)
                 os.close(saved)
             emit('standard-slot', standard=standard, error=error,
-                 spawned=spawned, unchanged=unchanged)
+                 spawned=spawned, unchanged=unchanged, implicit=implicit)
+            saved = os.dup(standard)
+            read, write = os.pipe()
+            try:
+                os.dup2(read, standard)
+                with mock.patch.object(process, 'DESIGNATED_BOOTSTRAPS', frozenset([BOOTSTRAP])), \
+                        mock.patch.object(process.subprocess, 'Popen') as popen:
+                    try:
+                        process.protected_spawn(root, fd, BOOTSTRAP, pass_fds=(standard,))
+                        error = None
+                    except process.AuthorityError as exc:
+                        error = str(exc)
+                    assert not popen.called, 'overwrote control descriptor'
+                    stream = ('stdin', 'stdout', 'stderr')[standard]
+                    process.protected_spawn(root, fd, BOOTSTRAP, pass_fds=(standard,), **{stream: None})
+                    popen.assert_called_once()
+                    if standard == 2:
+                        process.protected_spawn(root, fd, BOOTSTRAP, pass_fds=(2,), stdout=2, stderr=subprocess.STDOUT)
+                        assert popen.call_count == 2
+            finally:
+                os.dup2(saved, standard)
+                for opened in (saved, read, write):
+                    os.close(opened)
+            emit('control-slot', error=error)
 
 
-def closed_streams(root):
+def closed_streams(root, low_first=False):
     from tests.test_d5_process import TestProcess
     case = TestProcess()
     case.setUp()
     try:
         case.setup_effect()
-        _, fd = case.holding()
+        if not low_first:
+            _, fd = case.holding()
         saved = [(n, os.dup(n)) for n in (0, 2)]
         try:
             os.close(0)
             os.close(2)
+            if low_first:
+                _, low = case.holding()
+                fd = os.dup(low)
+                assert low == 2 and fd > 2 and not os.get_inheritable(low)
             proc = case.launch(fd, stderr=None)
         finally:
+            if low_first:
+                os.close(fd)
+                case.stack.close()
             for target, copy in saved:
                 os.dup2(copy, target)
                 os.close(copy)
@@ -115,8 +157,6 @@ def closed_streams(root):
         case.send(proc, 'exit')
         stdout, stderr = proc.communicate(timeout=20)
         case.assertEqual((proc.returncode, stdout, stderr), (0, b'', None))
-        # Sweep the other inherited slots in an isolated process. Popen is a
-        # spy here because R7's fixture protocol needs usable stdin/stdout.
         _, fd = case.holding()
         for stream in ('stdin', 'stdout', 'stderr'):
             saved = [(n, os.dup(n)) for n in (0, 1, 2)]
@@ -172,4 +212,5 @@ def installer(raw):
 if __name__ == '__main__':
     {'setup': setup, 'ancestor': ancestor, 'worker': worker,
      'installer': installer, 'standard-slots': standard_slots,
-     'closed-streams': closed_streams}[sys.argv[1]](sys.argv[2])
+     'closed-streams': closed_streams,
+     'closed-streams-low': lambda root: closed_streams(root, True)}[sys.argv[1]](sys.argv[2])
