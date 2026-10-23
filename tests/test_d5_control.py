@@ -53,6 +53,8 @@ class TestD5Control(unittest.TestCase):
         lease.grant(*self.args, issued_at=100, confirmed_at=100, expires_at=200,
                     mandate_bytes=MANDATE, scope=dict(plans=["p"], repositories=[],
                     actions=[], trackers=[]), owner_response="fixture", displayed_bounds="fixture")
+        self.assertEqual(self.anchor.call_count, 1)
+        self.anchor.reset_mock()
         self.original = store.claim(self.directory, 101, MANDATE, "native", ANCHOR,
                                     lambda _: "alive")
         self.path = self.directory / store.RECORD_NAME
