@@ -67,6 +67,30 @@ def worker(raw):
     wait_for('exit')
 
 
+def standard_slots(root):
+    from tests.test_d5_process import descriptors
+    with t.protocol.pin(root) as record, record.drain() as fd:
+        for standard in (0, 1, 2):
+            saved = os.dup(standard)
+            try:
+                os.dup2(fd, standard)
+                before = descriptors()
+                with mock.patch.object(process, 'DESIGNATED_BOOTSTRAPS', frozenset([BOOTSTRAP])), \
+                        mock.patch.object(process.subprocess, 'Popen') as popen:
+                    try:
+                        process.protected_spawn(root, standard, BOOTSTRAP)
+                        error = None
+                    except process.AuthorityError as exc:
+                        error = str(exc)
+                    spawned = popen.called
+                unchanged = descriptors() == before
+            finally:
+                os.dup2(saved, standard)
+                os.close(saved)
+            emit('standard-slot', standard=standard, error=error,
+                 spawned=spawned, unchanged=unchanged)
+
+
 def installer(raw):
     directory = Path(json.loads(raw)['directory'])
     record = t.store.read(directory)
@@ -102,4 +126,4 @@ def installer(raw):
 
 if __name__ == '__main__':
     {'setup': setup, 'ancestor': ancestor, 'worker': worker,
-     'installer': installer}[sys.argv[1]](sys.argv[2])
+     'installer': installer, 'standard-slots': standard_slots}[sys.argv[1]](sys.argv[2])

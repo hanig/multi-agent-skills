@@ -60,6 +60,8 @@ def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
     the original number is passed unchanged, and remains owned by the caller.
     Closing either parent reference must never unlock the shared description.
     The designated child must adopt through R7 before effect admission.
+    DRAIN must use a descriptor above 2: stdio setup owns slots 0, 1 and 2.
+    For a source in those slots, duplicate it above 2 before constructing args.
 
     args are opaque argv data. The caller names necessary communication fds
     separately; they cannot name protocol locks. The returned Popen and its
@@ -74,6 +76,8 @@ def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
     with protocol.pin(directory) as pinned:
         if pinned._record._prior(1) is not None:
             raise AuthorityError("D5 protected launch inside START is forbidden")
+        if inherited_fd in (0, 1, 2):
+            raise AuthorityError("D5 protected DRAIN uses a standard descriptor")
         _communication(pinned._record, pass_fds, (stdin, stdout, stderr))
         with pinned.drain(inherited_fd=inherited_fd):
             return subprocess.Popen(command, close_fds=True,
