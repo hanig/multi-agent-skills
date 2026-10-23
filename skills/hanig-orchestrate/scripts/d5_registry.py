@@ -57,6 +57,7 @@ _SWARM_DIR = skill_paths.sibling_skill_root(
 sys.path.insert(0, str(_SWARM_DIR / "scripts"))
 import coordinator_paths as CP
 import child_environment as CE
+import d5_activation
 
 AuthorityError = authority.AuthorityError
 _ENTRY_FIELDS = {"registration_id", "repo_key", "plan_id", "state_key",
@@ -65,7 +66,7 @@ _ENTRY_FIELDS = {"registration_id", "repo_key", "plan_id", "state_key",
 
 def d5_active():
     """U8 owns activation. There is no runtime override."""
-    return False
+    return d5_activation.d5_active()
 
 
 def _require(condition, message):
