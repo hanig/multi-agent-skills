@@ -8,7 +8,7 @@ import os
 import select
 import signal
 from pathlib import Path
-import subprocess
+import subprocess as sp
 import sys
 import tempfile
 import time
@@ -39,9 +39,9 @@ class TestLauncher(unittest.TestCase):
         return [sys.executable, str(CHILD), action, *map(str, args)]
 
     def launch(self, action, *args, **options):
-        handle = P.worker_launch(self.argv(action, *args), options=L.Options(**options))
-        self.addCleanup(handle.close)
-        return handle
+        h = P.worker_launch(self.argv(action, *args), options=L.Options(**options))
+        self.addCleanup(h.close)
+        return h
 
     def await_file(self, path):
         deadline = time.monotonic() + 4
@@ -51,24 +51,24 @@ class TestLauncher(unittest.TestCase):
 
     def barrier(self, **options):
         ready, release = self.root / 'ready', self.root / 'release'
-        handle = self.launch('barrier', ready, release, **options)
+        h = self.launch('barrier', ready, release, **options)
         self.await_file(ready)
-        return handle, release
+        return h, release
 
     def test_options_and_concurrent_isolation(self):
         def inspect(index):
             cwd = self.root / str(index)
             cwd.mkdir()
-            handle = self.launch('inspect', 'literal;$(not-shell)', cwd=cwd,
+            h = self.launch('inspect', 'literal;$(not-shell)', cwd=cwd,
                                  env={'R8A': str(index)}, new_session=True)
-            self.eq(handle.wait(5), 0)
-            data = json.loads(handle.read('stdout'))
+            self.eq(h.wait(5), 0)
+            data = json.loads(h.read('stdout'))
             self.eq(data['cwd'], str(cwd))
             self.eq(data['env'].get('R8A'), str(index))
             self.assertNotIn('R8A_PARENT', data['env'])
             self.eq(data['session'], data['pid'])
             self.eq(data['args'], ['literal;$(not-shell)'])
-            self.eq(handle.read('stderr'), b'error\n')
+            self.eq(h.read('stderr'), b'error\n')
         before = os.getcwd()
         with mock.patch.dict(os.environ, {'R8A_PARENT': 'inherited'}):
             with ThreadPoolExecutor(2) as pool:
@@ -82,41 +82,41 @@ class TestLauncher(unittest.TestCase):
         self.eq(os.getcwd(), before)
 
     def test_launch_returns_at_barrier_and_timeout_is_not_completion(self):
-        handle, release = self.barrier()
-        self.assertIsNone(handle.poll(), 'launch waited for exit')
-        with self.assertRaises(subprocess.TimeoutExpired):
-            handle.wait(.01)
-        self.assertIsNone(handle.poll())
+        h, release = self.barrier()
+        self.assertIsNone(h.poll(), 'launch waited for exit')
+        with self.assertRaises(sp.TimeoutExpired):
+            h.wait(.01)
+        self.assertIsNone(h.poll())
         release.touch()
-        self.eq(handle.wait(5), 0)
-        self.eq(handle.wait(.01), 0)
-        self.eq(handle.read('stdout'), b'released\n')
-        handle.close()
-        handle.close()
+        self.eq(h.wait(5), 0)
+        self.eq(h.wait(.01), 0)
+        self.eq(h.read('stdout'), b'released\n')
+        h.close()
+        h.close()
         with self.assertRaises(ValueError):
-            handle.read('stdout')
+            h.read('stdout')
 
     def test_both_streams_drain_before_wait_without_truncation(self):
         done = self.root / 'done'
-        handle = self.launch('flood', done)
-        self.await_file(done)  # Written AFTER > pipe capacity on both streams.
-        self.eq(handle.wait(5), 0)
+        h = self.launch('flood', done)
+        self.await_file(done)
+        self.eq(h.wait(5), 0)
         for stream, byte in (('stdout', b'o'), ('stderr', b'e')):
-            self.eq(handle.size(stream), 2 * 1024 * 1024)
-            for offset in range(0, handle.size(stream), L.MAX_READ):
-                self.eq(handle.read(stream, offset=offset, limit=L.MAX_READ),
+            self.eq(h.size(stream), 2 * 1024 * 1024)
+            for offset in range(0, h.size(stream), L.MAX_READ):
+                self.eq(h.read(stream, offset=offset, limit=L.MAX_READ),
                                  byte * L.MAX_READ)
-            self.eq(handle.read(stream, offset=handle.size(stream)), b'')
+            self.eq(h.read(stream, offset=h.size(stream)), b'')
             for bad in (-1, 0, L.MAX_READ + 1):
                 with self.assertRaises(ValueError):
-                    handle.read(stream, limit=bad)
+                    h.read(stream, limit=bad)
 
     def test_logs_modes_stdin_and_ownership(self):
         path = self.root / 'output'
         path.write_bytes(b'prior\n')
         for mode, expected in (('ab', b'prior\ninputerror'), ('wb', b'inputerror')):
             h = self.launch('echo', stdin=b'input', stdout=L.Log(path, mode),
-                            stderr=subprocess.STDOUT)
+                            stderr=sp.STDOUT)
             self.eq(h.wait(5), 0)
             self.eq(path.read_bytes(), expected)
             with self.assertRaises(ValueError):
@@ -124,15 +124,15 @@ class TestLauncher(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.launch('echo', stdout=L.Log(path, 'xb'))
         fresh = self.root / 'fresh'
-        h = self.launch('echo', stdout=L.Log(fresh, 'xb'), stdin=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL)
+        h = self.launch('echo', stdout=L.Log(fresh, 'xb'), stdin=sp.PIPE,
+                        stderr=sp.DEVNULL)
         h.stdin.write(b'pipe input')
         h.close_stdin()
         self.assertTrue(h.stdin.closed)
         self.eq(h.wait(5), 0)
         self.eq(fresh.read_bytes(), b'pipe input')
-        h = self.launch('echo', stdout=subprocess.DEVNULL)
-        self.eq(h.wait(5), 0)  # DEVNULL stdin delivers EOF.
+        h = self.launch('echo', stdout=sp.DEVNULL)
+        self.eq(h.wait(5), 0)
 
     def test_cancel_close_and_launch_failure_cleanup(self):
         h, _ = self.barrier(new_session=True)
@@ -153,7 +153,7 @@ class TestLauncher(unittest.TestCase):
                 L.launch([str(self.root / 'absent')])
         self.eq(len(files), 2)
         self.assertTrue(all(f.closed for f in files))
-        h = self.launch('barrier', self.root / 'r2', self.root / 'never', stdin=subprocess.PIPE)
+        h = self.launch('barrier', self.root / 'r2', self.root / 'never', stdin=sp.PIPE)
         h.close()
         self.assertLess(h.poll(), 0)
         self.assertTrue(h.stdin.closed)
@@ -201,6 +201,16 @@ class TestLauncher(unittest.TestCase):
             self.assertFalse((self.root / 'must-not-open').exists())
             self.assertFalse((self.root / 'effect').exists())
 
+    def test_log_cannot_export_descriptor_alias(self):
+        directory = self.root / 'record'
+        directory.mkdir(mode=0o700)
+        with protocol.pin(directory) as p, p.drain() as fd:
+            alias = self.root / 'alias'
+            alias.symlink_to('/dev/fd/' + str(fd))
+            for path in ('/dev/fd/' + str(fd), alias):
+                with self.assertRaises((ValueError, OSError)):
+                    self.launch('echo', stdout=L.Log(path))
+
     def test_private_handoff_cleanup_does_not_release_parent_drain(self):
         directory = self.root / 'record'
         directory.mkdir(mode=0o700)
@@ -208,7 +218,7 @@ class TestLauncher(unittest.TestCase):
             h = L._launch(self.argv('barrier', self.root / 'r', self.root / 'x'),
                                  _protected_fd=fd)
             self.addCleanup(h.close)
-            with self.assertRaises(subprocess.TimeoutExpired):
+            with self.assertRaises(sp.TimeoutExpired):
                 h.wait(.01)
             h.close()
             probe = os.open(directory / 'authority.drain.lock', os.O_RDWR)
@@ -225,7 +235,7 @@ class TestLauncher(unittest.TestCase):
         directory = self.root / 'record'
         directory.mkdir(mode=0o700)
         seen = []
-        popen = subprocess.Popen
+        popen = sp.Popen
         def real_spawn(*args, **kwargs):
             child = popen(*args, **kwargs)
             seen.append(child)
@@ -242,7 +252,7 @@ class TestLauncher(unittest.TestCase):
         self.assertFalse((self.root / 'effect').exists())
 
     def test_legacy_defaults_equivalent_to_pinned_base(self):
-        source = subprocess.check_output(['git', 'show', BASE + ':skills/hanig-orchestrate/scripts/d5_process.py'], cwd=ROOT)
+        source = sp.check_output(['git', 'show', BASE + ':skills/hanig-orchestrate/scripts/d5_process.py'], cwd=ROOT)
         path = self.root / 'base_P.py'
         path.write_bytes(source)
         spec = importlib.util.spec_from_file_location('r8a_base', path)
