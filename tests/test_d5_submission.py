@@ -417,6 +417,38 @@ class TestSubmission(unittest.TestCase):
         self.eq(self.boundary.calls, [])
         self.eq(self.rows(), [])
 
+    def test_sequential_same_authority_has_distinct_accounting(self):
+        results = {}
+        for request_id in ("A", "B"):
+            self.operation = submission.Operation(request_id, "fixture",
+                self.operation.scope, request_id.encode())
+            self.boundary = DeterministicBoundary()
+            def start():
+                self.eq(self.probe("start"), "blocked")
+                row, = [r for r in self.rows()
+                        if r["binding"]["correlation"]["request_id"] == request_id]
+                self.eq(row["state"], "attempting")
+            def finish():
+                self.eq(self.probe("start"), "available")
+                return dict(OK, detail=request_id)
+            self.boundary.on_start, self.boundary.on_finish = start, finish
+            result = self.submit()
+            self.eq(result.initiation, submission.Initiation.SUBMITTED)
+            self.eq(result.outcome, dict(OK, detail=request_id))
+            self.eq(self.boundary.calls, [("start", self.operation), ("finish",)])
+            results[request_id] = result.effect_id
+            self.eq(self.probe("start"), "available")
+            self.eq(self.probe("drain"), "available")
+        self.assertNotEqual(results["A"], results["B"])
+        self.eq(len(self.rows()), 2)
+        for row in self.rows():
+            request_id = row["binding"]["correlation"]["request_id"]
+            self.eq(row["effect_id"], results[request_id])
+            self.eq(row["binding"]["record_id"], self.request["grant_id"])
+            self.eq(row["binding"]["correlation"]["intent"], request_id.encode().hex())
+            self.eq(row["state"], "completed")
+            self.eq(row["outcome"], dict(OK, detail=request_id))
+
     def test_post_start_interrupt_finishes_under_drain(self):
         lines, first = inspect.getsourcelines(submission.submit)
         target = first + next(i for i, line in enumerate(lines)
