@@ -4,7 +4,9 @@ Supported envelope and accepted limits
 -------------------------------------
 P/H; G for initial installation. A stuck shared holder can block indefinitely.
 The caller supplies an already safely resolved, provisioned record directory D
-and, for claim, its trusted current mandate locator. P requires stable D and
+and, for claim, its trusted current mandate locator. Locators containing a ..
+component refuse before filesystem/protocol work; other components stay intact.
+P requires stable D and
 lock inodes, same-UID ownership, 0700, and trusted ancestry. R1's opener repairs
 owner permissions in place to 0600; it does not replace locks or chmod D.
 Resource/open failures are permitted. Concurrent direct store mutation is
@@ -51,6 +53,8 @@ def _installation(directory, mandate_path=None):
     paths = [os.fspath(directory)]
     if mandate_path is not None:
         paths.append(os.fspath(mandate_path))
+    if any(".." in os.fsdecode(p).split(os.sep) for p in paths):
+        raise store.AuthorityError("D5 locator contains ..")
     cwd = os.getcwdb() if any(not os.path.isabs(p) for p in paths) else b""
     directory = _bound(paths[0], cwd)
     mandate_path = _bound(paths[1], cwd) if len(paths) == 2 else None
