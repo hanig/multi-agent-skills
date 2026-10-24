@@ -223,6 +223,13 @@ def _holds_the_path(fd, state_dir):
     return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
 
 
+def holds_lease(state_dir):
+    """Read-only live process/descriptor/path capability; never acquire a lock."""
+    key = str(Path(state_dir).resolve())
+    return (_LOCK_OWNER_PID == os.getpid() and key in _LOCK_FDS
+            and _holds_the_path(_LOCK_FDS[key], Path(state_dir)))
+
+
 def renew_lease(state_dir):
     """Returns True while this process still holds the lock.
 
