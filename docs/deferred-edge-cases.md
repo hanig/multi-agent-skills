@@ -30,16 +30,16 @@ This is the canonical ledger of reproduced findings deferred outside a task's de
 - Original verdict and round: round 2 REVIEW_FAIL.
 - Tested revision: `c71768f`.
 - Reproduction: `27e8f49948f8a0fc/round2-reproduction.txt`: "NAMESPACE: PermissionError(13, 'Permission denied') bytes= b'control'"; patched `stat('/dev/fd')`.
-- Consequence bound: No log open, child or lost bytes. Promised macOS devfs `/dev/fd` is stat-able on both interpreters.
-- Operator recovery (and demonstration, if required): Run in the supported environment; do not bypass the protected-descriptor refusal. Success: ordinary log bytes append.
+- Consequence bound: No log open, child or lost bytes; supported-host devfs is stat-able on both interpreters.
+- Operator recovery: Use the supported environment; never bypass descriptor refusal. Ordinary log append succeeds.
 - The five nonblocking answers:
   1. Affects confined logging.
   2. EACCES stops promptly, preserving work.
   3. No guard or obligation is weakened.
-  4. The mandate's *Findings outside the supported envelope*, with Sol concurrence.
+  4. Mandate envelope rule; Sol concurred.
   5. Supported-host refusal, lost bytes or a child falsifies this.
 - Maintainer: The orchestrator.
-- Reassessment triggers: Coordinator permissions/confinement change, or Linux joins the envelope.
+- Reassessment triggers: Changed permissions/confinement or Linux support.
 
 ### Scope-check subshell and GIT_CEILING_DIRECTORIES
 
