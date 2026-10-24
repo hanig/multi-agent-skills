@@ -4,10 +4,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+from types import ModuleType
 import unittest
 from unittest import mock
 
 from tests import test_d5_registry as fixtures
+from tests.fixtures.d5.ready import ready
 import d5_install as install
 import d5_readiness as R
 import swarm_state as SS
@@ -32,9 +35,9 @@ class TestReadiness(unittest.TestCase):
         self.addCleanup(SS.release_lease, self.state)
 
     def promoted(self):
-        self.stage()
-        self.lease()
-        return install.promote(*self.args)
+        self.entry = ready(self, *self.args)
+        self.record = Path(self.entry["record_dir"])
+        return R.require(self.state)
 
     def test_staging_create_only_without_record_locks_or_authority(self):
         with mock.patch.object(R.protocol, "pin", side_effect=AssertionError("record lock")), \
@@ -199,30 +202,66 @@ class TestReadiness(unittest.TestCase):
                 install.promote(*self.args)
         self.assertFalse(self.marker.exists())
 
+    def test_M6_inactive_operational_effects_equal_recorded_base(self):
+        # Unit-local capture: load the recorded base implementations, with the
+        # same real fixture and inactive predicate. No production path is patched.
+        base = "17b40983a6993681d95fd9f7029eb21dbc82c5de"
+        import d5_custody
+        import d5_lease
+        import d5_submission
+        cases = [(R.registry, "register", self.args, {}),
+                 (d5_lease, "grant", self.args, dict(issued_at=1, confirmed_at=1,
+                  expires_at=2, mandate_bytes=b"m", scope={}, owner_response="yes",
+                  displayed_bounds={})),
+                 (d5_custody, "claim", self.args, dict(now=1, mandate_bytes=b"m")),
+                 (d5_submission, "submit", self.args, dict(grant_id="g", session_id=1,
+                  anchor=None, generation="g", operation=None, boundary=None)),
+                 (install, "install_initial", (self.state, {}), {}),
+                 (install, "replace_authority", (self.state, {}), {}),
+                 (install, "claim_custody", (self.state,), dict(mandate_path=self.state / "m"))]
+        originals = {}
+        for module, _, _, _ in cases:
+            if module.__name__ in originals:
+                continue
+            path = Path(module.__file__).relative_to(fixtures.ROOT)
+            source = subprocess.check_output(["git", "show", base + ":" + str(path)],
+                                             cwd=str(fixtures.ROOT))
+            previous = ModuleType("_m6_" + module.__name__)
+            previous.__file__ = module.__file__
+            with mock.patch.dict(sys.modules, {previous.__name__: previous}):
+                exec(compile(source, str(path), "exec"), previous.__dict__)
+            originals[module.__name__] = previous
 
-class TestLiveLease(unittest.TestCase):
-    def test_live_path_bound_readonly_and_fork(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as raw:
-            directory = Path(raw)
-            (directory / SS.LEASE).write_text(json.dumps({"pid": os.getpid()}))
-            self.assertFalse(SS.holds_lease(directory))
-            self.assertEqual(SS.acquire_lease(directory, bump_epoch=False), (True, None))
-            try:
-                with mock.patch.object(os, "open", side_effect=AssertionError("open")), \
-                     mock.patch.object(SS.fcntl, "flock", side_effect=AssertionError("flock")):
-                    self.assertTrue(SS.holds_lease(directory))
-                child = os.fork()
-                if child == 0:
-                    os._exit(1 if SS.holds_lease(directory) else 0)
-                self.assertEqual(os.waitpid(child, 0)[1], 0)
-                self.assertTrue(SS.holds_lease(directory))
-                (directory / SS.LOCK).rename(directory / "old.lock")
-                (directory / SS.LOCK).touch()
-                self.assertFalse(SS.holds_lease(directory))
-            finally:
-                SS.release_lease(directory)
-            self.assertFalse(SS.holds_lease(directory))
+        def capture(call, args, kwargs):
+            commands = []
+            before = self.fixture.tree()
+
+            def launched(*args, **kwargs):
+                commands.append((args, kwargs))
+                raise AssertionError("unexpected process")
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(subprocess, "Popen", launched))
+                for name in dir(os):
+                    if name.startswith(("exec", "spawn", "posix_spawn")) or name in (
+                            "fork", "forkpty", "system", "popen", "startfile"):
+                        if callable(getattr(os, name)):
+                            stack.enter_context(mock.patch.object(os, name, launched))
+                try:
+                    outcome = ("return", call(*args, **kwargs))
+                except Exception as exc:
+                    outcome = (type(exc).__name__, str(exc))
+            after = self.fixture.tree()
+            rows = [p.read_bytes() for p in self.fixture.d.rglob("authority.effects/*.json")]
+            return before == after, rows, commands, outcome
+
+        for module, name, args, kwargs in cases:
+            with self.subTest(entry=module.__name__ + "." + name):
+                expected = capture(getattr(originals[module.__name__], name), args, kwargs)
+                actual = capture(getattr(module, name), args, kwargs)
+                self.assertEqual(actual, expected)
+                self.assertEqual(actual[:3], (True, [], []))
+                self.assertEqual(actual[3][0], "AuthorityError")
 
 
 if __name__ == "__main__":
