@@ -309,8 +309,19 @@ def _locked(root):
 
 
 def register(checkout, plan_id, state_dir):
-    """Register one (repo object, plan) with one state object, or return it intact."""
+    """Confirm an installed registration; ordinary entry cannot provision."""
     _active()
+    _plan_id(plan_id)
+    import d5_readiness as readiness
+    ready = readiness.require(state_dir)
+    entry = readiness.bound(ready, lookup(checkout, plan_id, state_dir))
+    # The existing idempotent branch confirms the exact directory/file chain.
+    return stage(checkout, plan_id, state_dir)
+
+
+def stage(checkout, plan_id, state_dir):
+    """Installer scaffolding only; never retarget an existing registration."""
+    import d5_readiness as readiness
     with _identity(checkout, plan_id, state_dir, containment=True) as (
             root, identity, state_fd, protected):
         # OD6: R/P checks precede the registry read and this registration's D
@@ -322,36 +333,37 @@ def register(checkout, plan_id, state_dir):
         if existing is not None or info:
             _outside(directory, protected)
         _require(not info, str(directory) + ": already exists")
-        base = root.parent.parent
-        _mkdir_base(base)
-        root.parent.mkdir(mode=0o700, exist_ok=True)
-        root.mkdir(mode=0o700, exist_ok=True)
-        with _locked(root):
-            # Another registration may have published during preflight.
-            entries = _entries(root)
-            existing = _find(root, entries, identity, state_fd)
-            plans = root / "plans"
-            if existing is None:
-                plans.mkdir(mode=0o700, exist_ok=True)
-                _require(not _directory(directory), str(directory) + ": already exists")
-                directory.mkdir(mode=0o700)  # Never reuse a record root.
-                record_key = _record_key(root, rid)
-            # OD4: confirm the fixed chain on every call. R is synced once below:
-            # by the atomic registry write, or explicitly on idempotent retry.
-            for path in (base, root.parent, plans):
-                store.sync_directory(path)
-            if existing is not None:
-                fd = os.open(str(root / "registry.json"), os.O_RDONLY | os.O_NOFOLLOW)
-                with store.cleanup(os.close, fd):
-                    os.fsync(fd)
-                store.sync_directory(root)
-                return existing
-            entry = dict(identity, registration_id=rid, record_dir=str(directory),
-                         record_key=record_key)
-            raw = (json.dumps({"schema_version": 2, "entries": entries + [entry]},
-                              sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
-            store.write_bytes(root / "registry.json", raw)
-            return entry
+        with readiness.installer_lease(identity["state_dir"]):
+            base = root.parent.parent
+            _mkdir_base(base)
+            root.parent.mkdir(mode=0o700, exist_ok=True)
+            root.mkdir(mode=0o700, exist_ok=True)
+            with _locked(root):
+                # Another registration may have published during preflight.
+                entries = _entries(root)
+                existing = _find(root, entries, identity, state_fd)
+                plans = root / "plans"
+                if existing is None:
+                    plans.mkdir(mode=0o700, exist_ok=True)
+                    _require(not _directory(directory), str(directory) + ": already exists")
+                    directory.mkdir(mode=0o700)  # Never reuse a record root.
+                    record_key = _record_key(root, rid)
+                # OD4: confirm the fixed chain on every call. R is synced once below:
+                # by the atomic registry write, or explicitly on idempotent retry.
+                for path in (base, root.parent, plans):
+                    store.sync_directory(path)
+                if existing is not None:
+                    fd = os.open(str(root / "registry.json"), os.O_RDONLY | os.O_NOFOLLOW)
+                    with store.cleanup(os.close, fd):
+                        os.fsync(fd)
+                    store.sync_directory(root)
+                    return existing
+                entry = dict(identity, registration_id=rid, record_dir=str(directory),
+                             record_key=record_key)
+                raw = (json.dumps({"schema_version": 2, "entries": entries + [entry]},
+                                  sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+                store.write_bytes(root / "registry.json", raw)
+                return entry
 
 
 def lookup(checkout, plan_id, state_dir):

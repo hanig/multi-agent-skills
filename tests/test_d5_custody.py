@@ -22,6 +22,7 @@ import d5_install as install
 import d5_lease as lease
 import d5_registry as registry
 from tests.test_d5_authority import MANDATE, grant
+from tests.fixtures.d5.ready import ready
 from tests.test_d5_locks import isolate_pool
 
 ANCHOR = host.ProcessIdentity(42, 9000001)
@@ -252,9 +253,16 @@ class TestCustodyAPI(unittest.TestCase):
             setattr(self, name, patch.start())
             self.addCleanup(patch.stop)
 
+        # Keep readiness valid while the operational registry is absent.
+        if self._testMethodName == "test_requires_registration_before_anchor":
+            with mock.patch.object(registry.CP, "_external_base",
+                                   return_value=self.directory / "installed-registry"):
+                ready(self, self.repo, "p", self.state)
+
     def register(self, record=True):
         with mock.patch.object(registry, "d5_active", return_value=True):
-            entry = registry.register(self.repo, "p", self.state)
+            entry = ready(self, self.repo, "p", self.state,
+                          promote=getattr(self, "promote", True))
         if record:
             store.create(entry["record_dir"], grant())
         return entry

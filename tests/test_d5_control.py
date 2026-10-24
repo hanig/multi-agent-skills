@@ -21,6 +21,7 @@ import d5_lease as lease
 import d5_locks as locks
 import d5_protocol_locks as protocol
 import d5_registry as registry
+from tests.fixtures.d5.ready import ready
 from tests import test_d5_locks as lock_tests
 
 PEER = ROOT / "tests/fixtures/d5/protocol_peer.py"
@@ -48,7 +49,7 @@ class TestD5Control(unittest.TestCase):
         self.anchor = self.stack.enter_context(mock.patch.object(host, "session_anchor",
                                                                 return_value=("native", ANCHOR)))
         self.args = self.repo, "p", self.state
-        self.entry = registry.register(*self.args)
+        self.entry = ready(self, *self.args)
         self.directory = Path(self.entry["record_dir"])
         lease.grant(*self.args, issued_at=100, confirmed_at=100, expires_at=200,
                     mandate_bytes=MANDATE, scope=dict(plans=["p"], repositories=[],
