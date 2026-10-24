@@ -93,11 +93,12 @@ class TestReadiness(unittest.TestCase):
         self.assertFalse(SS.holds_lease(self.state))
         authority = self.record / "authority.json"
         authority.write_bytes(b"opaque existing authority")
+        os.utime(authority, (1, 1))
         prior = authority.stat()
         self.lease()
         install.promote(*self.args)
-        self.assertEqual(authority.read_bytes(), b"opaque existing authority")
         self.assertEqual(authority.stat(), prior)
+        self.assertEqual(authority.read_bytes(), b"opaque existing authority")
         self.assertNotEqual(R.require(self.state)["generation"], value["generation"])
 
     def test_crash_at_each_publication_io_leaves_absent_or_matching_readiness(self):
