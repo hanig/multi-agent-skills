@@ -2,6 +2,7 @@
 from contextlib import contextmanager, ExitStack
 import builtins
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -150,6 +151,58 @@ class TestIssuance(unittest.TestCase):
         with mock.patch.object(registry, "d5_active", return_value=True):
             self.refused(registry, "register", {}, "missing or malformed installation state")
         self.assertFalse(self.marker.exists())
+
+    def test_cold_register_refusal_has_no_import_cache_writes(self):
+        # A fresh interpreter and cache root exercise the actual first call.
+        # Audit hooks see importlib's native opens, which os.open mocks miss.
+        code = """
+import json, os, sys
+sys.dont_write_bytecode = False
+sys.pycache_prefix = sys.argv[3]
+sys.path.insert(0, sys.argv[1])
+import d5_registry as registry
+import swarm_state as state
+held = sys.argv[4] == 'held'
+if held:
+    assert state.acquire_lease(sys.argv[2], bump_epoch=False) == (True, None)
+writes, launches = [], []
+observing = False
+def audit(event, args):
+    if not observing:
+        return
+    if event == 'open' and args[2] & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+        writes.append(str(args[0]))
+    if event in ('os.mkdir', 'os.rename', 'os.remove', 'os.rmdir'):
+        writes.append(event)
+    if event.startswith(('subprocess.', 'os.exec', 'os.spawn', 'os.posix_spawn', 'os.fork')) or event == 'os.system':
+        launches.append(event)
+sys.addaudithook(audit)
+registry.d5_active = lambda: True
+try:
+    observing = True
+    try:
+        registry.register('/unused', 'p', sys.argv[2])
+        outcome = 'returned'
+    except registry.AuthorityError as exc:
+        outcome = str(exc)
+finally:
+    observing = False
+    state.release_lease(sys.argv[2])
+print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
+"""
+        for held in (False, True):
+            with self.subTest(held=held):
+                result = subprocess.run([sys.executable, "-c", code,
+                    str(fixtures.ROOT / "skills/hanig-orchestrate/scripts"),
+                    str(self.state), str(self.fixture.d / ("cache-" + str(held))),
+                    "held" if held else "unheld"], capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                observed = json.loads(result.stdout)
+                reason = ("missing or malformed installation state" if held
+                          else "caller-held coordinator lease required")
+                self.assertEqual(observed["outcome"], "D5 readiness: " + reason)
+                self.assertEqual(observed["writes"], [])
+                self.assertEqual(observed["launches"], [])
 
     def test_predicate_never_publishes_readiness(self):
         ready(self, *self.args, promote=False)
