@@ -232,9 +232,9 @@ class TestSuccessorGate(unittest.TestCase):
 
     def test_replacement_accepts_record_directory_alias(self):
         alias = self.c.root / 'record-alias'
-        alias.symlink_to(self.c.directory, target_is_directory=True)
+        alias.symlink_to(self.c.directory.parent, target_is_directory=True)
         new = dict(self.c.original, grant_id='b' * 32)
-        self.assertEqual(install.replace_authority(alias, new)['grant_id'], 'b' * 32)
+        self.assertEqual(install.replace_authority(alias / self.c.directory.name, new)['grant_id'], 'b' * 32)
         readiness.require(self.c.state_dir)
 
     def test_gate_refuses_unlistable_state_before_withdrawal(self):
