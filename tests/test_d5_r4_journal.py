@@ -46,7 +46,7 @@ class TestJournal(unittest.TestCase):
       self.eq(len(bound), 1)
       self.assertIs(bound[0].operation, c.operation)
       self.eq((bound[0].specification, bound[0].directory, bound[0].owner, self.path.exists()),
-          (self.spec, str(c.directory), (os.getpid(), threading.get_ident()), False))
+          (self.spec, str(c.directory), os.getpid(), False))
     c.boundary.on_start = start
     append = swarm.SJ._fsync_append
     def record(path, data):
@@ -70,7 +70,11 @@ class TestJournal(unittest.TestCase):
       with self.raises(t.authority.AuthorityError, 'expired'):
         self.submit()
     c.clock.return_value = 150
-    self.spec = replace(self.spec, path=str(c.root / 'other'))
+    immutable = self.spec
+    self.spec = replace(immutable, payload=bytearray(immutable.payload))
+    with self.raises(t.ledger.EffectError, 'target mismatch'):
+      self.submit()
+    self.spec = replace(immutable, path=str(c.root / 'other'))
     with self.raises(t.ledger.EffectError, 'target mismatch'):
       self.submit()
     self.eq(c.boundary.calls, [])
@@ -189,8 +193,9 @@ class TestJournal(unittest.TestCase):
     bound = journal.bind(self.spec, other, c.state_dir, str(c.directory))
     cap = t.completion.bind(receipt, journal=bound)
     for call in (lambda: cap.complete(t.OK), cap.uncertain):
-      thread, results = c.launch(call)
-      self.assertIsInstance(c.join(thread, results), t.ledger.EffectError)
+      with patch.object(journal.os, 'getpid', return_value=os.getpid()+1):
+        with self.raises(t.ledger.EffectError, 'another invocation owner'):
+          call()
       with t.ledger._checked(receipt) as (_, _, entry):
         self.eq(entry['state'], 'submitted')
     before = self.path.read_bytes()
@@ -198,7 +203,8 @@ class TestJournal(unittest.TestCase):
       with self.raises(t.ledger.EffectError, 'inside START'):
         cap.complete(t.OK)
     self.eq(self.path.read_bytes(), before)
-    self.eq(cap.complete(t.OK), t.OK)
+    thread, results = c.launch(lambda: cap.complete(t.OK))
+    self.eq(c.join(thread, results), t.OK)
 
   def test_failed_effect(self):
     self.c.boundary.on_finish = lambda: dict(status='failed', detail='no merge')
