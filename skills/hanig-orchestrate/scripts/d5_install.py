@@ -93,6 +93,15 @@ def replace_authority(directory, record):
                                "replacement installation object mismatch")
         with _installation(directory) as (directory, _, _):
             readiness.successor_gate(installed)
+            # A consent/schema refusal must preserve the existing readiness.
+            # Reuse the store's policy under DRAIN/START; replace rechecks it
+            # under STATE when committing. Raw store writers are excluded.
+            candidate = store.decode(store.encode(record))
+            predecessor = store.read(directory)
+            if candidate["custody"] is None:
+                candidate["custody"] = predecessor["custody"]
+            store.replacement_allowed(predecessor, candidate)
+            store._unused_id(Path(directory), candidate)
             readiness.withdraw(state_dir)
             result = store.replace(directory, record)
             readiness.publish_installation(installed)
