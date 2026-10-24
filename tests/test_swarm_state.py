@@ -1,6 +1,7 @@
 """State extraction keeps coordinator callers and the owner in agreement."""
 
 import ast
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -124,6 +125,9 @@ class TestStateExtraction(unittest.TestCase):
         tree = ast.parse(Path(SS.__file__).read_text())
         found = {n.name for n in tree.body
                  if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+        # The new owner-only query was not moved out of the facade.
+        self.assertIn("holds_lease", found)
+        found.remove("holds_lease")
         self.assertEqual(found, set(DEFINITIONS))
         forbidden = {"swarm", "review", "committee", "resolve_models", "linear_api",
                      "linear_sync", "merge_unit", "urllib", "http", "socket", "ssl"}
@@ -139,6 +143,32 @@ class TestStateExtraction(unittest.TestCase):
             "assert not set(sys.modules).intersection(" + repr(runtime_forbidden) + ")"
         ), str(SCRIPTS)], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+
+class TestLiveLease(unittest.TestCase):
+    def test_live_path_bound_readonly_and_fork(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            (directory / SS.LEASE).write_text(json.dumps({"pid": os.getpid()}))
+            self.assertFalse(SS.holds_lease(directory))
+            self.assertEqual(SS.acquire_lease(directory, bump_epoch=False), (True, None))
+            try:
+                with mock.patch.object(os, "open", side_effect=AssertionError("open")), \
+                     mock.patch.object(SS.fcntl, "flock", side_effect=AssertionError("flock")):
+                    self.assertTrue(SS.holds_lease(directory))
+                child = os.fork()
+                if child == 0:
+                    os._exit(1 if SS.holds_lease(directory) else 0)
+                self.assertEqual(os.waitpid(child, 0)[1], 0)
+                self.assertTrue(SS.holds_lease(directory))
+                (directory / SS.LOCK).rename(directory / "old.lock")
+                (directory / SS.LOCK).touch()
+                self.assertFalse(SS.holds_lease(directory))
+            finally:
+                SS.release_lease(directory)
+            self.assertFalse(SS.holds_lease(directory))
 
 
 if __name__ == "__main__":

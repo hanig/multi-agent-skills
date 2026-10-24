@@ -28,6 +28,7 @@ import d5_authority_store as store
 import d5_host as host
 import d5_protocol_locks as protocol
 import d5_registry as registry
+import d5_readiness as readiness
 
 
 def _active():
@@ -83,3 +84,13 @@ def claim_custody(directory, *, mandate_path):
         mandate = store.read_bytes(mandate_path)
         now = int(time.time())
         return store.claim(directory, now, mandate, session_id, anchor, host.liveness)
+
+
+def stage(checkout, plan_id, state_dir):
+    """Explicit installer scaffolding, independent of activation."""
+    return registry.stage(checkout, plan_id, state_dir)
+
+
+def promote(checkout, plan_id, state_dir):
+    """Explicit installer publication of the restricted route profile."""
+    return readiness.promote(checkout, plan_id, state_dir)
