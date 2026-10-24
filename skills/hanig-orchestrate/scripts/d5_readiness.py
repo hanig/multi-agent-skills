@@ -164,11 +164,16 @@ def successor_gate(entry):
                              "unresolved effect ledger")
     try:
         # Pending cancellation may be the only surviving intent copy.
-        paths = set(directory.glob("merge-unit-*.json"))
-        paths.update(p.with_suffix(".json") for p in
-                     directory.glob("merge-unit-*.cancellation-pending"))
-        paths.update(directory / ("merge-unit-" + p.name[len("merge-abandonment-"):])
-                     for p in directory.glob("merge-abandonment-*.json"))
+        # glob silently skips an unreadable directory; an inventory error
+        # must refuse before withdrawal, not masquerade as no pending work.
+        names = os.listdir(directory)
+        paths = set(directory / name for name in names
+                    if name.startswith("merge-unit-") and name.endswith(".json"))
+        paths.update((directory / name).with_suffix(".json") for name in names
+                     if name.startswith("merge-unit-") and name.endswith(".cancellation-pending"))
+        paths.update(directory / ("merge-unit-" + name[len("merge-abandonment-"):])
+                     for name in names
+                     if name.startswith("merge-abandonment-") and name.endswith(".json"))
         for path in sorted(paths):
             source = path if path.exists() else path.with_suffix(".cancellation-pending")
             if not source.exists():

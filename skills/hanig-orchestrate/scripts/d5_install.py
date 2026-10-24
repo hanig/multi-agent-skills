@@ -86,7 +86,7 @@ def replace_authority(directory, record):
         # Reload under the lease; an absent marker permits installer recovery.
         installed = readiness._validated(readiness._read(Path(directory) / readiness.INSTALLATION))
         readiness._require(installed["state_dir"] == str(state_dir) and
-                           Path(installed["record_dir"]) == Path(directory),
+                           Path(installed["record_dir"]).samefile(directory),
                            "replacement installation binding mismatch")
         for path, key in ((state_dir, "state_key"), (Path(directory), "record_key")):
             readiness._require(list(registry._key(path.stat())) == installed[key],
