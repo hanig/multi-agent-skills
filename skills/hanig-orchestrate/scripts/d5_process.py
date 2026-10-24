@@ -45,9 +45,11 @@ def _communication(record, pass_fds, streams):
     descriptors = [(fd, False) for fd in pass_fds]
     for standard, stream in enumerate(streams):
         fd = standard if stream is None else stream
-        if standard == 2 and stream == subprocess.STDOUT:
+        if standard == 2 and type(stream) is int and stream == subprocess.STDOUT:
             fd = 1 if streams[1] is None else streams[1]
         fd = fd if isinstance(fd, int) else fd.fileno()
+        if type(fd) is not int:
+            raise AuthorityError("D5 stream descriptor must be int")
         if fd >= 0:
             descriptors.append((fd, stream is None))
     for fd, inherited_standard in descriptors:
@@ -70,7 +72,7 @@ def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
 
     R1 closes its duplicate on return/failure; R7 adopts the child copy. Caller
     drains/reaps Popen and closes its original without unlocking."""
-    if bootstrap not in DESIGNATED_BOOTSTRAPS:
+    if type(bootstrap) is not str or bootstrap not in DESIGNATED_BOOTSTRAPS:
         raise AuthorityError("D5 protected bootstrap is not designated")
     command = [sys.executable]
     command.extend([bootstrap] if os.path.isabs(bootstrap) else ["-m", bootstrap])
@@ -79,7 +81,7 @@ def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
     with protocol.pin(directory) as pinned:
         if pinned._record._prior(1) is not None:
             raise AuthorityError("D5 protected launch inside START is forbidden")
-        if any(fd <= 2 for fd in (inherited_fd,) + pass_fds):
+        if any(type(fd) is not int or fd <= 2 for fd in (inherited_fd,) + pass_fds):
             raise AuthorityError("D5 control descriptors must be above 2; duplicate before constructing child argv")
         _communication(pinned._record, pass_fds, (stdin, stdout, stderr))
         with pinned.drain(inherited_fd=inherited_fd):
