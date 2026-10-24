@@ -144,8 +144,67 @@ def installer_lease(state_dir):
                     finally:
                         del _INSTALLERS[directory]
 
+def successor_gate(entry):
+    """Read both unresolved sources under lease, exclusive DRAIN and START.
+
+    Reuse R4's strict ledger decoder and merge_unit's read-only resolution
+    traversal. No intent repair, ledger creation, or readiness substitution.
+    """
+    import d5_effect_log as ledger
+    import merge_unit
+    directory = lease_required(entry["state_dir"])
+    record_dir = Path(entry["record_dir"])
+    if os.path.lexists(record_dir / ledger.DIRECTORY):
+        with ledger._access(record_dir) as (record, fd):
+            for name in sorted(os.listdir(fd)):
+                if name.endswith(".json"):
+                    row = ledger._load(fd, name, record)
+                    _require(row["state"] not in ("attempting", "unknown", "submitted"),
+                             "unresolved effect ledger")
+    try:
+        # Pending cancellation may be the only surviving intent copy.
+        paths = set(directory.glob("merge-unit-*.json"))
+        paths.update(p.with_suffix(".json") for p in
+                     directory.glob("merge-unit-*.cancellation-pending"))
+        paths.update(directory / ("merge-unit-" + p.name[len("merge-abandonment-"):])
+                     for p in directory.glob("merge-abandonment-*.json"))
+        for path in sorted(paths):
+            source = path if path.exists() else path.with_suffix(".cancellation-pending")
+            if not source.exists():
+                source = directory / ("merge-abandonment-" + path.name[len("merge-unit-"):])
+                value = merge_unit.read_object(source)["intent"]
+            else:
+                value = merge_unit.read_object(source)
+            _, _, current = merge_unit.current_intent(
+                directory, value["binding"], value["root"], repair=False)
+            _require(current is None or current.get("phase") == "receipt_recorded",
+                     "unresolved merge intent")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise registry.AuthorityError("D5 readiness: unresolved or malformed merge intent") from exc
+
+
+
 def publish(path, value):
     store.write_bytes(path, (json.dumps(value, sort_keys=True) + "\n").encode())
+
+
+def withdraw(directory):
+    """Withdraw before any installation/authority commit; caller owns all locks."""
+    try:
+        (directory / MARKER).unlink()
+    except FileNotFoundError:
+        pass
+    store.sync_directory(directory)
+
+
+def publish_installation(entry):
+    """Commit a fresh generation and binding, then publish readiness last."""
+    value = dict((key, entry[key]) for key in BINDING)
+    value.update(schema_version=1, generation=uuid.uuid4().hex, profile=PROFILE)
+    _validated(value)
+    publish(Path(entry["record_dir"]) / INSTALLATION, value)
+    publish(Path(entry["state_dir"]) / MARKER, value)
+    return value
 
 
 def promote(checkout, plan_id, state_dir):
@@ -155,15 +214,6 @@ def promote(checkout, plan_id, state_dir):
         _require(entry is not None, "not registered; stage first")
         with protocol.pin(entry["record_dir"]) as record:
             with record.drain(shared=False), record.start():
-                marker = directory / MARKER
-                try:
-                    marker.unlink()
-                except FileNotFoundError:
-                    pass
-                store.sync_directory(directory)
-                value = dict((key, entry[key]) for key in BINDING)
-                value.update(schema_version=1, generation=uuid.uuid4().hex, profile=PROFILE)
-                _validated(value)
-                publish(Path(entry["record_dir"]) / INSTALLATION, value)
-                publish(marker, value)
-                return value
+                successor_gate(entry)
+                withdraw(directory)
+                return publish_installation(entry)
