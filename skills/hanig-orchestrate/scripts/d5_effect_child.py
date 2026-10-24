@@ -39,6 +39,7 @@ def bootstrap(inherited_fd, directory, checkout, plan_id, state_dir, *,
     R6 exposes no release capability on its exceptional path. The caller must
     exit that process, not retry or close retained protection while it lives.
     """
+    submission._ledger_operation(operation)
     os.set_inheritable(inherited_fd, False)
     with ExitStack() as stack:
         pinned = stack.enter_context(protocol.pin(directory))

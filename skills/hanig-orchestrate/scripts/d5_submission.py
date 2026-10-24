@@ -53,6 +53,19 @@ class Operation:
         if (type(self.request_id) is not str or type(self.kind) is not str or
                 type(self.scope) is not bytes or not isinstance(self.intent, bytes)):
             raise ValueError("D5 operation requires immutable fields")
+        admission.recording_authority(self.kind)
+
+    @property
+    def recording_authority(self):
+        return admission.recording_authority(self.kind)
+
+
+def _ledger_operation(operation):
+    """Pre-START request discrimination, also used at bootstrap entry."""
+    if not isinstance(operation, Operation):
+        raise ValueError("D5 operation requires immutable fields")
+    # Reclassify kind, never trust an instance's authority property/serialized tag.
+    admission.require_ledger(operation.kind)
 
 
 class Boundary(ABC):
@@ -81,8 +94,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
         raise AuthorityError("D5 is inactive")
     if not isinstance(boundary, Boundary):
         raise AuthorityError("D5 submission requires an explicit effect boundary")
-    if not isinstance(operation, Operation):
-        raise ValueError("D5 operation requires immutable fields")
+    _ledger_operation(operation)
     entry = registry.lookup(checkout, plan_id, state_dir)
     if entry is None:
         raise AuthorityError("not registered")
