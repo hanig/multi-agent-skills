@@ -309,18 +309,18 @@ def _locked(root):
 
 
 def register(checkout, plan_id, state_dir):
-    """Confirm an installed registration; ordinary entry cannot provision."""
+    """Register one (repo object, plan) with one state object, or return it intact."""
     _active()
-    _plan_id(plan_id)
-    import d5_readiness as readiness
-    ready = readiness.require(state_dir)
-    entry = readiness.bound(ready, lookup(checkout, plan_id, state_dir))
-    # The existing idempotent branch confirms the exact directory/file chain.
-    return stage(checkout, plan_id, state_dir)
+    return _register(checkout, plan_id, state_dir)
 
 
 def stage(checkout, plan_id, state_dir):
     """Installer scaffolding only; never retarget an existing registration."""
+    return _register(checkout, plan_id, state_dir, staging=True)
+
+
+def _register(checkout, plan_id, state_dir, staging=False):
+    from contextlib import nullcontext
     import d5_readiness as readiness
     with _identity(checkout, plan_id, state_dir, containment=True) as (
             root, identity, state_fd, protected):
@@ -333,7 +333,7 @@ def stage(checkout, plan_id, state_dir):
         if existing is not None or info:
             _outside(directory, protected)
         _require(not info, str(directory) + ": already exists")
-        with readiness.installer_lease(identity["state_dir"]):
+        with readiness.installer_lease(identity["state_dir"]) if staging else nullcontext():
             base = root.parent.parent
             _mkdir_base(base)
             root.parent.mkdir(mode=0o700, exist_ok=True)
