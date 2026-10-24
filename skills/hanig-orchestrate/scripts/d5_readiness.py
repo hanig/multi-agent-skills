@@ -44,7 +44,7 @@ def _require(ok, message):
 
 
 def lease_required(directory):
-    directory = Path(directory).resolve()
+    directory = Path(directory).expanduser().resolve()
     _require(state.holds_lease(directory), "caller-held coordinator lease required")
     return directory
 
@@ -80,7 +80,7 @@ def _validated(value):
 
 
 def require(state_dir):
-    """Pure reader under the live lease; operational enforcement belongs to U4.0b."""
+    """Pure reader under the live lease; never provision or publish readiness."""
     directory = lease_required(state_dir)
     value = _validated(_read(directory / MARKER))
     _require(value["state_dir"] == str(directory), "state directory mismatch")
@@ -106,7 +106,7 @@ def installer_lease(state_dir):
     owns release, including when another installer is queued to enter its body.
     Only acquisition of the existing cross-process lease is nonblocking.
     """
-    directory = Path(state_dir).resolve()
+    directory = Path(state_dir).expanduser().resolve()
     if _INSTALLER_PID != os.getpid():
         _reset_installers()
     with _INSTALLER_GUARD:

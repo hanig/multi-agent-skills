@@ -170,6 +170,17 @@ class TestIssuance(unittest.TestCase):
         alias = self.fixture.d / "state-alias"
         alias.symlink_to(self.state, target_is_directory=True)
         self.args = self.fixture.repo, "p", alias
+        self.check_ready_issuance(entry)
+
+    def test_expanded_state_locator_uses_registry_canonical_lease(self):
+        entry = ready(self, *self.args)
+        self.args = self.fixture.repo, "p", "~/state"
+        with mock.patch.dict(os.environ, {"HOME": str(self.fixture.d)}):
+            with readiness.installer_lease("~/state") as directory:
+                self.assertEqual(directory, self.state)
+            self.check_ready_issuance(entry)
+
+    def check_ready_issuance(self, entry):
         mandate = self.fixture.repo / "docs/orchestrator-mandate.md"
         mandate.parent.mkdir()
         mandate.write_bytes(MANDATE)
