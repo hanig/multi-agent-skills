@@ -317,6 +317,22 @@ class TestProcess(unittest.TestCase):
                 self.eq(caught.exception.errno, error)
                 popen.assert_not_called()
 
+    def test_stream_snapshot(self):
+        _, drain = self.holding()
+        with tempfile.TemporaryFile() as f:
+            calls = []
+            class Stream:
+                def fileno(self):
+                    calls.append(1)
+                    return f.fileno() if len(calls) == 1 else drain
+            stream = Stream()
+            with designated(), spawn_spy() as popen:
+                process.protected_spawn(self.directory, drain, BOOTSTRAP,
+                                        stdout=stream, stderr=stream)
+            self.eq(calls, [1])
+            self.eq(popen.call_args.kwargs['stdout'], f.fileno())
+            self.eq(popen.call_args.kwargs['stderr'], f.fileno())
+
     def test_protocol_locks_cannot_be_communication(self):
         _, drain = self.holding()
         for fd in (drain, self.opened('authority.start.lock'), self.opened('authority.lock')):

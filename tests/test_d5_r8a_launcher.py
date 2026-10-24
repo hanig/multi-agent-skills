@@ -1,6 +1,8 @@
 """R8a component evidence, not callers' later M6 obligations."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+import ast
+import inspect
 import fcntl
 import types
 import json
@@ -56,6 +58,76 @@ class TestLauncher(unittest.TestCase):
 		h = self.launch('barrier', ready, release, **options)
 		self.await_file(ready)
 		return h, release
+	def refused(self, options):
+		with mock.patch.object(L.os, 'open') as opened, 				mock.patch.object(L.tempfile, 'TemporaryFile') as allocated, 				mock.patch.object(L.subprocess, 'Popen') as spawned:
+			with self.assertRaises((TypeError, ValueError)):
+				L.launch(self.argv('echo'), options=options)
+			for spy in (opened, allocated, spawned): spy.assert_not_called()
+		self.assertFalse((self.tmp / 'log').exists())
+	def switching(self, name, values, log=False, prop=False):
+		reads, values = [], iter(values)
+		def get(obj, field):
+			if field == name:
+				reads.append(field)
+				return next(values)
+			return object.__getattribute__(obj, field)
+		base = L.Log if log else L.Options
+		attrs = {name: property(lambda obj: get(obj, name))} if prop else {'__getattribute__': get}
+		obj = object.__new__(type('Flip', (base,), attrs))
+		if log: object.__setattr__(obj, 'path', self.tmp / 'log')
+		self.refused(L.Options(stdout=obj) if log else obj)
+		self.eq(reads, [])
+	def test_luna_log_late_use(self):
+		self.switching('mode', ['ab', 'ab', 'not-a-mode'], True)
+	def test_sonnet_log_property(self):
+		self.switching('mode', ['ab', Equal('bad'), Equal('bad')], True, True)
+	def test_sol_log_compare(self):
+		self.switching('mode', ['ab', Equal('bad'), Equal('bad')], True)
+	def test_luna_stdin_fd(self):
+		with self.record() as p, p.drain() as fd:
+			self.switching('stdin', [sp.DEVNULL, sp.DEVNULL, Number(9), fd])
+	def test_sol_stdout_fd(self):
+		with self.record() as p, p.drain() as fd:
+			self.switching('stdout', [L.CAPTURE, fd])
+	def test_sol_stdout_pipe(self):
+		self.switching('stdout', [L.CAPTURE, sp.PIPE])
+	def test_snapshot_leaves(self):
+		class Int(int):
+			def __index__(self): self.fail()
+			def __eq__(self, value): self.fail()
+			def __hash__(self): self.fail()
+		class Dict(dict): pass
+		for kw in ({'stdin': Int(-3)}, {'stdout': Int(-3)}, {'cwd': Equal('.')},
+				{'stdout': L.Log(Equal(str(self.tmp / 'log')))},
+				{'stdout': L.Log(self.tmp / 'log', Equal('ab'))},
+				{'env': Dict()}, {'env': {Equal('k'): 'v'}},
+				{'env': {'k': Equal('v')}}, {'new_session': Int(1)}):
+			with self.subTest(kw=kw): self.refused(L.Options(**kw))
+	def test_snapshot_delivery(self):
+		class PathOnce:
+			def __fspath__(obj):
+				obj.calls += 1
+				return str(self.tmp) if obj.calls == 1 else '/absent'
+		path = PathOnce()
+		path.calls = 0
+		options = L.Options(cwd=path, env={'k': 'v'}, stdout=sp.DEVNULL)
+		real = L._snapshot_options
+		def snap(*args):
+			values = real(*args)
+			object.__setattr__(options, 'new_session', True)
+			object.__setattr__(options, 'stdout', sp.PIPE)
+			options.env['k'] = 'changed'
+			return values
+		with mock.patch.object(L, '_snapshot_options', side_effect=snap), 				mock.patch.object(L.subprocess, 'Popen') as child:
+			with L.launch(self.argv('echo'), options=options): pass
+		kw = child.call_args.kwargs
+		self.eq((kw['cwd'], kw['env'], kw['stdout'], kw['start_new_session']),
+				(str(self.tmp), {'k': 'v'}, sp.DEVNULL, False))
+		self.eq(path.calls, 1)
+		for fn in (L._launch, L._log):
+			tree = ast.parse(inspect.getsource(fn))
+			self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+				and isinstance(n.value, ast.Name) and n.value.id in ('options', 'log')])
 	def test_subclass_mode_refuses_before_open(self):
 		with mock.patch.object(L.subprocess, 'Popen') as spawned:
 			for mode in (Equal('not-a-mode'), Equal('ab')):

@@ -79,8 +79,7 @@ class Handle:
 			self._closed = True
 	def __enter__(self): return self
 	def __exit__(self, *exc): self.close()
-def _log(log):
-	path = os.fspath(log.path)
+def _log(path, mode):
 	directory = os.open(os.path.dirname(path) or '.', os.O_DIRECTORY |
 						getattr(os, 'O_SEARCH', getattr(os, 'O_PATH', os.O_RDONLY)))
 	try:
@@ -96,7 +95,7 @@ def _log(log):
 		try:
 			if not stat.S_ISREG(os.fstat(fd).st_mode):
 				raise ValueError('logs require regular files')
-			return os.fdopen(fd, log.mode)
+			return os.fdopen(fd, mode)
 		except BaseException:
 			os.close(fd)
 			raise
@@ -104,51 +103,66 @@ def _log(log):
 		os.close(directory)
 def launch(argv, *, options=None):
 	return _launch(argv, options=options)
-def _launch(argv, *, options=None, _protected_fd=None):
+def _snapshot_options(argv, options):
+	"""Only boundary reading caller options; return exact primitive leaves."""
 	options = Options() if options is None else options
-	if not isinstance(options, Options):
-		raise TypeError("expected Options")
+	if type(options) is not Options:
+		raise TypeError("expected exact Options")
+	def path(value):
+		value = os.fspath(value)
+		if type(value) not in (str, bytes):
+			raise ValueError("path requires exact str/bytes")
+		return value
 	if isinstance(argv, (str, bytes)):
 		raise TypeError("argv requires a sequence")
-	argv = tuple(argv)
-	if not argv or any(not isinstance(arg, (str, bytes, os.PathLike)) for arg in argv):
+	argv = tuple(path(arg) for arg in argv)
+	if not argv:
 		raise ValueError("invalid argv")
-	if type(options.new_session) is not bool:
+	cwd, env, stdin, stdout, stderr, session = (
+		options.cwd, options.env, options.stdin, options.stdout,
+		options.stderr, options.new_session)
+	if type(session) is not bool:
 		raise ValueError("new_session must be bool")
-	if not (isinstance(options.stdin, bytes) or
-			type(options.stdin) is int and options.stdin in
-			(subprocess.DEVNULL, subprocess.PIPE)):
+	if not (type(stdin) is bytes or type(stdin) is int and
+			stdin in (subprocess.DEVNULL, subprocess.PIPE)):
 		raise ValueError("invalid stdin option")
-	for name, value in (("stdout", options.stdout), ("stderr", options.stderr)):
-		if isinstance(value, Log):
-			if type(value.mode) is not str or value.mode != "ab":
+	outputs = []
+	for name, value in (("stdout", stdout), ("stderr", stderr)):
+		if type(value) is Log:
+			mode, target = value.mode, value.path
+			if type(mode) is not str or mode != "ab":
 				raise ValueError("logs require ab mode")
-			os.fspath(value.path)
+			value = (path(target), mode)
 		elif not (value is CAPTURE or type(value) is int and
 				(value == subprocess.DEVNULL or
 				name == "stderr" and value == subprocess.STDOUT)):
 			raise ValueError("invalid output option")
-	cwd = None if options.cwd is None else os.fspath(options.cwd)
-	env = None if options.env is None else dict(options.env)
-	if env is not None and any(not isinstance(k, str) or not isinstance(v, str)
-							for k, v in env.items()):
-		raise ValueError("environment requires str keys/values")
+		outputs.append((name, value))
+	cwd = None if cwd is None else path(cwd)
+	if env is not None:
+		if type(env) is not dict:
+			raise ValueError("environment requires exact dict")
+		env = env.copy()
+		if any(type(k) is not str or type(v) is not str for k, v in env.items()):
+			raise ValueError("environment requires exact str keys/values")
+	return argv, cwd, env, stdin, outputs, session
+def _launch(argv, *, options=None, _protected_fd=None):
+	argv, cwd, env, stdin, outputs, session = _snapshot_options(argv, options)
 	if _protected_fd is not None and (type(_protected_fd) is not int or _protected_fd <= 2):
 		raise ValueError("private fd must be above 2")
 	owned, captures = [], {}
 	proc = None
 	try:
 		streams = {}
-		for name, value in (("stdout", options.stdout), ("stderr", options.stderr)):
+		for name, value in outputs:
 			if value is CAPTURE:
 				value = tempfile.TemporaryFile("w+b")
 				captures[name] = value
 				owned.append(value)
-			elif isinstance(value, Log):
-				value = _log(value)
+			elif type(value) is tuple:
+				value = _log(*value)
 				owned.append(value)
 			streams[name] = value
-		stdin = options.stdin
 		if isinstance(stdin, bytes):
 			source = tempfile.TemporaryFile("w+b")
 			owned.append(source)
@@ -156,9 +170,9 @@ def _launch(argv, *, options=None, _protected_fd=None):
 			source.seek(0)
 			stdin = source
 		proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=stdin,
-			**streams, start_new_session=options.new_session, close_fds=True,
+			**streams, start_new_session=session, close_fds=True,
 			pass_fds=() if _protected_fd is None else (_protected_fd,), bufsize=0)
-		result = Handle(proc, captures, options.new_session)
+		result = Handle(proc, captures, session)
 		for file in owned:
 			if file not in captures.values():
 				file.close()
