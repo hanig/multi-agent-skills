@@ -313,8 +313,8 @@ def _locked(root):
 def register(checkout, plan_id, state_dir):
     """Confirm an installed registration; ordinary entry cannot provision."""
     _active()
-    _plan_id(plan_id)
     ready = readiness.require(state_dir)
+    _plan_id(plan_id)
     readiness.bound(ready, lookup(checkout, plan_id, state_dir))
     # The existing idempotent branch confirms the exact directory/file chain.
     return stage(checkout, plan_id, state_dir)

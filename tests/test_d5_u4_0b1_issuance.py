@@ -128,6 +128,15 @@ class TestIssuance(unittest.TestCase):
                     self.refused(module, name, kwargs, "caller-held coordinator lease required")
             read.assert_not_called()
 
+    def test_register_checks_lease_before_invalid_plan(self):
+        self.args = self.fixture.repo, "../bad-plan", self.state
+        with mock.patch.object(registry, "d5_active", return_value=True), \
+                mock.patch.object(readiness, "_read") as read, \
+                mock.patch.object(registry, "lookup") as lookup:
+            self.refused(registry, "register", {}, "caller-held coordinator lease required")
+            read.assert_not_called()
+            lookup.assert_not_called()
+
     def test_claim_without_readiness_and_invalid_bindings(self):
         entry = ready(self, *self.args)
         raw = self.marker.read_bytes()
@@ -151,6 +160,27 @@ class TestIssuance(unittest.TestCase):
         with mock.patch.object(registry, "d5_active", return_value=True):
             self.refused(registry, "register", {}, "missing or malformed installation state")
         self.assertFalse(self.marker.exists())
+
+    def test_invalid_state_locators_refuse_with_authority_error_before_effects(self):
+        for locator in (None, "~missing-d5-user/state"):
+            with self.subTest(locator=locator), ExitStack() as patches:
+                patches.enter_context(mock.patch.object(registry, "d5_active", return_value=True))
+                if locator is not None:
+                    patches.enter_context(mock.patch.object(Path, "expanduser",
+                        side_effect=RuntimeError("Could not determine home directory.")))
+                lookup = patches.enter_context(mock.patch.object(registry, "lookup"))
+                held = patches.enter_context(mock.patch.object(state, "holds_lease"))
+                self.args = self.fixture.repo, "p", locator
+                for module, name, kwargs in self.operations():
+                    with self.subTest(entry=name):
+                        self.refused(module, name, kwargs, "state_dir")
+                with no_effects() as effects:
+                    with self.assertRaisesRegex(registry.AuthorityError, "state_dir"):
+                        with readiness.installer_lease(locator):
+                            self.fail("invalid state locator admitted")
+                    self.assertEqual(effects, ([], []))
+                lookup.assert_not_called()
+                held.assert_not_called()
 
     def test_cold_register_refusal_has_no_import_cache_writes(self):
         # A fresh interpreter and cache root exercise the actual first call.

@@ -43,8 +43,16 @@ def _require(ok, message):
         raise registry.AuthorityError("D5 readiness: " + message)
 
 
+def _state_directory(directory):
+    _require(directory is not None, "state_dir is required and must exist")
+    try:
+        return Path(directory).expanduser().resolve()
+    except (TypeError, ValueError, OSError, RuntimeError) as exc:
+        raise registry.AuthorityError("D5 readiness: invalid state_dir") from exc
+
+
 def lease_required(directory):
-    directory = Path(directory).expanduser().resolve()
+    directory = _state_directory(directory)
     _require(state.holds_lease(directory), "caller-held coordinator lease required")
     return directory
 
@@ -106,7 +114,7 @@ def installer_lease(state_dir):
     owns release, including when another installer is queued to enter its body.
     Only acquisition of the existing cross-process lease is nonblocking.
     """
-    directory = Path(state_dir).expanduser().resolve()
+    directory = _state_directory(state_dir)
     if _INSTALLER_PID != os.getpid():
         _reset_installers()
     with _INSTALLER_GUARD:
