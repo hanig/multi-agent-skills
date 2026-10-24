@@ -353,6 +353,39 @@ class TestProcess(unittest.TestCase):
             self.assertNotEqual(json.loads(error), identity(drain))
             self.eq(calls, [1])
 
+    def test_inline_file_is_the_validated_stream(self):
+        _, drain = self.holding()
+        child = self.root / 'observe.py'
+        log = self.root / 'output'
+        log.touch()
+        expected = [log.stat().st_dev, log.stat().st_ino]
+        for number, name in enumerate(('stdin', 'stdout', 'stderr')):
+            child.write_text('import os,json,sys; s=os.fstat(%d); '
+                'print(json.dumps([s.st_dev,s.st_ino]),file=sys.%s)' %
+                (number, 'stderr' if number == 1 else 'stdout'))
+            with self.subTest(stream=name), designated(str(child)):
+                with log.open('ab') as retained:
+                    proc = self.own(process.protected_spawn(
+                        self.directory, drain, str(child), **{name: retained}))
+                    output = proc.communicate(timeout=5)
+                    self.eq(proc.returncode, 0)
+                    self.eq(json.loads(output[number == 1]), expected)
+                # No caller reference remains: the launcher must retain it
+                # until the validated descriptor has reached the child.
+                inline = (
+                    lambda: process.protected_spawn(self.directory, drain,
+                        str(child), stdin=log.open('ab')),
+                    lambda: process.protected_spawn(self.directory, drain,
+                        str(child), stdout=log.open('ab')),
+                    lambda: process.protected_spawn(self.directory, drain,
+                        str(child), stderr=log.open('ab')))[number]
+                proc = self.own(inline())
+                output = proc.communicate(timeout=5)
+                actual = json.loads(output[number == 1])
+                self.eq(proc.returncode, 0)
+                self.assertNotEqual(actual, identity(drain))
+                self.eq(actual, expected)
+
     def test_protocol_locks_cannot_be_communication(self):
         _, drain = self.holding()
         for fd in (drain, self.opened('authority.start.lock'), self.opened('authority.lock')):

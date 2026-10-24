@@ -95,12 +95,13 @@ def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
             raise AuthorityError("D5 protected launch inside START is forbidden")
         if any(type(fd) is not int or fd <= 2 for fd in (inherited_fd,) + pass_fds):
             raise AuthorityError("D5 control descriptors must be above 2; duplicate before constructing child argv")
-        stdin, stdout, stderr = _communication(
+        # Keep borrowed objects alive through Popen, including inline files.
+        streams = _communication(
             pinned._record, pass_fds, (stdin, stdout, stderr))
         with pinned.drain(inherited_fd=inherited_fd):
             return subprocess.Popen(command, close_fds=True,
-                pass_fds=(inherited_fd,) + pass_fds, stdin=stdin,
-                stdout=stdout, stderr=stderr, bufsize=0)
+                pass_fds=(inherited_fd,) + pass_fds, stdin=streams[0],
+                stdout=streams[1], stderr=streams[2], bufsize=0)
 
 
 def worker_spawn(argv):
