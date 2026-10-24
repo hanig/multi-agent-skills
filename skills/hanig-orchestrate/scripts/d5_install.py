@@ -28,6 +28,7 @@ import d5_authority_store as store
 import d5_host as host
 import d5_protocol_locks as protocol
 import d5_registry as registry
+import d5_readiness as readiness
 
 
 def _active():
@@ -73,8 +74,15 @@ def install_initial(directory, record):
 
 def replace_authority(directory, record):
     """Apply the store's replacement rules to the freshly read predecessor."""
-    with _installation(directory) as (directory, _, _):
-        return store.replace(directory, record)
+    _active()
+    # Resolve the state binding by local IO before any record lock acquisition.
+    from pathlib import Path
+    installed = readiness._validated(readiness._read(Path(directory) / readiness.INSTALLATION))
+    with readiness.installer_lease(installed["state_dir"]):
+        readiness.require(installed["state_dir"])
+        with _installation(directory) as (directory, _, _):
+            readiness.successor_gate(installed)
+            return store.replace(directory, record)
 
 
 def claim_custody(directory, *, mandate_path):
@@ -83,3 +91,13 @@ def claim_custody(directory, *, mandate_path):
         mandate = store.read_bytes(mandate_path)
         now = int(time.time())
         return store.claim(directory, now, mandate, session_id, anchor, host.liveness)
+
+
+def stage(checkout, plan_id, state_dir):
+    """Explicit installer scaffolding, independent of activation."""
+    return registry.stage(checkout, plan_id, state_dir)
+
+
+def promote(checkout, plan_id, state_dir):
+    """Explicit installer publication of the restricted route profile."""
+    return readiness.promote(checkout, plan_id, state_dir)

@@ -16,6 +16,7 @@ import d5_authority_store as store
 import d5_host as host
 import d5_lease as lease
 import d5_registry as registry
+from tests.fixtures.d5.ready import ready
 from tests.test_d5_locks import isolate_pool
 
 
@@ -45,9 +46,15 @@ class TestD5Lease(unittest.TestCase):
                          owner_response="Oui, confirmé.\n",
                          displayed_bounds="  Durée: 100 s; café\n")
 
+        # Keep readiness valid while the operational registry is absent.
+        if self._testMethodName == "test_management_requires_registration":
+            with mock.patch.object(registry.CP, "_external_base",
+                                   return_value=self.directory / "installed-registry"):
+                ready(self, self.repo, "p", self.state)
+
     def register(self):
         with mock.patch.object(registry, "d5_active", return_value=True):
-            return registry.register(self.repo, "p", self.state)
+            return ready(self, self.repo, "p", self.state)
 
     def grant(self, **changes):
         args = dict(self.args, **changes)
