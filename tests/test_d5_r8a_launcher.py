@@ -137,12 +137,12 @@ class TestLauncher(unittest.TestCase):
 					self.eq(calls, [1])
 	def test_snapshot_delivery(self):
 		class PathOnce:
+			def __init__(obj, value): obj.value, obj.calls = str(value), 0
 			def __fspath__(obj):
 				obj.calls += 1
-				return str(self.tmp) if obj.calls == 1 else '/absent'
-		path = PathOnce()
-		path.calls = 0
-		options = L.Options(cwd=path, env={'k': 'v'}, stdout=sp.DEVNULL)
+				return obj.value if obj.calls == 1 else '/absent'
+		path, arg, log = map(PathOnce, (self.tmp, sys.executable, self.tmp / 'log'))
+		options = L.Options(cwd=path, env={'k': 'v'}, stdout=sp.DEVNULL, stderr=L.Log(log))
 		real = L._snapshot_options
 		def snap(*args):
 			values = real(*args)
@@ -150,12 +150,16 @@ class TestLauncher(unittest.TestCase):
 			object.__setattr__(options, 'stdout', sp.PIPE)
 			options.env['k'] = 'changed'
 			return values
-		with mock.patch.object(L, '_snapshot_options', side_effect=snap), 				mock.patch.object(L.subprocess, 'Popen') as child:
-			with L.launch(self.argv('echo'), options=options): pass
+		with mock.patch.object(L, '_snapshot_options', side_effect=snap), \
+				mock.patch.object(L, '_log', wraps=L._log) as opened, \
+				mock.patch.object(L.subprocess, 'Popen') as child:
+			with L.launch([arg, '-c', 'pass'], options=options): pass
+		opened.assert_called_once_with(str(self.tmp / 'log'), 'ab')
+		self.eq(child.call_args.args[0], (sys.executable, '-c', 'pass'))
 		kw = child.call_args.kwargs
 		self.eq((kw['cwd'], kw['env'], kw['stdout'], kw['start_new_session']),
 				(str(self.tmp), {'k': 'v'}, sp.DEVNULL, False))
-		self.eq(path.calls, 1)
+		self.eq((path.calls, arg.calls, log.calls), (1, 1, 1))
 		for fn in (L._launch, L._log):
 			tree = ast.parse(inspect.getsource(fn))
 			self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.Attribute)
