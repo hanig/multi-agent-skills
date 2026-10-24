@@ -144,6 +144,7 @@ def installer_lease(state_dir):
                     finally:
                         del _INSTALLERS[directory]
 
+
 def successor_gate(entry):
     """Read both unresolved sources under lease, exclusive DRAIN and START.
 
@@ -179,9 +180,10 @@ def successor_gate(entry):
                 directory, value["binding"], value["root"], repair=False)
             _require(current is None or current.get("phase") == "receipt_recorded",
                      "unresolved merge intent")
+    except registry.AuthorityError:
+        raise
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise registry.AuthorityError("D5 readiness: unresolved or malformed merge intent") from exc
-
 
 
 def publish(path, value):
@@ -195,7 +197,6 @@ def withdraw(directory):
     except FileNotFoundError:
         pass
     store.sync_directory(directory)
-
 
 def publish_installation(entry):
     """Commit a fresh generation and binding, then publish readiness last."""

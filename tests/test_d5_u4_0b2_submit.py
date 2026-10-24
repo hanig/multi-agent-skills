@@ -161,7 +161,7 @@ class TestSuccessorGate(unittest.TestCase):
 
     def test_gate_before_mutation_for_all_unresolved_ledger_states(self):
         attempt = self.effect()
-        for phase in ('attempting', 'unknown', 'submitted'):
+        for phase in ('attempting', 'submitted', 'unknown'):
             if phase != 'attempting':
                 t.ledger._classify(attempt, phase)
             with self.subTest(phase=phase):
@@ -238,7 +238,7 @@ class TestSuccessorGate(unittest.TestCase):
         attempt = self.effect()
         row = self.c.directory / t.ledger.DIRECTORY / (attempt.effect_id + '.json')
         row.write_bytes(b'{}')
-        self.refusal_preserves('D5 effect')
+        self.refusal_preserves('^' + t.ledger.INVALID + '$')
 
 
 if __name__ == '__main__':
