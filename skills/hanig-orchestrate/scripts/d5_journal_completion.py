@@ -29,7 +29,6 @@ def prepare(state_dir, record):
 
 
 def _append_locked(fh, record):
-  # Reuses the legacy journal inode/flock.
   swarm.SJ._heal_jsonl_tail(fh)
   fh.seek(0, os.SEEK_END)
   fh.write((json.dumps(record, sort_keys=True) + "\n").encode())
@@ -140,14 +139,12 @@ class BoundJournal:
           L._require(found == outcome, L.CONFLICT)
         else:
           L._require(marker["state"] == "pending", "D5 journal absent; no replay")
-          # Crash before acknowledgement requires reconciliation.
           marker["state"] = "uncertain"
           L._write(fd, name, entry)
       try:
         if found is None:
           _append_locked(fh, dict(json.loads(self.spec.payload), d5_effect_key=self.key, d5_outcome=outcome))
         else:
-          # Confirm durability even after an acknowledgement/fsync failure.
           os.fsync(fh.fileno())
         return self._finish(outcome)
       except BaseException:

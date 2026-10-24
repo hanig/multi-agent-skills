@@ -217,7 +217,7 @@ def _load(fd, name, record):
         _safe(handle.fileno())
         entry = _decode(handle.read())
     fields = {"schema_version", "effect_id", "binding", "receipt_verifier", "state", "outcome"}
-    if "journal" in entry:
+    if type(entry) is dict and "journal" in entry:
         fields.add("journal")
         marker = entry["journal"]
         _keys(marker, {"path", "payload", "state"})

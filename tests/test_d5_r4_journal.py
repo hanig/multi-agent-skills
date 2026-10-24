@@ -343,6 +343,9 @@ class TestJournal(unittest.TestCase):
     after = self.path.read_bytes()
     self.eq(cap.complete(t.OK), t.OK)
     self.eq(self.path.read_bytes(), after)
+    p = c.directory / t.ledger.DIRECTORY / (receipt.effect_id + '.json')
+    p.write_text('null')
+    self.eq(t.ledger.unresolved(*c.args)[0]['error'], t.ledger.INVALID)
 
   def test_prior_outcome_conflict(self):
     bind = t.completion.bind
