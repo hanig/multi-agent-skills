@@ -35,6 +35,19 @@ DESIGNATED_BOOTSTRAPS = frozenset()
 
 def _communication(record, pass_fds, streams):
     """Check exports without opening STATE."""
+    # Resolve each borrowed stream once; validation and Popen share these ints.
+    saved = {}
+    normalized = []
+    for stream in streams:
+        if stream is not None and type(stream) is not int:
+            key = id(stream)
+            if key not in saved:
+                saved[key] = stream if isinstance(stream, int) else stream.fileno()
+            stream = saved[key]
+            if type(stream) is not int:
+                raise AuthorityError("D5 stream descriptor must be int")
+        normalized.append(stream)
+    streams = tuple(normalized)
     protected = set()
     for name in locks._NAMES.values():
         try:
@@ -47,9 +60,6 @@ def _communication(record, pass_fds, streams):
         fd = standard if stream is None else stream
         if standard == 2 and type(stream) is int and stream == subprocess.STDOUT:
             fd = 1 if streams[1] is None else streams[1]
-        fd = fd if isinstance(fd, int) else fd.fileno()
-        if type(fd) is not int:
-            raise AuthorityError("D5 stream descriptor must be int")
         if fd >= 0:
             descriptors.append((fd, stream is None))
     for fd, inherited_standard in descriptors:
@@ -63,6 +73,8 @@ def _communication(record, pass_fds, streams):
             continue
         if (info.st_dev, info.st_ino) in protected:
             raise AuthorityError("D5 communication descriptor is a protocol lock")
+
+    return streams
 
 
 def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
@@ -83,7 +95,8 @@ def protected_spawn(directory, inherited_fd, bootstrap, args=(), *, pass_fds=(),
             raise AuthorityError("D5 protected launch inside START is forbidden")
         if any(type(fd) is not int or fd <= 2 for fd in (inherited_fd,) + pass_fds):
             raise AuthorityError("D5 control descriptors must be above 2; duplicate before constructing child argv")
-        _communication(pinned._record, pass_fds, (stdin, stdout, stderr))
+        stdin, stdout, stderr = _communication(
+            pinned._record, pass_fds, (stdin, stdout, stderr))
         with pinned.drain(inherited_fd=inherited_fd):
             return subprocess.Popen(command, close_fds=True,
                 pass_fds=(inherited_fd,) + pass_fds, stdin=stdin,
