@@ -218,7 +218,7 @@ class TestReadiness(unittest.TestCase):
     def test_M6_inactive_operational_effects_equal_recorded_base(self):
         # Unit-local capture: load the recorded base implementations, with the
         # same real fixture and inactive predicate. No production path is patched.
-        base = "17b40983a6993681d95fd9f7029eb21dbc82c5de"
+        base = "cdcbf6377a72cdac456f355d8cf86d169ab5edf8"
         import d5_custody
         import d5_lease
         import d5_submission
@@ -277,52 +277,208 @@ class TestReadiness(unittest.TestCase):
                 self.assertEqual(actual[3][0], "AuthorityError")
 
 
-    def test_overlapping_installers_retain_live_lease_until_both_exit(self):
-        barrier = threading.Barrier(2, timeout=30)
-        first, second, exited, finish = [threading.Event() for _ in range(4)]
+    def contender(self):
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import swarm_state as s; "
+                "ok,why=s.acquire_lease(sys.argv[2],bump_epoch=False); print(ok); "
+                "s.release_lease(sys.argv[2])")
+        result = subprocess.run([sys.executable, "-c", code,
+            str(fixtures.ROOT / "skills/hanig-swarm/scripts"), str(self.state)],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip() == "True"
+
+    def overlap(self, race):
+        first, second, exited, finish, queued, leave_first, queried, enter_second = [
+            threading.Event() for _ in range(8)]
         holds, acquire = SS.holds_lease, SS.acquire_lease
+        body = threading.RLock()
         errors = []
 
-        def queried(path):
+        class ObservedBody:
+            def __enter__(inner):
+                if threading.current_thread().name == "second":
+                    queued.set()  # Counted, about to wait for the real body lock.
+                body.acquire()
+
+            def __exit__(inner, *exc):
+                body.release()
+
+        def query(path):
             observed = holds(path)
             self.assertFalse(observed)
-            barrier.wait()
+            queried.set()
+            self.assertTrue(enter_second.wait(30))
             return observed
-
-        def acquiring(path, **kwargs):
-            if threading.current_thread().name == "second":
-                self.assertTrue(first.wait(30))
-            return acquire(path, **kwargs)
 
         def worker(is_first):
             try:
+                if not is_first:
+                    if not race:
+                        self.assertTrue(holds(self.state))  # Already-held sibling.
+                    enter_second.set()
                 with R.installer_lease(self.state):
                     (first if is_first else second).set()
-                    self.assertTrue((second if is_first else finish).wait(30))
+                    if not is_first:
+                        queued.set()  # Also wake the observer if serialization is lost.
+                    self.assertTrue((leave_first if is_first else finish).wait(30))
             except BaseException as exc:
                 errors.append(exc)
             finally:
                 if is_first:
                     exited.set()
 
-        with mock.patch.object(SS, "holds_lease", queried), \
-             mock.patch.object(SS, "acquire_lease", acquiring):
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(R.threading, "RLock",
+                                                  return_value=ObservedBody()))
+            acquired = stack.enter_context(mock.patch.object(SS, "acquire_lease", wraps=acquire))
+            if race:
+                stack.enter_context(mock.patch.object(SS, "holds_lease", side_effect=query))
             threads = [threading.Thread(target=worker, args=(value,), name=name)
                        for value, name in ((True, "first"), (False, "second"))]
-            for thread in threads:
-                thread.start()
+            threads[0].start()
             try:
+                self.assertTrue((queried if race else first).wait(30))
+                threads[1].start()
+                self.assertTrue(first.wait(30))
+                self.assertTrue(queued.wait(30))
+                self.assertFalse(second.is_set(), "installer bodies overlapped")
+                self.assertFalse(self.contender())
+                leave_first.set()
                 self.assertTrue(exited.wait(30))
+                self.assertTrue(second.wait(30))
                 self.assertTrue(second.is_set())
                 self.assertEqual(errors, [])
                 self.assertTrue(holds(self.state), "second installer lost its lease")
+                self.assertFalse(self.contender())
+                self.assertEqual(acquired.call_count, 1)
             finally:
+                enter_second.set()
+                leave_first.set()
                 finish.set()
                 for thread in threads:
-                    thread.join(30)
+                    if thread.ident is not None:
+                        thread.join(30)
         self.assertFalse(any(thread.is_alive() for thread in threads))
         self.assertEqual(errors, [])
         self.assertFalse(holds(self.state))
+        self.assertTrue(self.contender())
+
+    def test_overlapping_installers_retain_live_lease_until_both_exit(self):
+        self.overlap(race=True)
+
+    def test_second_installer_observes_already_held_lease(self):
+        self.overlap(race=False)
+
+    def test_outer_borrowed_lease_is_never_released(self):
+        self.lease()
+        with mock.patch.object(SS, "release_lease", wraps=SS.release_lease) as release:
+            with self.assertRaisesRegex(ValueError, "body failed"):
+                with R.installer_lease(self.state):
+                    with R.installer_lease(self.state):
+                        self.assertTrue(SS.holds_lease(self.state))
+                        raise ValueError("body failed")
+            release.assert_not_called()
+        self.assertTrue(SS.holds_lease(self.state))
+        self.assertFalse(self.contender())
+
+    def test_nested_same_thread_is_reentrant_and_releases_only_last(self):
+        # A subprocess deadline turns a non-reentrant-lock mutation into a
+        # bounded test failure, never a wedged test worker.
+        code = """
+import sys
+from pathlib import Path
+for folder in ("skills/hanig-swarm/scripts", "skills/hanig-orchestrate/scripts"):
+    sys.path.insert(0, str(Path(sys.argv[1]) / folder))
+import d5_readiness as r
+import swarm_state as s
+with r.installer_lease(sys.argv[2]):
+    with r.installer_lease(sys.argv[2]):
+        assert s.holds_lease(sys.argv[2])
+    assert s.holds_lease(sys.argv[2])
+assert not s.holds_lease(sys.argv[2])
+"""
+        result = subprocess.run([sys.executable, "-c", code, str(fixtures.ROOT),
+                                 str(self.state)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.contender())
+
+    def test_fork_resets_count_and_guard_without_releasing_parent(self):
+        import signal
+        # Fork while a different thread holds the accounting guard. The child
+        # must refuse the parent's lease, rather than borrowing its count or
+        # deadlocking on the vanished thread's lock.
+        held, finish = threading.Event(), threading.Event()
+
+        def hold_guard():
+            with R._INSTALLER_GUARD:
+                held.set()
+                finish.wait(30)
+
+        context = R.installer_lease(self.state)
+        context.__enter__()
+        try:
+            thread = threading.Thread(target=hold_guard)
+            thread.start()
+            self.assertTrue(held.wait(30))
+            child = os.fork()
+            if child == 0:
+                signal.alarm(10)
+                try:
+                    assert not SS.holds_lease(self.state)
+                    # Unwind the inherited context before a new acquisition:
+                    # release_lease has no pid check and must not be called.
+                    context.__exit__(None, None, None)
+                    try:
+                        with R.installer_lease(self.state):
+                            os._exit(2)
+                    except R.registry.AuthorityError as exc:
+                        assert "lease unavailable" in str(exc)
+                    os._exit(0)
+                except BaseException:
+                    os._exit(3)
+            finish.set()
+            thread.join(30)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(os.waitpid(child, 0)[1], 0)
+            self.assertTrue(SS.holds_lease(self.state))
+            self.assertFalse(self.contender())
+        finally:
+            finish.set()
+            thread.join(30)
+            context.__exit__(None, None, None)
+        self.assertTrue(self.contender())
+
+    def test_aliases_share_accounting_and_distinct_states_do_not_serialize(self):
+        alias = self.fixture.d / "state-alias"
+        alias.symlink_to(self.state, target_is_directory=True)
+        other = self.fixture.d / "independent-state"
+        other.mkdir()
+        entered, finish = threading.Event(), threading.Event()
+        errors = []
+
+        def independent():
+            try:
+                with R.installer_lease(other):
+                    entered.set()
+                    self.assertTrue(finish.wait(30))
+            except BaseException as exc:
+                errors.append(exc)
+
+        with R.installer_lease(self.state):
+            with R.installer_lease(alias):
+                self.assertTrue(SS.holds_lease(self.state))
+            self.assertTrue(SS.holds_lease(self.state))
+            thread = threading.Thread(target=independent)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(30))
+            finally:
+                finish.set()
+                thread.join(30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertFalse(SS.holds_lease(other))
+        self.assertFalse(SS.holds_lease(self.state))
 
 
 if __name__ == "__main__":

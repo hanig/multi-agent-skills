@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import threading
 import uuid
 
 import d5_registry as registry
@@ -23,6 +24,18 @@ INSTALLATION = "installation.json"
 PROFILE = "synchronous-merge-v1"
 BINDING = ("registration_id", "plan_id", "state_dir", "record_dir",
            "repo_key", "state_key", "record_key")
+
+
+def _reset_installers():
+    # A fork can inherit a guard held by a thread that no longer exists.
+    global _INSTALLER_PID, _INSTALLER_GUARD, _INSTALLERS
+    _INSTALLER_PID = os.getpid()
+    _INSTALLER_GUARD = threading.Lock()
+    _INSTALLERS = {}
+
+
+_reset_installers()
+os.register_at_fork(after_in_child=_reset_installers)
 
 
 def _require(ok, message):
@@ -87,19 +100,41 @@ def bound(value, entry):
 
 @contextmanager
 def installer_lease(state_dir):
-    """Nonblocking existing lease first; preserve a caller's prior ownership."""
+    """Count lease users, serialize bodies, and never release an outer lease.
+
+    Count before waiting for the reentrant body lock: the last exiting context
+    owns release, including when another installer is queued to enter its body.
+    Only acquisition of the existing cross-process lease is nonblocking.
+    """
     directory = Path(state_dir).resolve()
-    owned = state.holds_lease(directory)
-    if not owned:
-        _require(not protocol.locks._held(), "cannot acquire lease under DRAIN or START")
-        _require(directory.is_dir(), "state directory must exist")
-        ok, reason = state.acquire_lease(directory, bump_epoch=False)
-        _require(ok, "coordinator lease unavailable: " + str(reason))
+    if _INSTALLER_PID != os.getpid():
+        _reset_installers()
+    with _INSTALLER_GUARD:
+        owner = _INSTALLERS.setdefault(directory, dict(
+            pid=os.getpid(), count=0, acquired=False, body=threading.RLock()))
+        if owner["count"] == 0:
+            borrowed = state.holds_lease(directory)
+            if not borrowed:
+                _require(not protocol.locks._held(), "cannot acquire lease under DRAIN or START")
+                _require(directory.is_dir(), "state directory must exist")
+                ok, reason = state.acquire_lease(directory, bump_epoch=False)
+                _require(ok, "coordinator lease unavailable: " + str(reason))
+            owner["acquired"] = not borrowed
+        owner["count"] += 1
     try:
-        yield directory
+        with owner["body"]:
+            yield directory
     finally:
-        if not owned:
-            state.release_lease(directory)
+        # An inherited lexical context cannot release its parent's descriptor.
+        if owner["pid"] == os.getpid():
+            with _INSTALLER_GUARD:
+                owner["count"] -= 1
+                if owner["count"] == 0:
+                    try:
+                        if owner["acquired"]:
+                            state.release_lease(directory)
+                    finally:
+                        del _INSTALLERS[directory]
 
 def publish(path, value):
     store.write_bytes(path, (json.dumps(value, sort_keys=True) + "\n").encode())
