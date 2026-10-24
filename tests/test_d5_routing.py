@@ -28,6 +28,8 @@ class TestD5Routing(unittest.TestCase):
         self.fixture = fixtures.TestCustodyAPI()
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.setUp()
+        self.fixture.promote = self._testMethodName not in (
+            "test_revoke_delegates_to_control", "test_relinquish_delegates_to_control")
         self.entry = self.fixture.register(record=False)
         self.directory = Path(self.entry["record_dir"])
         self.path = self.directory / store.RECORD_NAME

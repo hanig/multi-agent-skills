@@ -1,0 +1,35 @@
+{
+  "base": "8e1d19afc65b0aa64acbae9c70039a67dae6d834",
+  "scope": "Exact entry and activation-guard definitions for inactive-only comparison; other globals use the same imported dependencies as the original capture.",
+  "modules": {
+    "d5_registry": {
+      "path": "skills/hanig-orchestrate/scripts/d5_registry.py",
+      "module_sha256": "85a8f2e89891fe3a65604f3f71c0cc0aecd7e425a25f191d460e991f6e303ce6",
+      "lines": {
+        "d5_active": 67,
+        "_require": 72,
+        "_active": 77,
+        "register": 311
+      },
+      "source": "def d5_active():\n    \"\"\"U8 owns activation. There is no runtime override.\"\"\"\n    return d5_activation.d5_active()\n\ndef _require(condition, message):\n    if not condition:\n        raise AuthorityError(\"registry: \" + message)\n\ndef _active():\n    _require(d5_active(), \"D5 is not active\")\n\ndef register(checkout, plan_id, state_dir):\n    \"\"\"Register one (repo object, plan) with one state object, or return it intact.\"\"\"\n    _active()\n    return _register(checkout, plan_id, state_dir)\n"
+    },
+    "d5_lease": {
+      "path": "skills/hanig-orchestrate/scripts/d5_lease.py",
+      "module_sha256": "d607ca843069423bb6b783217c5960714227480f50a0f870a4e307ad128d5301",
+      "lines": {
+        "_active": 20,
+        "grant": 55
+      },
+      "source": "def _active():\n    if not d5_registry.d5_active():\n        raise d5_registry.AuthorityError(\"D5 is not active\")\n\ndef grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,\n          mandate_bytes, scope, owner_response, displayed_bounds):\n    \"\"\"Create or replace a validated grant with exact owner confirmation.\"\"\"\n    _active()\n    record = {\"schema_version\": 1, \"grant_id\": uuid.uuid4().hex,\n              \"issued_at\": issued_at, \"confirmed_at\": confirmed_at,\n              \"expires_at\": expires_at, \"session_cap\": 1,\n              \"mandate_sha256\": authority.mandate_digest(mandate_bytes),\n              \"scope\": scope, \"confirmation\": {\"owner_response\": owner_response,\n                                               \"displayed_bounds\": displayed_bounds},\n              \"custody\": None, \"invalidation\": None}\n    authority.validate(record)\n    entry = _registered(checkout, plan_id, state_dir)\n    directory = Path(entry[\"record_dir\"])\n    operation = (d5_install.replace_authority\n                 if store.present(directory / store.RECORD_NAME, \"record\")\n                 else d5_install.install_initial)\n    with _grant_locked(directory):\n        return operation(directory, record)\n"
+    },
+    "d5_custody": {
+      "path": "skills/hanig-orchestrate/scripts/d5_custody.py",
+      "module_sha256": "1f74534338bb147a71b7d936e7db8b0e44318d24c365114f7a6f73d7d99bd3a1",
+      "lines": {
+        "_active": 16,
+        "claim": 21
+      },
+      "source": "def _active():\n    if not d5_registry.d5_active():\n        raise authority.AuthorityError(\"D5 is not active\")\n\ndef claim(checkout, plan_id, state_dir, *, now, mandate_bytes):\n    \"\"\"Delegate to R3 using the freshly resolved registration's mandate source.\n\n    now and mandate_bytes remain for signature compatibility; the active branch\n    does not use them. R3 samples time, native identity and registered bytes\n    under its locks. Its store.read_bytes opens with O_NOFOLLOW and refuses\n    a non-regular mandate file.\n    \"\"\"\n    _active()\n    entry = d5_registry.lookup(checkout, plan_id, state_dir)\n    if entry is None:\n        raise authority.AuthorityError(\"not registered\")\n    return d5_install.claim_custody(entry[\"record_dir\"], mandate_path=(\n        Path(entry[\"checkout\"]) / \"docs/orchestrator-mandate.md\"))\n"
+    }
+  }
+}

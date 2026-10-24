@@ -58,6 +58,8 @@ sys.path.insert(0, str(_SWARM_DIR / "scripts"))
 import coordinator_paths as CP
 import child_environment as CE
 import d5_activation
+# Load before API entry: a cold import can write bytecode caches.
+import d5_readiness as readiness
 
 AuthorityError = authority.AuthorityError
 _ENTRY_FIELDS = {"registration_id", "repo_key", "plan_id", "state_key",
@@ -309,19 +311,17 @@ def _locked(root):
 
 
 def register(checkout, plan_id, state_dir):
-    """Register one (repo object, plan) with one state object, or return it intact."""
+    """Confirm an installed registration; ordinary entry cannot provision."""
     _active()
-    return _register(checkout, plan_id, state_dir)
+    ready = readiness.require(state_dir)
+    _plan_id(plan_id)
+    readiness.bound(ready, lookup(checkout, plan_id, state_dir))
+    # The existing idempotent branch confirms the exact directory/file chain.
+    return stage(checkout, plan_id, state_dir)
 
 
 def stage(checkout, plan_id, state_dir):
     """Installer scaffolding only; never retarget an existing registration."""
-    return _register(checkout, plan_id, state_dir, staging=True)
-
-
-def _register(checkout, plan_id, state_dir, staging=False):
-    from contextlib import nullcontext
-    import d5_readiness as readiness
     with _identity(checkout, plan_id, state_dir, containment=True) as (
             root, identity, state_fd, protected):
         # OD6: R/P checks precede the registry read and this registration's D
@@ -333,7 +333,7 @@ def _register(checkout, plan_id, state_dir, staging=False):
         if existing is not None or info:
             _outside(directory, protected)
         _require(not info, str(directory) + ": already exists")
-        with readiness.installer_lease(identity["state_dir"]) if staging else nullcontext():
+        with readiness.installer_lease(identity["state_dir"]):
             base = root.parent.parent
             _mkdir_base(base)
             root.parent.mkdir(mode=0o700, exist_ok=True)

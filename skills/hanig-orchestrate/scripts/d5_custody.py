@@ -11,6 +11,7 @@ import d5_control
 import d5_host
 import d5_install
 import d5_registry
+import d5_readiness as readiness
 
 
 def _active():
@@ -27,7 +28,8 @@ def claim(checkout, plan_id, state_dir, *, now, mandate_bytes):
     a non-regular mandate file.
     """
     _active()
-    entry = d5_registry.lookup(checkout, plan_id, state_dir)
+    ready = readiness.require(state_dir)
+    entry = readiness.bound(ready, d5_registry.lookup(checkout, plan_id, state_dir))
     if entry is None:
         raise authority.AuthorityError("not registered")
     return d5_install.claim_custody(entry["record_dir"], mandate_path=(

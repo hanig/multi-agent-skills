@@ -15,6 +15,7 @@ import d5_authority_store as store
 import d5_control
 import d5_install
 import d5_registry
+import d5_readiness as readiness
 
 
 def _active():
@@ -56,6 +57,7 @@ def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
           mandate_bytes, scope, owner_response, displayed_bounds):
     """Create or replace a validated grant with exact owner confirmation."""
     _active()
+    ready = readiness.require(state_dir)
     record = {"schema_version": 1, "grant_id": uuid.uuid4().hex,
               "issued_at": issued_at, "confirmed_at": confirmed_at,
               "expires_at": expires_at, "session_cap": 1,
@@ -64,7 +66,7 @@ def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
                                                "displayed_bounds": displayed_bounds},
               "custody": None, "invalidation": None}
     authority.validate(record)
-    entry = _registered(checkout, plan_id, state_dir)
+    entry = readiness.bound(ready, _registered(checkout, plan_id, state_dir))
     directory = Path(entry["record_dir"])
     operation = (d5_install.replace_authority
                  if store.present(directory / store.RECORD_NAME, "record")
