@@ -112,7 +112,7 @@ class TestReadiness(unittest.TestCase):
 
     def test_crash_at_each_publication_io_leaves_absent_or_matching_readiness(self):
         self.promoted()
-        original_fsync, original_replace, original_unlink = os.fsync, os.replace, os.unlink
+        original_fsync, original_replace, original_unlink = os.fsync, os.replace, Path.unlink
         # Withdrawal unlink/sync, installation file sync/rename/directory sync,
         # readiness file sync/rename/directory sync, including both rename sides.
         for point in range(8):
@@ -131,10 +131,12 @@ class TestReadiness(unittest.TestCase):
                     return result
 
                 with self.subTest(point=point, after=after), ExitStack() as stack:
-                    for name, original in (("fsync", original_fsync),
-                                           ("replace", original_replace),
-                                           ("unlink", original_unlink)):
-                        stack.enter_context(mock.patch.object(os, name,
+                    # Python 3.9 pathlib caches unlink; intercept its public
+                    # method so withdrawal is exercised on both interpreters.
+                    for owner, name, original in ((os, "fsync", original_fsync),
+                                                  (os, "replace", original_replace),
+                                                  (Path, "unlink", original_unlink)):
+                        stack.enter_context(mock.patch.object(owner, name, autospec=True,
                             side_effect=lambda *a, _op=original, **k: intercept(_op, *a, **k)))
                     with self.assertRaisesRegex(OSError, "crash"):
                         install.promote(*self.args)
