@@ -43,7 +43,6 @@ class BoundJournal:
   operation: object
   directory: str
   owner: int
-  args: tuple
   handle: object = None
 
   def _owned(self):
@@ -164,7 +163,6 @@ class BoundJournal:
         if entry["state"] == "completed":
           L._require(entry["outcome"] == outcome, L.CONFLICT)
       if outcome["status"] == "failed":
-        # A failed effect owes no merge record.
         L.complete(self.handle, outcome)
         return self._finish(outcome)
       return self.record(outcome)
@@ -175,7 +173,6 @@ class BoundJournal:
       self._uncertain()
 
   def reconcile(self):
-    """Confirm a recorded success, never append or re-initiate an effect."""
     with self._drain():
       return self.record(None, reconcile=True)
 
@@ -186,4 +183,4 @@ def bind(spec, operation, args, directory):
       type(args) is not tuple or len(args) != 3 or
       spec != prepare(args[2], json.loads(spec.payload))):
     raise L.EffectError("D5 merge journal target mismatch")
-  return BoundJournal(spec, operation, str(directory), os.getpid(), args)
+  return BoundJournal(spec, operation, str(directory), os.getpid())

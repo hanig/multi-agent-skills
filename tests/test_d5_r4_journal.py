@@ -334,8 +334,9 @@ class TestJournal(unittest.TestCase):
         self.eq(entry['state'], 'submitted')
     before = self.path.read_bytes()
     with t.protocol.pin(c.directory) as record, record.drain(), record.start():
-      with self.raises(t.ledger.EffectError, 'inside START'):
-        cap.complete(t.OK)
+      for call in (lambda: cap.complete(t.OK), lambda: cap.record(t.OK), cap.uncertain, cap.reconcile):
+        with self.raises(t.ledger.EffectError, 'inside START'):
+          call()
     self.eq(self.path.read_bytes(), before)
     thread, results = c.launch(lambda: cap.complete(t.OK))
     self.eq(c.join(thread, results), t.OK)
