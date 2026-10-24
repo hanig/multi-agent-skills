@@ -1,4 +1,4 @@
-"""Inert U3-R4 completion capabilities; no production callers or activation.
+"""Inert completion capabilities and U4.2-c source-specific provider contract.
 
 Supported envelope and accepted limits
 -------------------------------------
@@ -19,10 +19,39 @@ No START acquisition, authority lookup, or authority mutation occurs here.
 Non-claims: no authority to retry, poll, reconcile remotely, or install custody.
 Completion and uncertainty accounting do not survive deactivation; they are
 deferred until D5 is active again, with the ledger entry retained.
+
+OD7 amendment for the closed merge-journal class
+----------------------------------------------
+Preparation, classification, uncertainty binding and terminal completion belong
+to ONE provider selected from admission's closed class before START. Results,
+receipt tags and caller preferences cannot choose it. There is no journal-to-
+ledger fallback. Production has no journal provider until U4.3.
+
+For journals, C means durable completion evidence bound to the admitted operation,
+its existing binding and installation/fencing identity. Intent journals carry
+request/no-replay/uncertainty state; their merged label is NOT successful-
+completion authority. Legacy merged/attested booleans are insufficient. U4.3's
+provider must append a D5-bound receipt in process under the coordinator lease
+and receipt append flock, sync the file (and directory on first creation), and
+validate readback before complete() returns. A missing, malformed, mismatched or
+unconfirmed receipt must raise. Process exit/reap/timeout and a not-merged forge
+observation never establish C. Unknown remains unknown, with no redispatch.
+
+The operator must pass independent readiness before lookup/execution and hold
+the coordinator lease across examination, preparation, actual synchronous merge
+and recording. prepare() durably records request/no-replay state at R6's existing
+preparation point, before Boundary.start. Unresolved intent fences successor
+installation; bound completion-only recovery must remain possible for the
+installed generation without permitting a new merge. These are obligations of
+U4.3's provider/operator, not implementations supplied by this inert interface.
 """
+from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
+import d5_admission as admission
+from d5_authority import AuthorityError
 import d5_effect_log as ledger
 import d5_protocol_locks as protocol
 
@@ -81,3 +110,71 @@ def bind(handle):
     with _refusals(), protocol.pin(handle._directory) as record:
         with record.drain(), ledger._checked(handle):
             return _Completion(handle)
+
+
+class Provider(ABC):
+    """Trusted source adapter; no provider argument is exposed by submit().
+
+    Every handle belongs to the same prepared operation and retains its binding.
+    A prepared handle exposes effect_id (the existing operation key, unchanged).
+    Accounting requires the caller's DRAIN for the entire operation lifetime;
+    it cannot reauthorize, acquire START, dispatch, retry or change the binding.
+    Implementations must fail closed on unconfirmed storage. This is a trusted
+    Python contract, not a sandbox against a malicious provider implementation.
+    """
+
+    @abstractmethod
+    def prepare(self, checkout, plan_id, state_dir, **binding):
+        """Durably prepare before dispatch; return the bound attempt handle."""
+
+    @abstractmethod
+    def classify(self, attempt, state):
+        """Persist submitted/not_submitted; submitted returns a bound handle.
+
+        not_submitted is allowed only when Boundary guarantees no initiation.
+        Neither a failed command nor an unknown outcome is not_submitted.
+        """
+
+    @abstractmethod
+    def bind(self, handle):
+        """Return a capability with complete(outcome) and uncertain().
+
+        uncertain() records unknown without releasing or asserting completion.
+        complete() returns a validated outcome ONLY after authoritative durable
+        completion; for journals this includes bound receipt readback. It raises
+        for missing/invalid evidence. Neither method initiates an external effect.
+        Binding an attempt permits uncertainty, not invented submission.
+        """
+
+    @abstractmethod
+    def validate_outcome(self, outcome):
+        """Raise for invalid Finish/completion results; return establishes no C.
+
+        Shape validation is not completion authority. The bound capability must
+        establish authoritative completion independently of result fields.
+        """
+
+
+class _LedgerProvider(Provider):
+    def prepare(self, checkout, plan_id, state_dir, **binding):
+        return ledger.prepare(checkout, plan_id, state_dir, **binding)
+
+    def classify(self, attempt, state):
+        return ledger._classify(attempt, state)
+
+    def bind(self, handle):
+        return bind(handle)
+
+    def validate_outcome(self, outcome):
+        ledger._outcome(outcome)
+
+
+_PROVIDERS = MappingProxyType({"ledger": _LedgerProvider(), "journal": None})
+
+
+def provider_for(kind):
+    """Fixed pre-START mapping; no provider for merge in production yet."""
+    provider = _PROVIDERS[admission.recording_authority(kind)]
+    if provider is None:
+        raise AuthorityError("D5 journal request requires journal binding")
+    return provider
