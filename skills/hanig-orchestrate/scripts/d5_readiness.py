@@ -1,7 +1,7 @@
-"""Explicit local installation barrier for the restricted synchronous merge profile.
+"""Explicit local installation infrastructure for the restricted synchronous merge profile.
 
-Same-host trusted writers and stable lock inodes only. The caller holds the
-coordinator lease throughout operational calls. Installation uses that lease,
+Same-host trusted writers and stable lock inodes only. The reader requires the
+caller-held coordinator lease. Installation uses that lease,
 then existing exclusive DRAIN/START; no deployed durability claim (U8).
 Installation generations are separate from prospective authority grants.
 """
@@ -67,7 +67,7 @@ def _validated(value):
 
 
 def require(state_dir):
-    """Validate readiness before lookup, while the caller owns its live lease."""
+    """Pure reader under the live lease; operational enforcement belongs to U4.0b."""
     directory = lease_required(state_dir)
     value = _validated(_read(directory / MARKER))
     _require(value["state_dir"] == str(directory), "state directory mismatch")
@@ -101,42 +101,6 @@ def installer_lease(state_dir):
         if not owned:
             state.release_lease(directory)
 
-
-def successor_gate(entry):
-    """Read both unresolved sources under lease, exclusive DRAIN and START.
-
-    Reuse R4's strict ledger decoder and merge_unit's read-only resolution
-    traversal. No intent repair, ledger creation, or readiness substitution.
-    """
-    import d5_effect_log as ledger
-    import merge_unit
-    directory = lease_required(entry["state_dir"])
-    record_dir = Path(entry["record_dir"])
-    if (record_dir / ledger.DIRECTORY).exists():
-        with ledger._access(record_dir) as (record, fd):
-            for name in sorted(os.listdir(fd)):
-                if name.endswith(".json"):
-                    row = ledger._load(fd, name, record)
-                    _require(row["state"] not in ("attempting", "unknown", "submitted"),
-                             "unresolved effect ledger")
-    try:
-        # Pending cancellation may be the only surviving intent copy.
-        paths = set(directory.glob("merge-unit-*.json"))
-        paths.update(p.with_suffix(".json") for p in
-                     directory.glob("merge-unit-*.cancellation-pending"))
-        paths.update(directory / ("merge-unit-" + p.name[len("merge-abandonment-"):])
-                     for p in directory.glob("merge-abandonment-*.json"))
-        for path in sorted(paths):
-            source = path if path.exists() else path.with_suffix(".cancellation-pending")
-            value = merge_unit.read_object(source)
-            _, _, current = merge_unit.current_intent(
-                directory, value["binding"], value["root"], repair=False)
-            _require(current is None or current.get("phase") == "receipt_recorded",
-                     "unresolved merge intent")
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise registry.AuthorityError("D5 readiness: unresolved or malformed merge intent") from exc
-
-
 def publish(path, value):
     store.write_bytes(path, (json.dumps(value, sort_keys=True) + "\n").encode())
 
@@ -148,7 +112,6 @@ def promote(checkout, plan_id, state_dir):
         _require(entry is not None, "not registered; stage first")
         with protocol.pin(entry["record_dir"]) as record:
             with record.drain(shared=False), record.start():
-                successor_gate(entry)
                 marker = directory / MARKER
                 try:
                     marker.unlink()

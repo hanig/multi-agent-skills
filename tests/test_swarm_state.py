@@ -124,6 +124,9 @@ class TestStateExtraction(unittest.TestCase):
         tree = ast.parse(Path(SS.__file__).read_text())
         found = {n.name for n in tree.body
                  if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+        # The new owner-only query was not moved out of the facade.
+        self.assertIn("holds_lease", found)
+        found.remove("holds_lease")
         self.assertEqual(found, set(DEFINITIONS))
         forbidden = {"swarm", "review", "committee", "resolve_models", "linear_api",
                      "linear_sync", "merge_unit", "urllib", "http", "socket", "ssl"}
