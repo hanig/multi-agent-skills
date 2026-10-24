@@ -1,0 +1,141 @@
+{
+  "base": "17b40983a6993681d95fd9f7029eb21dbc82c5de",
+  "observations": {
+    "failed": {
+      "calls": [
+        "start",
+        "finish"
+      ],
+      "drain": "available",
+      "external": [],
+      "holders": [
+        1,
+        1
+      ],
+      "journals": {},
+      "launches": [],
+      "repository_changed": false,
+      "rows": [
+        "487fa286eda662d5ad931fc744336dee9bfb8b905a15fccefca19d68c8dabfb7"
+      ],
+      "visible": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "submitted",
+        {
+          "detail": "fixture failure",
+          "status": "failed"
+        }
+      ]
+    },
+    "finish_error": {
+      "calls": [
+        "start",
+        "finish"
+      ],
+      "drain": "blocked",
+      "external": [],
+      "holders": [
+        1,
+        0
+      ],
+      "journals": {},
+      "launches": [],
+      "repository_changed": false,
+      "rows": [
+        "f343137930df15c4211eb8365c262591b07a434b09aa267faf6faa7a79f4fc7c"
+      ],
+      "visible": [
+        "RuntimeError",
+        "fixture interrupted"
+      ]
+    },
+    "inactive": {
+      "calls": [],
+      "drain": "available",
+      "external": [],
+      "holders": [
+        0,
+        0
+      ],
+      "journals": {},
+      "launches": [],
+      "repository_changed": false,
+      "rows": [],
+      "visible": [
+        "AuthorityError",
+        "D5 is inactive"
+      ]
+    },
+    "not_submitted": {
+      "calls": [
+        "start"
+      ],
+      "drain": "available",
+      "external": [],
+      "holders": [
+        1,
+        1
+      ],
+      "journals": {},
+      "launches": [],
+      "repository_changed": false,
+      "rows": [
+        "760c2c48f9d93dfe78df3245ca4ecf24fff0b43bcad713c8084cbf54a07562ad"
+      ],
+      "visible": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "not_submitted",
+        null
+      ]
+    },
+    "submitted": {
+      "calls": [
+        "start",
+        "finish"
+      ],
+      "drain": "available",
+      "external": [],
+      "holders": [
+        1,
+        1
+      ],
+      "journals": {},
+      "launches": [],
+      "repository_changed": false,
+      "rows": [
+        "43293227cb8f7db178f99132f2523e58ec8d930c79b361ac4c4793eeed9c78e7"
+      ],
+      "visible": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "submitted",
+        {
+          "detail": "fixture response",
+          "status": "succeeded"
+        }
+      ]
+    },
+    "unknown": {
+      "calls": [
+        "start",
+        "finish"
+      ],
+      "drain": "blocked",
+      "external": [],
+      "holders": [
+        1,
+        0
+      ],
+      "journals": {},
+      "launches": [],
+      "repository_changed": false,
+      "rows": [
+        "f343137930df15c4211eb8365c262591b07a434b09aa267faf6faa7a79f4fc7c"
+      ],
+      "visible": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "unknown",
+        null
+      ]
+    }
+  }
+}

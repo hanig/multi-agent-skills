@@ -2,7 +2,7 @@
 
 Supported envelope and accepted limits
 -------------------------------------
-P/H plus the explicit adapter contract. Local ledger operations may lengthen
+P/H plus the explicit adapter contract. Local provider operations may lengthen
 START; remote response waits may not. Trusted local execution, stable record
 and lock identities, and participating control/install callers are required.
 R1 repairs owner permissions in place to 0600, without directory chmod or lock
@@ -21,6 +21,16 @@ Callers supply unique request_id and accurate immutable scope/intent.
 Accounting errors, including inactive D5, propagate and retain the entry.
 A shared descriptor survives unconfirmed exits until process exit. Uncertainty
 accounting never authorizes release. The terminal epilogue is the release gate.
+
+R6 release facts (unchanged): H = this invocation owns its duplicated DRAIN
+holder; A = Boundary.start may have run; N = durable not-submitted classification;
+S = normal exit from START; F = valid Finish return for the actual operation;
+C = authoritative durable completion. Release remains exactly
+H and S and (not A or N or (F and C)). No exit/reap/timeout implies C.
+Only C's evidence source changes under OD7: ledger completion for ledger classes,
+bound journal-provider completion for the closed merge class (see d5_completion).
+F alone is not C. START placement, lifetime ownership and retention on unknown
+are unchanged. Production merge remains refused before START without a provider.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -31,7 +41,6 @@ import os
 import d5_admission as admission
 from d5_authority import AuthorityError
 import d5_completion as completion
-import d5_effect_log as ledger
 import d5_protocol_locks as protocol
 import d5_registry as registry
 
@@ -77,7 +86,7 @@ class Boundary(ABC):
 
     @abstractmethod
     def finish(self):
-        """Wait for termination, including ambiguous starts; return ledger outcome."""
+        """Wait for actual termination, including ambiguity; return provider outcome."""
 
 
 @dataclass(frozen=True)
@@ -94,7 +103,9 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
         raise AuthorityError("D5 is inactive")
     if not isinstance(boundary, Boundary):
         raise AuthorityError("D5 submission requires an explicit effect boundary")
-    _ledger_operation(operation)
+    if not isinstance(operation, Operation):
+        raise ValueError("D5 operation requires immutable fields")
+    provider = completion.provider_for(operation.kind)
     entry = registry.lookup(checkout, plan_id, state_dir)
     if entry is None:
         raise AuthorityError("not registered")
@@ -115,7 +126,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
             with pinned.start():
                 try:
                     admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
-                    attempt = ledger.prepare(checkout, plan_id, state_dir,
+                    attempt = provider.prepare(checkout, plan_id, state_dir,
                         record_id=grant_id, custody=dict(generation=generation,
                         session_id=session_id, anchor_pid=anchor.pid, anchor_start_us=anchor.start_us),
                         kind=operation.kind, scope=json.loads(operation.scope),
@@ -128,16 +139,16 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
             S = True
             if not A:
                 if attempt is not None:
-                    ledger._classify(attempt, "not_submitted")
+                    provider.classify(attempt, "not_submitted")
             else:
                 if type(state) is not Initiation:
                     state = Initiation.UNCERTAIN
                     start_error = ValueError("D5 boundary returned an invalid initiation")
                 try:
                     if state is Initiation.SUBMITTED:
-                        capability = completion.bind(ledger._classify(attempt, "submitted"))
+                        capability = provider.bind(provider.classify(attempt, "submitted"))
                     elif state is Initiation.NOT_SUBMITTED:
-                        ledger._classify(attempt, "not_submitted")
+                        provider.classify(attempt, "not_submitted")
                         N = True
                 except BaseException as exc:
                     accounting_error = exc
@@ -146,15 +157,16 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
             if S and A and state is not Initiation.NOT_SUBMITTED:
                 try:
                     outcome = boundary.finish()
-                    ledger._outcome(outcome)
+                    provider.validate_outcome(outcome)
                     F = True
                 except BaseException as exc:
                     response_error = exc
                 finally:
                     if capability is None or response_error is not None:
-                        completion.bind(attempt).uncertain()
+                        provider.bind(attempt).uncertain()
                     else:
                         outcome = capability.complete(outcome)
+                        provider.validate_outcome(outcome)
                         C = True
         if H and S and (not A or N or (F and C)):
             os.close(holder)
