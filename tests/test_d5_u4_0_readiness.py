@@ -97,8 +97,17 @@ class TestReadiness(unittest.TestCase):
         prior = authority.stat()
         self.lease()
         install.promote(*self.args)
-        self.assertEqual(authority.stat(), prior)
-        self.assertEqual(authority.read_bytes(), b"opaque existing authority")
+        read = Path.read_bytes
+
+        def read_with_atime(path):
+            raw = read(path)
+            # Make the test's own read visible even on mounts deferring atime.
+            os.utime(path, ns=(prior.st_atime_ns + 1000000000, prior.st_mtime_ns))
+            return raw
+
+        with mock.patch.object(Path, "read_bytes", read_with_atime):
+            self.assertEqual(authority.stat(), prior)
+            self.assertEqual(authority.read_bytes(), b"opaque existing authority")
         self.assertNotEqual(R.require(self.state)["generation"], value["generation"])
 
     def test_crash_at_each_publication_io_leaves_absent_or_matching_readiness(self):
