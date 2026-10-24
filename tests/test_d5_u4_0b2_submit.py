@@ -230,6 +230,26 @@ class TestSuccessorGate(unittest.TestCase):
             self.assertEqual(events, expected + [readiness.INSTALLATION, readiness.MARKER])
             self.assertNotEqual(readiness.require(self.c.state_dir)['generation'], before['generation'])
 
+    def test_replacement_accepts_record_directory_alias(self):
+        alias = self.c.root / 'record-alias'
+        alias.symlink_to(self.c.directory, target_is_directory=True)
+        new = dict(self.c.original, grant_id='b' * 32)
+        self.assertEqual(install.replace_authority(alias, new)['grant_id'], 'b' * 32)
+        readiness.require(self.c.state_dir)
+
+    def test_gate_refuses_unlistable_state_before_withdrawal(self):
+        self.intent()
+        mode = self.c.state_dir.stat().st_mode
+        # Search-only permits known-file reads/lease checks, but no inventory.
+        self.c.state_dir.chmod(0o100)
+        try:
+            with mock.patch.object(readiness, 'withdraw', wraps=readiness.withdraw) as withdraw:
+                with self.assertRaises((OSError, t.authority.AuthorityError)):
+                    self.operations()[1][1]()
+                withdraw.assert_not_called()
+        finally:
+            self.c.state_dir.chmod(mode)
+
     def test_gate_refuses_malformed_sources_without_mutation(self):
         path, _ = self.intent()
         path.write_bytes(b'{}')
