@@ -37,7 +37,7 @@ import remote_verify as RV
 
 
 SWARM = str(_SWARM_DIR / "scripts" / "swarm.py")
-PR_FIELDS = "number,url,state,headRefOid,baseRefName,mergeCommit"
+PR_FIELDS = "number,url,state,headRefOid,baseRefName,mergeCommit,title"
 
 
 class Refusal(ValueError):
@@ -549,7 +549,9 @@ def reconcile(args, plan):
             print("persist intent {} before the conditional merge".format(intent_path))
             print("re-read the target ref; on movement/read failure durably cancel before request")
             print("+ " + shlex.join(cmd["target"]))
-            print("+ " + shlex.join(cmd["merge"]))
+            print("require a non-empty PR title not beginning with RECOVERY")
+            print("+ " + shlex.join(cmd["merge"] +
+                                      ["--subject", "<observed-pr-title> (#{})".format(args.pr)]))
             print("+ " + shlex.join(cmd["view"]))
         print("if MERGED at judged head (including reconciliation):")
         print("+ " + shlex.join(parent_command(host, repo_path, "<merged-sha>")))
@@ -618,6 +620,12 @@ def reconcile(args, plan):
         if latest["state"] != "OPEN":
             raise Refusal("PR or target moved during preflight; rerun against the current target. "
                           + verification_hint(args))
+        title = latest.get("title")
+        if not isinstance(title, str) or not title or title.isspace():
+            raise Refusal("PR title is empty or invalid; set a usable title before merging")
+        if title.startswith("RECOVERY"):
+            raise Refusal("PR title begins with RECOVERY; recovery labels must not be merged")
+        cmd["merge"] += ["--subject", "{} (#{})".format(title, latest["number"])]
         observation.update({"allow_unchecked_scope": args.allow_unchecked_scope,
                             "checks": checks, "integration": evidence,
                             "required_merge_claims": [V.INTEGRATION_CLAIM] +

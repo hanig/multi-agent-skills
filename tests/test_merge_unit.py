@@ -40,6 +40,9 @@ if args[:2] == ["pr", "view"]:
         p.write_text(json.dumps(data))
         sys.exit(1)
     print(json.dumps(data["pr"]))
+    if "title_after_view" in data:
+        data["pr"]["title"] = data.pop("title_after_view")
+        p.write_text(json.dumps(data))
 elif args[:2] == ["pr", "checks"]:
     print(json.dumps(data["checks"]))
     sys.exit(data.get("checks_exit", 0))
@@ -160,6 +163,7 @@ class TestMergeUnit(unittest.TestCase):
         self.state = {"schema_version": 1, "units": {"u": self.us},
                       "root": str(self.root), "plan_digest": S.plan_digest(self.plan)}
         self.forge = {"pr": {"number": 7, "url": self.remote + "/pull/7", "state": "OPEN",
+                             "title": "Use the reviewed change",
                              "headRefOid": self.head, "baseRefName": "main",
                              "baseRefOid": self.base, "mergeCommit": None},
                       "ref_command": ["api", "--hostname", "github.com",
@@ -484,6 +488,69 @@ class TestMergeUnit(unittest.TestCase):
                 self.save()
                 self.assert_binding_refused(self.invoke())
                 facts[key] = original
+
+    def test_merge_subject_uses_latest_observed_pr_title(self):
+        title = 'Fix "squash" title: keep $value and `literal`'
+        self.forge["title_after_view"] = title
+        self.save()
+        self.assertNotEqual(self.git("log", "-1", "--format=%s", self.head), title)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        merge, = self.calls(["pr", "merge"])
+        self.assertEqual(merge.count("--subject"), 1)
+        self.assertEqual(merge[merge.index("--subject") + 1], title + " (#7)")
+        for view in self.calls(["pr", "view"]):
+            self.assertIn("title", view[view.index("--json") + 1].split(","))
+
+    def test_recovery_title_refuses_before_merge(self):
+        self.forge["pr"]["title"] = "RECOVERY, NOT READY: do not merge"
+        self.save()
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertIn("PR title begins with RECOVERY", result.stderr)
+        self.assertEqual(list(self.state_dir.glob("merge-unit-*.json")), [])
+
+    def test_empty_title_refuses_before_merge(self):
+        for title in ("", "   ", None, 7):
+            with self.subTest(title=title):
+                self.forge["pr"]["title"] = title
+                self.save()
+                result = self.invoke()
+                self.assert_refused(result)
+                self.assertIn("PR title is empty or invalid", result.stderr)
+                self.assertEqual(list(self.state_dir.glob("merge-unit-*.json")), [])
+        del self.forge["pr"]["title"]
+        self.save()
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertIn("PR title is empty or invalid", result.stderr)
+
+    def test_title_becoming_recovery_during_preflight_refuses(self):
+        self.forge["title_after_view"] = "RECOVERY, NOT READY: changed during preflight"
+        self.save()
+        result = self.invoke()
+        self.assert_refused(result)
+        self.assertIn("PR title begins with RECOVERY", result.stderr)
+
+    def test_reconciliation_does_not_require_a_usable_title(self):
+        for title in ("RECOVERY, NOT READY: historical merge", ""):
+            with self.subTest(title=title):
+                self.forge["pr"].update(title=title, state="MERGED",
+                                         mergeCommit={"oid": self.merged})
+                self.save()
+                result = self.invoke()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.calls(["pr", "merge"]), [])
+                self.assertEqual(len(self.receipts()), 1)
+
+    def test_abandonment_does_not_require_a_usable_title(self):
+        intent = self.leave_transport_failure()
+        self.forge["pr"]["title"] = "RECOVERY, NOT READY: abandoned request"
+        self.save()
+        result = self.abandon_intent(intent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls(["pr", "merge"])), 1)
+        self.assertEqual(self.intent()["phase"], "resolved_by_abandonment")
 
     def test_success_records_exact_anchor_and_advances_once(self):
         result = self.invoke()
