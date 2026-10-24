@@ -1,4 +1,4 @@
-"""cmd_merge observable effects, frozen base versus candidate; isolated process."""
+"""cmd_merge M6 observable capture."""
 import argparse
 from contextlib import redirect_stdout, redirect_stderr
 import io
@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'skills/hanig-swarm/scripts'))
 import swarm
 import d5_activation
-
 
 def capture(version, case):
   module = swarm
@@ -38,7 +37,7 @@ def capture(version, case):
       target_commit='c'*40, integration_status='fixture')
     def snapshot():
       return {str(p.relative_to(root)): p.read_bytes().hex() if p.is_file() else None
-          for p in root.rglob('*')}
+        for p in root.rglob('*')}
     before, events, enabled = snapshot(), [], False
     def audit(event, values):
       if enabled:
@@ -65,7 +64,6 @@ def capture(version, case):
     data = dict(result=result, events=events, removed=sorted(set(before) - set(after)),
       changed={k: v for k, v in after.items() if k not in before or before[k] != v})
     return json.loads(json.dumps(data).replace(str(root), '<root>'))
-
 
 if __name__ == '__main__':
   print(json.dumps(capture(*sys.argv[1:]), sort_keys=True))
