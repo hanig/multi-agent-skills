@@ -348,7 +348,7 @@ class TestInstall(unittest.TestCase):
         subprocess.run(["git", "init", str(repo)], check=True,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
         with mock.patch.object(install.registry.CP, "_external_base", return_value=self.root / "external"):
-            entry = install.registry.register(repo, "p", state)
+            entry = install.stage(repo, "p", state)
         directory = Path(entry["record_dir"])
         self.assertTrue(directory.is_dir())
         self.assertFalse((directory / store.RECORD_NAME).exists())

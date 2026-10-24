@@ -17,11 +17,13 @@ import d5_authority_store as store
 import d5_control as control
 import d5_effect_log as ledger
 import d5_host as host
-import d5_lease as lease
+import d5_install as install
 import d5_locks as locks
 import d5_protocol_locks as protocol
 import d5_registry as registry
 from tests import test_d5_locks as lock_tests
+from tests.test_d5_authority import grant
+from tests.fixtures.d5.ready import ready
 
 PEER = ROOT / "tests/fixtures/d5/protocol_peer.py"
 MANDATE = b"fixture mandate\r\n\xff"
@@ -48,11 +50,13 @@ class TestD5Control(unittest.TestCase):
         self.anchor = self.stack.enter_context(mock.patch.object(host, "session_anchor",
                                                                 return_value=("native", ANCHOR)))
         self.args = self.repo, "p", self.state
-        self.entry = registry.register(*self.args)
+        self.entry = ready(self, *self.args, promote=False)
         self.directory = Path(self.entry["record_dir"])
-        lease.grant(*self.args, issued_at=100, confirmed_at=100, expires_at=200,
-                    mandate_bytes=MANDATE, scope=dict(plans=["p"], repositories=[],
-                    actions=[], trackers=[]), owner_response="fixture", displayed_bounds="fixture")
+        record = grant()
+        record.update(expires_at=200, mandate_sha256=authority.mandate_digest(MANDATE),
+                      scope=dict(plans=["p"], repositories=[], actions=[], trackers=[]),
+                      confirmation=dict(owner_response="fixture", displayed_bounds="fixture"))
+        install.install_initial(self.directory, record)
         self.assertEqual(self.anchor.call_count, 1)
         self.anchor.reset_mock()
         self.original = store.claim(self.directory, 101, MANDATE, "native", ANCHOR,

@@ -22,6 +22,7 @@ import d5_install as install
 import d5_lease as lease
 import d5_registry as registry
 from tests.test_d5_authority import MANDATE, grant
+from tests.fixtures.d5.ready import ready
 from tests.test_d5_locks import isolate_pool
 
 ANCHOR = host.ProcessIdentity(42, 9000001)
@@ -207,19 +208,29 @@ class TestCustodyStore(unittest.TestCase):
         self.assertEqual(store.replace(self.directory, new), new)
 
     def test_lease_replacement_carries_custody_and_blocks_successor(self):
+        repo, state = self.directory / "repo", self.directory / "state"
+        state.mkdir()
+        subprocess.run(["git", "init", str(repo)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(registry, "d5_active", return_value=True))
+        stack.enter_context(mock.patch.object(registry.CP, "_external_base",
+                                              return_value=self.directory / "external"))
+        self.directory = Path(ready(self, repo, "p", state)["record_dir"])
+        self.path = self.directory / store.RECORD_NAME
+        store.create(self.directory, grant())
         first = self.claim()
         raw = self.path.read_bytes()
         args = {key: first[key] for key in ("issued_at", "confirmed_at", "expires_at", "scope")}
         args.update(first["confirmation"])
         for fresh in (False, True):
-            with self.subTest(fresh=fresh), \
-                    mock.patch.object(registry, "d5_active", return_value=True), \
-                    mock.patch.object(registry, "lookup", return_value={"record_dir": str(self.directory)}):
+            with self.subTest(fresh=fresh):
                 if fresh:
                     args["owner_response"] += " fresh"
                     args["expires_at"] += 1
                     args["issued_at"] += 1
-                second = lease.grant("checkout", "p", "state", mandate_bytes=MANDATE, **args)
+                second = lease.grant(repo, "p", state, mandate_bytes=MANDATE, **args)
                 self.assertNotEqual(second["grant_id"], first["grant_id"])
                 self.assertEqual(second["custody"], first["custody"])
                 self.assertEqual(self.read(), second)
@@ -252,9 +263,16 @@ class TestCustodyAPI(unittest.TestCase):
             setattr(self, name, patch.start())
             self.addCleanup(patch.stop)
 
+        # Keep readiness valid while the operational registry is absent.
+        if self._testMethodName == "test_requires_registration_before_anchor":
+            with mock.patch.object(registry.CP, "_external_base",
+                                   return_value=self.directory / "installed-registry"):
+                ready(self, self.repo, "p", self.state)
+
     def register(self, record=True):
         with mock.patch.object(registry, "d5_active", return_value=True):
-            entry = registry.register(self.repo, "p", self.state)
+            entry = ready(self, self.repo, "p", self.state,
+                          promote=getattr(self, "promote", True))
         if record:
             store.create(entry["record_dir"], grant())
         return entry
