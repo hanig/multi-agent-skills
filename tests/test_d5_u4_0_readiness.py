@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from types import ModuleType
 import unittest
 from unittest import mock
@@ -274,6 +275,54 @@ class TestReadiness(unittest.TestCase):
                 self.assertEqual(actual, expected)
                 self.assertEqual(actual[:3], (True, [], []))
                 self.assertEqual(actual[3][0], "AuthorityError")
+
+
+    def test_overlapping_installers_retain_live_lease_until_both_exit(self):
+        barrier = threading.Barrier(2, timeout=30)
+        first, second, exited, finish = [threading.Event() for _ in range(4)]
+        holds, acquire = SS.holds_lease, SS.acquire_lease
+        errors = []
+
+        def queried(path):
+            observed = holds(path)
+            self.assertFalse(observed)
+            barrier.wait()
+            return observed
+
+        def acquiring(path, **kwargs):
+            if threading.current_thread().name == "second":
+                self.assertTrue(first.wait(30))
+            return acquire(path, **kwargs)
+
+        def worker(is_first):
+            try:
+                with R.installer_lease(self.state):
+                    (first if is_first else second).set()
+                    self.assertTrue((second if is_first else finish).wait(30))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                if is_first:
+                    exited.set()
+
+        with mock.patch.object(SS, "holds_lease", queried), \
+             mock.patch.object(SS, "acquire_lease", acquiring):
+            threads = [threading.Thread(target=worker, args=(value,), name=name)
+                       for value, name in ((True, "first"), (False, "second"))]
+            for thread in threads:
+                thread.start()
+            try:
+                self.assertTrue(exited.wait(30))
+                self.assertTrue(second.is_set())
+                self.assertEqual(errors, [])
+                self.assertTrue(holds(self.state), "second installer lost its lease")
+            finally:
+                finish.set()
+                for thread in threads:
+                    thread.join(30)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertFalse(holds(self.state))
 
 
 if __name__ == "__main__":
