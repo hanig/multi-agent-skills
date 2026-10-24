@@ -49,7 +49,9 @@ class _Completion:
     _journal: object = field(default=None, repr=False)
 
     def complete(self, outcome):
-        """Finalize this submitted operation; an identical duplicate is allowed."""
+        """Complete; only ledger-only calls permit identical duplicates."""
+        if self._journal is not None:
+            self._journal._owned()
         with _refusals(), protocol.pin(self._handle._directory) as record:
             with record.drain():
                 if self._journal is not None:
@@ -69,6 +71,8 @@ class _Completion:
 
     def uncertain(self):
         """Record unknown for this operation; never assert submission."""
+        if self._journal is not None:
+            self._journal._owned()
         handle = self._handle
         attempt = ledger.Attempt(handle.effect_id, handle._directory,
                                  handle._binding, handle._secret)
