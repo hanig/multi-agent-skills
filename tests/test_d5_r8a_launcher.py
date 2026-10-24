@@ -32,7 +32,7 @@ class TestLauncher(unittest.TestCase):
         isolate_pool(self)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory())).resolve()
+        self.tmp = Path(self.stack.enter_context(tempfile.TemporaryDirectory())).resolve()
 
     def done(self, h):
         self.eq(h.wait(5), 0)
@@ -52,14 +52,14 @@ class TestLauncher(unittest.TestCase):
         self.assertTrue(path.exists(), 'child barrier watchdog')
 
     def barrier(self, **options):
-        ready, release = self.root / 'ready', self.root / 'release'
+        ready, release = self.tmp / 'ready', self.tmp / 'release'
         h = self.launch('barrier', ready, release, **options)
         self.await_file(ready)
         return h, release
 
     def test_options_isolation(self):
         def inspect(i):
-            cwd = self.root / str(i)
+            cwd = self.tmp / str(i)
             cwd.mkdir()
             h = self.launch('inspect', 'literal;$(not-shell)', cwd=cwd,
                         env={'R8A': str(i)}, new_session=True)
@@ -99,7 +99,7 @@ class TestLauncher(unittest.TestCase):
             h.read('stdout')
 
     def test_capture_before_wait(self):
-        done = self.root / 'done'
+        done = self.tmp / 'done'
         h = self.launch('flood', done)
         self.await_file(done)
         self.done(h)
@@ -114,19 +114,16 @@ class TestLauncher(unittest.TestCase):
                     h.read(stream, limit=bad)
 
     def test_logs_stdin(self):
-        path = self.root / 'output'
+        path = self.tmp / 'output'
         path.write_bytes(b'prior\n')
-        for mode, want in (('ab', b'prior\ninputerror'), ('wb', b'inputerror')):
-            h = self.launch('echo', stdin=b'input', stdout=L.Log(path, mode),
-                            stderr=sp.STDOUT)
-            self.done(h)
-            self.eq(path.read_bytes(), want)
-            with self.assertRaises(ValueError):
-                h.read('stdout')
-        with self.assertRaises(FileExistsError):
-            self.launch('echo', stdout=L.Log(path, 'xb'))
-        fresh = self.root / 'fresh'
-        h = self.launch('echo', stdout=L.Log(fresh, 'xb'), stdin=sp.PIPE,
+        h = self.launch('echo', stdin=b'input', stdout=L.Log(path),
+                        stderr=sp.STDOUT)
+        self.done(h)
+        self.eq(path.read_bytes(), b'prior\ninputerror')
+        with self.assertRaises(ValueError):
+            h.read('stdout')
+        fresh = self.tmp / 'fresh'
+        h = self.launch('echo', stdout=L.Log(fresh), stdin=sp.PIPE,
                         stderr=sp.DEVNULL)
         h.stdin.write(b'pipe input')
         h.close_stdin()
@@ -144,24 +141,14 @@ class TestLauncher(unittest.TestCase):
         self.eq(h.wait(), h.poll())
         h.close()
         self.assertTrue(all(f.closed for f in caps))
-        files = []
-        real = tempfile.TemporaryFile
-        def opened(*args, **kwargs):
-            f = real(*args, **kwargs)
-            files.append(f)
-            return f
-        with mock.patch.object(L.tempfile, 'TemporaryFile', side_effect=opened):
-            with self.assertRaises(FileNotFoundError):
-                L.launch([str(self.root / 'absent')])
-        self.eq(len(files), 2)
-        self.assertTrue(all(f.closed for f in files))
-        h = self.launch('barrier', self.root / 'r2', self.root / 'never', stdin=sp.PIPE)
+        self.failed_launch()
+        h = self.launch('barrier', self.tmp / 'r2', self.tmp / 'never', stdin=sp.PIPE)
         h.close()
         self.assertLess(h.poll(), 0)
         self.assertTrue(h.stdin.closed)
 
     def test_cancel_group(self):
-        ready, fifo = self.root / 'ready', self.root / 'fifo'
+        ready, fifo = self.tmp / 'ready', self.tmp / 'fifo'
         os.mkfifo(fifo)
         fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
         self.stack.callback(os.close, fd)
@@ -184,10 +171,13 @@ class TestLauncher(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
-    def test_worker_fds(self):
-        d = self.root / 'record'
+    def record(self):
+        d = self.tmp / 'record'
         d.mkdir(mode=0o700)
-        with protocol.pin(d) as pinned, pinned.drain() as fd:
+        return protocol.pin(d)
+
+    def test_worker_fds(self):
+        with self.record() as pinned, pinned.drain() as fd:
             os.set_inheritable(fd, True)
             h = self.launch('fd', fd)
             self.done(h)
@@ -196,13 +186,13 @@ class TestLauncher(unittest.TestCase):
                 for value in (fd, None, os.fdopen(os.dup(fd), 'rb')):
                     if hasattr(value, 'close'):
                         self.stack.callback(value.close)
-                    options = {'stdout': L.Log(self.root / 'must-not-open'), name: value}
+                    options = {'stdout': L.Log(self.tmp / 'must-not-open'), name: value}
                     with self.assertRaises(ValueError):
-                        self.launch('mark', self.root / 'effect', **options)
+                        self.launch('mark', self.tmp / 'effect', **options)
             with self.assertRaises(TypeError):
                 L.launch(self.argv('echo'), pass_fds=(fd,))
-            self.assertFalse((self.root / 'must-not-open').exists())
-            self.assertFalse((self.root / 'effect').exists())
+            self.assertFalse((self.tmp / 'must-not-open').exists())
+            self.assertFalse((self.tmp / 'effect').exists())
 
     def cancel_lock(self, state):
         def until(check):
@@ -210,7 +200,7 @@ class TestLauncher(unittest.TestCase):
             while not check():
                 self.assertLess(time.monotonic(), deadline, 'lock/exit watchdog')
                 time.sleep(.01)
-        lock, ready = self.root / 'lock', self.root / 'ready'
+        lock, ready = self.tmp / 'lock', self.tmp / 'ready'
         h = self.launch('lock', lock, ready, state, new_session=True)
         def cleanup():
             if ready.exists():
@@ -251,26 +241,22 @@ class TestLauncher(unittest.TestCase):
     def test_cancel_reaped_lock(self): self.cancel_lock('reaped')
 
     def test_log_fd_alias(self):
-        d = self.root / 'record'
-        d.mkdir(mode=0o700)
-        with protocol.pin(d) as p, p.drain() as fd:
-            alias = self.root / 'alias'
+        with self.record() as p, p.drain() as fd:
+            alias = self.tmp / 'alias'
             alias.symlink_to('/dev/fd/' + str(fd))
             for path in ('/dev/fd/' + str(fd), alias):
                 with self.assertRaises((ValueError, OSError)):
                     self.launch('echo', stdout=L.Log(path))
 
     def test_parent_custody(self):
-        d = self.root / 'record'
-        d.mkdir(mode=0o700)
-        with protocol.pin(d) as pinned, pinned.drain() as fd:
-            h = L._launch(self.argv('barrier', self.root / 'r', self.root / 'x'),
+        with self.record() as pinned, pinned.drain() as fd:
+            h = L._launch(self.argv('barrier', self.tmp / 'r', self.tmp / 'x'),
                         _protected_fd=fd)
             self.addCleanup(h.close)
             with self.assertRaises(sp.TimeoutExpired):
                 h.wait(.01)
             h.close()
-            probe = os.open(d / 'authority.drain.lock', os.O_RDWR)
+            probe = os.open(self.tmp / 'record/authority.drain.lock', os.O_RDWR)
             try:
                 with self.assertRaises(BlockingIOError):
                     fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -281,7 +267,7 @@ class TestLauncher(unittest.TestCase):
     def test_protected_refusal(self):
         self.assertFalse(registry.d5_active())
         self.eq(P.DESIGNATED_BOOTSTRAPS, frozenset())
-        d = self.root / 'record'
+        d = self.tmp / 'record'
         d.mkdir(mode=0o700)
         seen = []
         popen = sp.Popen
@@ -293,12 +279,12 @@ class TestLauncher(unittest.TestCase):
         with protocol.pin(d) as pinned, pinned.drain() as fd:
             with mock.patch.object(P.subprocess, 'Popen', side_effect=real_spawn):
                 with self.assertRaisesRegex(P.AuthorityError, 'not designated'):
-                    P.protected_spawn(d, fd, str(CHILD), ('mark', str(self.root / 'effect')))
+                    P.protected_spawn(d, fd, str(CHILD), ('mark', str(self.tmp / 'effect')))
                 with mock.patch.object(P, 'DESIGNATED_BOOTSTRAPS', frozenset([str(CHILD)])):
                     with pinned.start(), self.assertRaisesRegex(P.AuthorityError, 'inside START'):
-                        P.protected_spawn(d, fd, str(CHILD), ('mark', str(self.root / 'effect')))
+                        P.protected_spawn(d, fd, str(CHILD), ('mark', str(self.tmp / 'effect')))
         self.eq(seen, [])
-        self.assertFalse((self.root / 'effect').exists())
+        self.assertFalse((self.tmp / 'effect').exists())
 
     def test_legacy_defaults(self):
         source = sp.check_output(['git', 'show', BASE + ':skills/hanig-orchestrate/scripts/d5_process.py'], cwd=ROOT)
@@ -314,23 +300,46 @@ class TestLauncher(unittest.TestCase):
         self.eq(h.wait(5), observed[0][1])
         self.eq((h.read('stdout'), h.read('stderr')), observed[0][2])
 
-    def test_shared_truncating_log(self):
-        path = self.root / 'log'
+    def test_shared_log(self):
+        path, alias = self.tmp / 'log', self.tmp / 'alias'
         path.touch()
-        alias = self.root / 'alias'
         os.link(path, alias)
         for target in (path, alias):
-            for out, err, prefix in (('wb', 'wb', b''), ('wb', 'ab', b''),
-                            ('ab', 'wb', b''), ('ab', 'ab', b'prior')):
-                path.write_bytes(b'prior')
-                h = self.launch('echo', stdin=b'abcde', stdout=L.Log(path, out),
-                                stderr=L.Log(target, err))
-                self.done(h)
-                self.eq(path.read_bytes(), prefix + b'abcdeerror')
+            path.write_bytes(b'prior')
+            h = self.launch('echo', stdin=b'abcde', stdout=L.Log(path),
+                            stderr=L.Log(target))
+            self.done(h)
+            self.eq(path.read_bytes(), b'priorabcdeerror')
+
+    def failed_launch(self, log=None):
+        files = []
+        owner, name = (L.tempfile, 'TemporaryFile') if log is None else (L, '_log')
+        real = getattr(owner, name)
+        def opened(*a, **kw):
+            f = real(*a, **kw)
+            files.append(f)
+            return f
+        with mock.patch.object(owner, name, side_effect=opened):
+            with self.assertRaises(FileNotFoundError):
+                L.launch([str(self.tmp / 'absent')], options=L.Options(
+                    stdout=log or L.CAPTURE, stderr=log or L.CAPTURE))
+        self.eq(len(files), 2)
+        self.assertTrue(all(f.closed for f in files))
+
+    def test_log_failure(self):
+        path = self.tmp / 'log'
+        for prior in (b'', b'prior\x00\xff'):
+            if prior:
+                path.write_bytes(prior)
+            self.failed_launch(L.Log(path))
+            self.eq(path.read_bytes(), prior)
+            h = self.launch('echo', stdin=b'retry', stdout=L.Log(path))
+            self.done(h)
+            self.eq(path.read_bytes(), prior + b'retry')
 
     @unittest.skipIf(os.geteuid() == 0, 'requires ordinary directory permissions')
     def test_search_only_log_directory(self):
-        d = self.root / 'drop'
+        d = self.tmp / 'drop'
         d.mkdir()
         path = d / 'log'
         path.write_bytes(b'control')
@@ -348,7 +357,7 @@ class TestLauncher(unittest.TestCase):
             if path == '/dev/fd':
                 raise FileNotFoundError(path)
             return real_stat(path, *args, **kwargs)
-        path = self.root / 'log'
+        path = self.tmp / 'log'
         with mock.patch.object(L.os, 'stat', side_effect=stat):
             with path.open('ab') as f:
                 f.write(b'control')
@@ -357,13 +366,15 @@ class TestLauncher(unittest.TestCase):
         self.eq(path.read_bytes(), b'controlchild')
 
     def test_invalid_options(self):
-        for options in (L.Options(stdout=L.Log(self.root / 'log', 'r')),
-                        L.Options(env={'bad': 3}), L.Options(new_session=1)):
+        logs = [L.Options(stdout=L.Log(self.tmp / 'out'),
+                          stderr=L.Log(self.tmp / 'log', mode))
+                for mode in ('r', 'xb', 'wb')]
+        for options in logs + [L.Options(env={'bad': 3}), L.Options(new_session=1)]:
             with self.assertRaises(ValueError):
-                L.launch(self.argv('mark', self.root / 'effect'), options=options)
+                self.launch('mark', self.tmp / 'effect', **vars(options))
         with self.assertRaises(TypeError):
             L.launch('echo shell text')
-        self.eq(list(self.root.iterdir()), [])
+        self.eq(list(self.tmp.iterdir()), [])
 
 if __name__ == '__main__':
     unittest.main()
