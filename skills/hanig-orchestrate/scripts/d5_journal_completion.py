@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
-import threading
 
 import d5_effect_log as ledger
 import swarm
@@ -45,11 +44,11 @@ class BoundJournal:
     specification: MergeJournal
     operation: object
     directory: str
-    owner: tuple
+    owner: int
     _state: dict = field(default_factory=dict, repr=False, compare=False)
 
     def _owned(self):
-        if self.owner != (os.getpid(), threading.get_ident()):
+        if self.owner != os.getpid():
             raise ledger.EffectError("D5 journal belongs to another invocation owner")
 
     def attach(self, handle):
@@ -76,8 +75,8 @@ class BoundJournal:
 
 def bind(specification, operation, state_dir, directory):
     """Invocation-specific binding before Start; no journal IO or ledger handle."""
-    if (type(specification) is not MergeJournal or
+    if (type(specification) is not MergeJournal or type(specification.payload) is not bytes or
             specification != prepare(state_dir, json.loads(specification.payload))):
         raise ledger.EffectError("D5 merge journal target mismatch")
     return BoundJournal(specification, operation, str(directory),
-                        (os.getpid(), threading.get_ident()))
+                        os.getpid())
