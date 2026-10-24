@@ -21,6 +21,7 @@ its older bytes until it does.
 """
 import json
 import time
+from types import MappingProxyType
 
 import d5_authority as authority
 import d5_authority_store as store
@@ -28,6 +29,26 @@ from d5_control import _mandate_bytes
 import d5_host as host
 import d5_locks as locks
 import d5_registry as registry
+
+
+# Closed trusted classification. The existing synthetic adapters are ledger
+# effects; production merge admission awaits U4.3's journal binding. A scope,
+# intent, serialized preference or receipt cannot override this table.
+RECORDING_AUTHORITIES = MappingProxyType({
+    "fixture": "ledger", "test-effect": "ledger", "synthetic": "ledger",
+    "merge": "journal",
+})
+
+
+def recording_authority(kind):
+    if type(kind) is not str or kind not in RECORDING_AUTHORITIES:
+        raise authority.AuthorityError("D5 operation kind is not classified")
+    return RECORDING_AUTHORITIES[kind]
+
+
+def require_ledger(kind):
+    if recording_authority(kind) != "ledger":
+        raise authority.AuthorityError("D5 journal request requires journal binding")
 
 
 def _scope_allowed(raw, allowed):

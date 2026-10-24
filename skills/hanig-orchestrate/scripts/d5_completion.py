@@ -49,6 +49,8 @@ class _Completion:
 
     def complete(self, outcome):
         """Finalize this submitted operation; an identical duplicate is allowed."""
+        with _refusals():
+            ledger._check_handle(self._handle)
         with _refusals(), protocol.pin(self._handle._directory) as record:
             with record.drain():
                 return ledger.complete(self._handle, outcome)
@@ -56,6 +58,8 @@ class _Completion:
     def uncertain(self):
         """Record unknown for this operation; never assert submission."""
         handle = self._handle
+        with _refusals():
+            ledger._check_handle(handle)
         attempt = ledger.Attempt(handle.effect_id, handle._directory,
                                  handle._binding, handle._secret)
         with _refusals(), protocol.pin(handle._directory) as record:
@@ -72,6 +76,8 @@ def bind(handle):
     ledger._active()
     if type(handle) not in (ledger.Attempt, ledger.Receipt) or type(handle._directory) is not str:
         raise ledger.EffectError(MISMATCH)
+    with _refusals():
+        ledger._check_handle(handle)
     with _refusals(), protocol.pin(handle._directory) as record:
         with record.drain(), ledger._checked(handle):
             return _Completion(handle)

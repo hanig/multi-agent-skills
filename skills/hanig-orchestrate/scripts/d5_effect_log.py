@@ -31,6 +31,7 @@ import re
 import secrets
 import stat
 
+import d5_admission as admission
 import d5_locks as locks
 import d5_registry as registry
 
@@ -79,8 +80,10 @@ def _integer(value):
 
 
 def _binding(value):
-    _keys(value, {"record_id", "registration_id", "record_key", "effects_key",
-                  "custody", "kind", "scope", "correlation"})
+    fields = {"record_id", "registration_id", "record_key", "effects_key",
+              "custody", "kind", "scope", "correlation"}
+    _require(type(value) is dict and (value.keys() == fields or
+             value.keys() == fields | {"recording_authority"}))
     for key in ("record_id", "registration_id"):
         _require(_hex(value[key], 32))
     for key in ("record_key", "effects_key"):
@@ -100,6 +103,18 @@ def _binding(value):
     correlation = value["correlation"]
     _require(type(correlation) is dict and bool(correlation.get("request_id")) and
              all(_text(k) and _text(v) for k, v in correlation.items()))
+    # Legacy rows never default a merge (or unlisted kind) to ledger authority.
+    _require(_recording_authority(value) == "ledger")
+
+
+def _recording_authority(binding):
+    _require(type(binding) is dict)
+    try:
+        selected = admission.recording_authority(binding.get("kind"))
+    except admission.authority.AuthorityError as exc:
+        raise EffectError(INVALID) from exc
+    _require(binding.get("recording_authority", selected) == selected)
+    return selected
 
 
 def _outcome(value):
@@ -238,6 +253,10 @@ class Attempt:
     _binding: bytes = field(repr=False)
     _secret: bytes = field(repr=False)
 
+    @property
+    def recording_authority(self):
+        return _recording_authority(_decode(self._binding))
+
 
 @dataclass(frozen=True)
 class Receipt(Attempt):
@@ -251,13 +270,17 @@ def _verifier(effect_id, binding, secret):
 
 def prepare(checkout, plan_id, state_dir, *, record_id, custody, kind, scope, correlation):
     _active()
+    # Refuse before opening/creating the ledger, even through this lower seam.
+    selected = _recording_authority({"kind": kind})
+    _require(selected == "ledger")
     registration = registry.lookup(checkout, plan_id, state_dir)
     _require(registration is not None)
     directory = registration["record_dir"]
     with _access(directory, create=True) as (record, fd):
         binding = dict(record_id=record_id, registration_id=registration["registration_id"],
                        record_key=_key(record.fd), effects_key=_key(fd), custody=custody,
-                       kind=kind, scope=scope, correlation=correlation)
+                       kind=kind, scope=scope, correlation=correlation,
+                       recording_authority=selected)
         _binding(binding)
         raw = _encode(binding)
         effect_id, secret = secrets.token_hex(16), secrets.token_bytes(32)
@@ -268,11 +291,16 @@ def prepare(checkout, plan_id, state_dir, *, record_id, custody, kind, scope, co
     return Attempt(effect_id, directory, raw, secret)
 
 
-@contextmanager
-def _checked(handle):
+def _check_handle(handle):
     _require(type(handle) in (Attempt, Receipt) and _hex(handle.effect_id, 32) and
              type(handle._directory) is str and type(handle._binding) is bytes and
              type(handle._secret) is bytes and len(handle._secret) == 32)
+    _binding(_decode(handle._binding))
+
+
+@contextmanager
+def _checked(handle):
+    _check_handle(handle)
     with _access(handle._directory) as (record, fd):
         name = handle.effect_id + ".json"
         entry = _load(fd, name, record)
