@@ -8,12 +8,10 @@ Supported envelope and accepted limits
 - No new authorization check during Finish.
 - No automatic retry of an uncertain append.
 
-Prepare immutable bytes/target, bind in the submitting owner before Start,
-attach its receipt afterwards, record during Finish. Trusted local callers
-supply the factual merge attestation. A child must bind in its own submission;
-the specification, not a live binding, can be passed to a future R8b adapter.
-After an append error retain the journal and reconcile it against the ledger;
-never retry this binding. This is not a crash-proof exactly-once transaction.
+Trusted callers supply factual attestations. Prepare is immutable; bind belongs
+to the submitting owner (a future R8b child binds locally). On append failure,
+retain the journal and reconcile against the ledger without replay. No crash
+exactly-once guarantee.
 """
 from dataclasses import dataclass, field
 import json
