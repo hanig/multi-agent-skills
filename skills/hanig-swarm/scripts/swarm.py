@@ -51,6 +51,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import unit as U  # noqa: E402  same skill, installed together
 import child_environment as CE  # noqa: E402
+import d5_activation
 import paseo_io as PIO
 import worktree as W  # noqa: E402
 import verify as V  # noqa: E402
@@ -4620,6 +4621,11 @@ def cmd_verify(args):
     return EXIT_OK if rec["result"] == "pass" else EXIT_FAILED_UNIT
 
 
+def merge_journal_path(state_dir):
+    """The merge recorder's target, from the invocation's prepared state path."""
+    return Path(state_dir) / SE.MERGE_RECEIPTS
+
+
 def cmd_merge(args):
     """Record that a PR for this unit was observed merged.
 
@@ -4628,6 +4634,9 @@ def cmd_merge(args):
     the coordinator checks is that the head you pin is the head it judged this
     attempt to have produced.
     """
+    if d5_activation.d5_active():
+        sys.stderr.write("error: D5 merge recording requires U4 binding\n")
+        return EXIT_CONFLICT
     _prepare_command_paths(args)
     try:
         SE.load_merge_receipts(args.state_dir)     # refuse to extend a bad journal
@@ -4653,7 +4662,7 @@ def cmd_merge(args):
     if bad:
         sys.stderr.write(f"error: this would not be admissible: {bad}\n")
         return EXIT_USAGE
-    SJ._fsync_append(Path(args.state_dir) / SE.MERGE_RECEIPTS, rec)
+    SJ._fsync_append(merge_journal_path(args.state_dir), rec)
     print(f"  recorded: {args.unit} merged as {args.merged_as[:12]} "
           f"(head {args.head[:12]}, {args.method})")
     print("  This is the attester's word. The coordinator will admit it only "
