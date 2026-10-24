@@ -295,8 +295,16 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
         self.assertFalse(self.marker.exists())
         self.assertFalse((Path(entry["record_dir"]) / "authority.drain.lock").exists())
 
+    def test_M6_inactive_capture_without_git_history(self):
+        # A depth-one checkout has the sources, but no historical Git objects.
+        with mock.patch.object(subprocess, "check_output", side_effect=
+                subprocess.CalledProcessError(128, ["git", "show"])) as history:
+            self.test_M6_inactive_issuance_matches_unit_base_capture()
+            history.assert_not_called()
+
     def test_M6_inactive_issuance_matches_unit_base_capture(self):
-        base = "a1847ee2b1ae7a7d32936e4c95cf66eb55c3219d"
+        baseline = json.loads((fixtures.ROOT / "tests/fixtures/d5/"
+                               "u4_0b1_inactive_base.json").read_text())
 
         def capture(call, kwargs):
             before = self.fixture.tree()
@@ -310,9 +318,11 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
         self.assertFalse(registry.d5_active())
         for module, name, kwargs in self.operations():
             path = Path(module.__file__).relative_to(fixtures.ROOT)
-            source = subprocess.check_output(["git", "show", base + ":" + str(path)],
-                                             cwd=str(fixtures.ROOT))
+            source = baseline["modules"][module.__name__]["source"]
             previous = ModuleType("_u4_0b1_base_" + module.__name__)
+            # Freeze the complete entry and every activation guard it executes;
+            # imported dependencies are shared, as in the original capture.
+            previous.__dict__.update(module.__dict__)
             previous.__file__ = module.__file__
             exec(compile(source, str(path), "exec"), previous.__dict__)
             with self.subTest(entry=name):
