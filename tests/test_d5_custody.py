@@ -208,19 +208,29 @@ class TestCustodyStore(unittest.TestCase):
         self.assertEqual(store.replace(self.directory, new), new)
 
     def test_lease_replacement_carries_custody_and_blocks_successor(self):
+        repo, state = self.directory / "repo", self.directory / "state"
+        state.mkdir()
+        subprocess.run(["git", "init", str(repo)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(registry, "d5_active", return_value=True))
+        stack.enter_context(mock.patch.object(registry.CP, "_external_base",
+                                              return_value=self.directory / "external"))
+        self.directory = Path(ready(self, repo, "p", state)["record_dir"])
+        self.path = self.directory / store.RECORD_NAME
+        store.create(self.directory, grant())
         first = self.claim()
         raw = self.path.read_bytes()
         args = {key: first[key] for key in ("issued_at", "confirmed_at", "expires_at", "scope")}
         args.update(first["confirmation"])
         for fresh in (False, True):
-            with self.subTest(fresh=fresh), \
-                    mock.patch.object(registry, "d5_active", return_value=True), \
-                    mock.patch.object(registry, "lookup", return_value={"record_dir": str(self.directory)}):
+            with self.subTest(fresh=fresh):
                 if fresh:
                     args["owner_response"] += " fresh"
                     args["expires_at"] += 1
                     args["issued_at"] += 1
-                second = lease.grant("checkout", "p", "state", mandate_bytes=MANDATE, **args)
+                second = lease.grant(repo, "p", state, mandate_bytes=MANDATE, **args)
                 self.assertNotEqual(second["grant_id"], first["grant_id"])
                 self.assertEqual(second["custody"], first["custody"])
                 self.assertEqual(self.read(), second)
