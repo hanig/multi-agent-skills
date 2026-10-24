@@ -110,7 +110,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                         correlation={"request_id": operation.request_id, "intent": bytes.hex(operation.intent)})
                     if journal is not None:
                         from d5_journal_completion import bind
-                        journal = bind(journal, operation, (checkout, plan_id, state_dir), entry["record_dir"])
+                        journal = bind(journal, operation, (checkout, plan_id, state_dir), entry["record_dir"]).attach(attempt)
                     admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
                     A = True
                     state = boundary.start(operation)
@@ -143,7 +143,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                     response_error = exc
                 finally:
                     if capability is None or response_error is not None:
-                        completion.bind(attempt).uncertain()
+                        completion.bind(attempt, journal=journal).uncertain()
                     else:
                         outcome = capability.complete(outcome)
                         C = True

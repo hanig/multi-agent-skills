@@ -33,8 +33,99 @@ class TestJournal(unittest.TestCase):
   def submit(self):
     return self.c.submit(journal=self.spec)
 
+  def assert_record(self, path=None):
+    row = json.loads((path or self.path).read_bytes())
+    key = row.pop('d5_effect_key')
+    self.eq(row.pop('d5_outcome'), t.OK)
+    self.eq(row, RECORD)
+    self.eq(len(key.split(':')), 2)
+
+  def capture_receipt(self):
+    saved, bind = [], t.completion.bind
+    def capture(handle, **kw):
+      cap = bind(handle, **kw)
+      if kw.get('journal') is not None:
+        saved.append(handle)
+      return cap
+    with patch.object(t.completion, 'bind', side_effect=capture):
+      self.submit()
+    return saved[0]
+
+  def rebound(self, handle):
+    return t.completion.bind(handle, journal=journal.bind(self.spec, self.c.operation, self.c.args, str(self.c.directory)))
+
+  def test_rebind_and_child_discover_completed_record(self):
+    receipt = self.capture_receipt()
+    before = self.path.read_bytes()
+    for cap in (self.rebound(receipt), self.rebound(receipt)):
+      self.eq(cap.complete(dict(t.OK)), t.OK)
+      self.eq(self.path.read_bytes(), before)
+    c = self.c
+    message = dict(receipt=dict(effect_id=receipt.effect_id, directory=receipt._directory,
+      binding=receipt._binding.hex(), secret=receipt._secret.hex()),
+      args=[str(a) for a in c.args], operation=dict(request_id=c.operation.request_id,
+      kind=c.operation.kind, scope=c.operation.scope.hex(), intent=c.operation.intent.hex()),
+      record=RECORD, outcome=t.OK)
+    child = subprocess.run([sys.executable, '-B', str(ROOT / 'tests/fixtures/d5/r4_child.py')],
+      input=json.dumps(message), capture_output=True, text=True, timeout=30)
+    self.eq(child.returncode, 0, child.stderr)
+    self.eq(json.loads(child.stdout), t.OK)
+    self.eq(self.path.read_bytes(), before)
+    self.eq(t.ledger.unresolved(*c.args), [])
+
+  def test_independent_objects_concurrent(self):
+    c, caps = self.c, []
+    bind = t.completion.bind
+    entered, release = threading.Event(), threading.Event()
+    append = journal._append_locked
+    def blocked(fh, row):
+      entered.set()
+      if not release.wait(10):
+        raise AssertionError('append watchdog')
+      return append(fh, row)
+    # Construct the independent object before replacing completion.bind.
+    def capture(handle, **kw):
+      cap = bind(handle, **kw)
+      if kw.get('journal') is not None:
+        caps.append(bind(handle, journal=journal.bind(self.spec, c.operation, c.args, str(c.directory))))
+      return cap
+    with patch.object(t.completion, 'bind', side_effect=capture), patch.object(journal, '_append_locked', side_effect=blocked):
+      first, results = c.launch(self.submit)
+      try:
+        self.yes(entered.wait(10))
+        second, duplicates = c.launch(lambda: caps[0].complete(t.OK))
+      finally:
+        release.set()
+        result = c.join(first, results)
+      self.assertIsInstance(result, t.submission.Result)
+      self.eq(c.join(second, duplicates), t.OK)
+    self.assert_record()
+    self.eq(c.rows()[0]['state'], 'completed')
+    self.eq(c.probe('drain'), 'available')
+
+  def test_finish_error_keeps_precompleted_obligation(self):
+    c, bind = self.c, t.completion.bind
+    def precomplete(handle, **kw):
+      cap = bind(handle, **kw)
+      if type(handle) is t.ledger.Receipt:
+        t.ledger.complete(handle, t.OK)
+      return cap
+    def fail():
+      raise OSError('finish acknowledgement lost')
+    c.boundary.on_finish = fail
+    with patch.object(t.completion, 'bind', side_effect=precomplete):
+      with self.raises(OSError, 'finish acknowledgement lost'):
+        self.submit()
+    self.eq([r['state'] for r in c.rows()], ['completed'])
+    pending, = t.ledger.unresolved(*c.args)
+    self.yes(pending['reconciliation_required'])
+    self.eq(pending['journal']['path'], str(self.path))
+    self.eq(pending['journal']['state'], 'uncertain')
+    self.eq(self.path.read_bytes(), b'')
+    self.eq(c.probe('drain'), 'blocked')
+
   def test_pre_start_binding(self):
-    c, bound = self.c, []
+    c, bound, caps = self.c, [], []
     real = journal.bind
     def binding(*args):
       result = real(*args)
@@ -43,9 +134,18 @@ class TestJournal(unittest.TestCase):
     def start():
       self.eq(len(bound), 1)
       self.assertIs(bound[0].operation, c.operation)
+      row, = c.rows()
+      self.eq(row['journal'], dict(path=self.spec.path, payload=self.spec.payload.decode(), state='pending'))
+      self.yes(t.ledger.unresolved(*c.args)[0]['reconciliation_required'])
       self.eq((bound[0].spec, bound[0].directory, bound[0].owner, self.path.exists()), (self.spec, str(c.directory), os.getpid(), False))
     c.boundary.on_start = start
-    append = swarm.SJ._fsync_append
+    bind_cap = t.completion.bind
+    def capture(*args, **kwargs):
+      cap = bind_cap(*args, **kwargs)
+      if kwargs.get('journal') is not None:
+        caps.append(cap)
+      return cap
+    append = journal._append_locked
     ready, resume = threading.Event(), threading.Event()
     def record(path, data):
       self.eq(c.probe('start'), 'available')
@@ -55,11 +155,12 @@ class TestJournal(unittest.TestCase):
         raise AssertionError('recorder timeout')
       return append(path, data)
     with patch.object(journal, 'bind', side_effect=binding), \
-        patch.object(swarm.SJ, '_fsync_append', side_effect=record):
+        patch.object(journal, '_append_locked', side_effect=record), \
+        patch.object(t.completion, 'bind', side_effect=capture):
       first, results = c.launch(self.submit)
       try:
         self.yes(ready.wait(10), 'recorder timeout')
-        second, duplicates = c.launch(lambda: bound[0].complete(dict(t.OK)))
+        second, duplicates = c.launch(lambda: caps[0].complete(dict(t.OK)))
         second.join(3)
       finally:
         resume.set()
@@ -67,7 +168,7 @@ class TestJournal(unittest.TestCase):
       self.assertIsInstance(result, t.submission.Result)
       self.eq(result.outcome, t.OK)
       self.eq(c.join(second, duplicates), t.OK)
-    self.eq(json.loads(self.path.read_bytes()), RECORD)
+    self.assert_record()
     self.eq(c.rows()[0]['state'], 'completed')
     self.eq(c.probe('drain'), 'available')
 
@@ -111,11 +212,14 @@ class TestJournal(unittest.TestCase):
       if not resume.wait(10):
         raise AssertionError('recorder timeout')
       return record(bound, outcome)
-    real = swarm.SJ._fsync_append
-    def append(path, data):
+    real = journal.BoundJournal._locked
+    from contextlib import contextmanager
+    @contextmanager
+    def locked(bound):
       reached.set()
-      return real(path, data)
-    with patch.object(swarm.SJ, '_fsync_append', side_effect=append), \
+      with real(bound) as fh:
+        yield fh
+    with patch.object(journal.BoundJournal, '_locked', locked), \
         patch.object(journal.BoundJournal, 'record', paused):
       thread, results = c.launch(self.submit)
       try:
@@ -137,7 +241,7 @@ class TestJournal(unittest.TestCase):
         result = c.join(thread, results)
     self.assertIsInstance(result, t.submission.Result)
     self.eq(result.outcome, t.OK)
-    self.eq(json.loads(self.path.read_bytes()), RECORD)
+    self.assert_record()
     self.eq(c.rows()[0]['state'], 'completed')
     c.boundary = t.DeterministicBoundary()
     with self.assertRaises(t.authority.AuthorityError):
@@ -159,7 +263,7 @@ class TestJournal(unittest.TestCase):
         c.setUp()
         self.addCleanup(c.doCleanups)
         path = swarm.merge_journal_path(c.state_dir)
-        real, saved, bind = swarm.SJ._fsync_append, [], t.completion.bind
+        real, saved, bind = journal._append_locked, [], t.completion.bind
         def binding(*args, **kwargs):
           cap = bind(*args, **kwargs)
           if kwargs.get('journal') is not None:
@@ -173,22 +277,37 @@ class TestJournal(unittest.TestCase):
           if prior:
             t.control.revoke(*c.args, 151, 'recorder failure')
           raise OSError('recorder acknowledgement lost')
-        with patch.object(swarm.SJ, '_fsync_append', side_effect=fail), \
+        with patch.object(journal, '_append_locked', side_effect=fail), \
             patch.object(t.completion, 'bind', side_effect=binding):
           with self.raises(OSError, 'acknowledgement lost'):
             c.submit(journal=journal.prepare(c.state_dir, RECORD))
-        self.eq(sorted(r['state'] for r in c.rows()), ['completed', 'unknown'] if prior else ['unknown'])
+        self.eq(sorted(r['state'] for r in c.rows()), ['completed'] if prior else ['unknown'])
         self.eq(c.probe('drain'), 'blocked')
         before = path.read_bytes() if path.exists() else None
-        self.eq(json.loads(before) if before else None, RECORD if after else None)
+        if after:
+          self.assert_record(path)
+        else:
+          self.no(before)
         with self.assertRaises(t.ledger.EffectError):
           saved[0].complete(t.OK)
         self.eq(path.read_bytes() if path.exists() else None, before)
         unresolved = t.ledger.unresolved(*c.args)
         self.eq(len(unresolved), 1)
         self.yes(all(r['reconciliation_required'] for r in unresolved))
-        if prior:
-          self.eq(unresolved[0]['binding']['correlation'], dict(request_id=saved[0]._state["handle"].effect_id, journal=str(path)))
+        self.eq(unresolved[0]['effect_id'], saved[0].handle.effect_id)
+        self.eq(unresolved[0]['journal']['state'], 'uncertain')
+        # A newly bound admitted owner consults durable uncertainty, too.
+        new = t.completion.bind(saved[0].handle, journal=journal.bind(saved[0].spec, c.operation, c.args, str(c.directory)))
+        with self.assertRaises(t.ledger.EffectError):
+          new.complete(t.OK)
+        if after:
+          self.eq(new.reconcile(), t.OK)
+          self.eq(t.ledger.unresolved(*c.args), [])
+        else:
+          with self.raises(t.ledger.EffectError, 'absent'):
+            new.reconcile()
+        self.eq(path.read_bytes(), before)
+        self.eq(c.probe('drain'), 'blocked')
 
   def test_binding_refusals(self):
     c = self.c

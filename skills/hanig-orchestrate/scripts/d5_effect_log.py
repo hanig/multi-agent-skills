@@ -216,7 +216,14 @@ def _load(fd, name, record):
     with locks._cleanup(handle.close):
         _safe(handle.fileno())
         entry = _decode(handle.read())
-    _keys(entry, {"schema_version", "effect_id", "binding", "receipt_verifier", "state", "outcome"})
+    fields = {"schema_version", "effect_id", "binding", "receipt_verifier", "state", "outcome"}
+    if "journal" in entry:
+        fields.add("journal")
+        marker = entry["journal"]
+        _keys(marker, {"path", "payload", "state"})
+        _require(_text(marker["path"]) and os.path.isabs(marker["path"]) and _text(marker["payload"]))
+        _require(marker["state"] in ("pending", "uncertain", "completed"))
+    _keys(entry, fields)
     _require(type(entry["schema_version"]) is int and entry["schema_version"] == 1)
     _require(_hex(entry["effect_id"], 32) and name == entry["effect_id"] + ".json")
     _binding(entry["binding"])
@@ -322,6 +329,8 @@ def complete(receipt, outcome):
             _require(entry["outcome"] == outcome, CONFLICT)
             _confirm(fd, name)
         else:
+            # An opted-in recorder has begun; only its journal can resolve uncertainty.
+            _require(entry.get("journal", {}).get("state") != "uncertain", DURABILITY)
             entry.update(state="completed", outcome=outcome)
             _write(fd, name, entry)
     return outcome
@@ -346,8 +355,10 @@ def unresolved(checkout, plan_id, state_dir):
             except (EffectError, OSError):
                 result.append(dict(file=name, error=INVALID, reconciliation_required=True))
                 continue
-            if entry["state"] in ("attempting", "unknown", "submitted"):
+            owed = (entry.get("journal", {}).get("state") in ("pending", "uncertain") and
+                    entry["state"] != "not_submitted")
+            if owed or entry["state"] in ("attempting", "unknown", "submitted"):
                 entry.pop("receipt_verifier")
-                entry["reconciliation_required"] = entry["state"] != "submitted"
+                entry["reconciliation_required"] = owed or entry["state"] != "submitted"
                 result.append(entry)
     return result

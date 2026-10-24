@@ -78,6 +78,5 @@ def bind(handle, *, journal=None):
                 from d5_journal_completion import BoundJournal
                 if type(journal) is not BoundJournal:
                     raise ledger.EffectError(MISMATCH)
-                journal.attach(handle)
-                return journal
+                return journal.attach(handle)
             return _Completion(handle)
