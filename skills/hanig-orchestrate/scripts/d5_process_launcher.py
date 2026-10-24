@@ -7,8 +7,8 @@ only if running. If that poll sees exit, or exit was recorded before,
 surviving group members are not signalled. Cancel before wait cannot guarantee
 descendant shutdown; callers needing it must own an appropriate lifetime protocol.
 Local exit does not imply descendant termination. Escapes/post-exit writes excluded.
-Logs append; wb truncates,
-xb exclusively creates, ab reuses. Only regular logs, no final symlinks/fd aliases.
+Logs always append. Failed launch leaves a new file empty and existing bytes intact;
+handles close but files are never unlinked. Only regular logs, no final symlinks/fd aliases.
 stdin: bytes/DEVNULL/borrowed PIPE. close owns stdin/captures, not the private fd;
 R8b must authorize that fd and retain parent custody.
 """
@@ -110,7 +110,6 @@ def _log(log):
         if magic and (here.st_dev, here.st_ino) == (magic.st_dev, magic.st_ino):
             raise ValueError('logs cannot export descriptors')
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_APPEND
-        flags |= {'ab': 0, 'wb': os.O_TRUNC, 'xb': os.O_EXCL}[log.mode]
         fd = os.open(os.path.basename(path), flags, 0o666, dir_fd=directory)
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -142,8 +141,8 @@ def _launch(argv, *, options=None, _protected_fd=None):
         raise ValueError("invalid stdin option")
     for name, value in (("stdout", options.stdout), ("stderr", options.stderr)):
         if isinstance(value, Log):
-            if value.mode not in ("ab", "wb", "xb"):
-                raise ValueError("invalid log mode")
+            if value.mode != "ab":
+                raise ValueError("logs require ab mode")
             os.fspath(value.path)
         elif not (value is CAPTURE or type(value) is int and
                   (value == subprocess.DEVNULL or
