@@ -160,6 +160,8 @@ class TestJournal(unittest.TestCase):
       first, results = c.launch(self.submit)
       try:
         self.yes(ready.wait(10), 'recorder timeout')
+        with self.assertRaises(t.ledger.EffectError):
+          t.ledger.complete(caps[0].handle, t.OK)
         second, duplicates = c.launch(lambda: caps[0].complete(dict(t.OK)))
         second.join(3)
       finally:

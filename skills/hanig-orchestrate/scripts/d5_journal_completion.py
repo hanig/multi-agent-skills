@@ -29,7 +29,7 @@ def prepare(state_dir, record):
 
 
 def _append_locked(fh, record):
-  # Same inode/flock as swarm_journal._fsync_append, without reacquiring it.
+  # Reuses the legacy journal inode/flock.
   swarm.SJ._heal_jsonl_tail(fh)
   fh.seek(0, os.SEEK_END)
   fh.write((json.dumps(record, sort_keys=True) + "\n").encode())
@@ -164,7 +164,7 @@ class BoundJournal:
         if entry["state"] == "completed":
           L._require(entry["outcome"] == outcome, L.CONFLICT)
       if outcome["status"] == "failed":
-        # No successful merge means no merge-record obligation. Ledger duplicates still apply.
+        # A failed effect owes no merge record.
         L.complete(self.handle, outcome)
         return self._finish(outcome)
       return self.record(outcome)
