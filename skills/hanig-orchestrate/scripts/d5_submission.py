@@ -34,6 +34,7 @@ import d5_completion as completion
 import d5_effect_log as ledger
 import d5_protocol_locks as protocol
 import d5_registry as registry
+import d5_journal_completion as journal_completion
 
 
 class Initiation(Enum):
@@ -75,7 +76,7 @@ class Result:
 
 
 def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
-           generation, operation, boundary):
+           generation, operation, boundary, journal=None):
     """Admit one operation; refuse ambient START."""
     if not registry.d5_active():
         raise AuthorityError("D5 is inactive")
@@ -98,6 +99,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
         H = True
         attempt, state, start_error = None, Initiation.UNCERTAIN, None
         capability, accounting_error = None, None
+        recording = None
         outcome, response_error = None, None
         try:
             with pinned.start():
@@ -109,6 +111,9 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                         kind=operation.kind, scope=json.loads(operation.scope),
                         correlation={"request_id": operation.request_id, "intent": bytes.hex(operation.intent)})
                     admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
+                    if journal is not None:
+                        recording = journal_completion.bind(journal, operation,
+                                                            state_dir, entry["record_dir"])
                     A = True
                     state = boundary.start(operation)
                 except BaseException as exc:
@@ -123,7 +128,9 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                     start_error = ValueError("D5 boundary returned an invalid initiation")
                 try:
                     if state is Initiation.SUBMITTED:
-                        capability = completion.bind(ledger._classify(attempt, "submitted"))
+                        receipt = ledger._classify(attempt, "submitted")
+                        capability = (completion.bind(receipt) if recording is None else
+                                      completion.bind(receipt, journal=recording))
                     elif state is Initiation.NOT_SUBMITTED:
                         ledger._classify(attempt, "not_submitted")
                         N = True

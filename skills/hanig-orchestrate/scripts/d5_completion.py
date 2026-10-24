@@ -46,11 +46,25 @@ def _refusals():
 @dataclass(frozen=True)
 class _Completion:
     _handle: ledger.Attempt = field(repr=False)
+    _journal: object = field(default=None, repr=False)
 
     def complete(self, outcome):
         """Finalize this submitted operation; an identical duplicate is allowed."""
         with _refusals(), protocol.pin(self._handle._directory) as record:
             with record.drain():
+                if self._journal is not None:
+                    if record._record._prior(1) is not None:
+                        raise ledger.EffectError("D5 journal recording inside START is forbidden")
+                    ledger._active()
+                    ledger._outcome(outcome)
+                    with ledger._checked(self._handle) as (_, _, entry):
+                        ledger._require(type(self._handle) is ledger.Receipt and
+                                        entry["state"] in ("submitted", "completed"), ledger.NOT_SUBMITTED)
+                    try:
+                        self._journal.record(outcome)
+                    except BaseException:
+                        self.uncertain()
+                        raise
                 return ledger.complete(self._handle, outcome)
 
     def uncertain(self):
@@ -63,7 +77,7 @@ class _Completion:
                 return ledger._classify(attempt, "unknown")
 
 
-def bind(handle):
+def bind(handle, *, journal=None):
     """Bind an existing capability while active, without current authorization.
 
     The merged ledger reauthenticates the stored binding on subsequent calls.
@@ -74,4 +88,9 @@ def bind(handle):
         raise ledger.EffectError(MISMATCH)
     with _refusals(), protocol.pin(handle._directory) as record:
         with record.drain(), ledger._checked(handle):
-            return _Completion(handle)
+            if journal is not None:
+                from d5_journal_completion import BoundJournal
+                if type(journal) is not BoundJournal:
+                    raise ledger.EffectError(MISMATCH)
+                journal.attach(handle)
+            return _Completion(handle, journal)
