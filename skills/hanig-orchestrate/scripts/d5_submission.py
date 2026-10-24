@@ -108,10 +108,10 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                         session_id=session_id, anchor_pid=anchor.pid, anchor_start_us=anchor.start_us),
                         kind=operation.kind, scope=json.loads(operation.scope),
                         correlation={"request_id": operation.request_id, "intent": bytes.hex(operation.intent)})
-                    admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
                     if journal is not None:
                         from d5_journal_completion import bind
                         journal = bind(journal, operation, state_dir, entry["record_dir"])
+                    admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
                     A = True
                     state = boundary.start(operation)
                 except BaseException as exc:
