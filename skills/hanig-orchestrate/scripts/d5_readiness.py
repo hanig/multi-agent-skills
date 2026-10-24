@@ -57,7 +57,8 @@ def _validated(value):
     registry._plan_id(value["plan_id"])
     for key in ("state_dir", "record_dir"):
         _require(type(value[key]) is str and Path(value[key]).is_absolute(), "invalid " + key)
-        _require(str(Path(value[key]).resolve()) == value[key], "noncanonical " + key)
+        if key == "state_dir":
+            _require(str(Path(value[key]).resolve()) == value[key], "noncanonical " + key)
     for key in ("repo_key", "state_key", "record_key"):
         pair = value[key]
         _require(type(pair) is list and len(pair) == 2 and
