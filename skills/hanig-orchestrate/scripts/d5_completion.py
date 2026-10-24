@@ -46,33 +46,15 @@ def _refusals():
 @dataclass(frozen=True)
 class _Completion:
     _handle: ledger.Attempt = field(repr=False)
-    _journal: object = field(default=None, repr=False)
 
     def complete(self, outcome):
-        """Complete; only ledger-only calls permit identical duplicates."""
-        if self._journal is not None:
-            self._journal._owned()
+        """Finalize this submitted operation; an identical duplicate is allowed."""
         with _refusals(), protocol.pin(self._handle._directory) as record:
             with record.drain():
-                if self._journal is not None:
-                    if record._record._prior(1) is not None:
-                        raise ledger.EffectError("D5 journal recording inside START is forbidden")
-                    ledger._active()
-                    ledger._outcome(outcome)
-                    with ledger._checked(self._handle) as (_, _, entry):
-                        ledger._require(type(self._handle) is ledger.Receipt and
-                                        entry["state"] in ("submitted", "completed"), ledger.NOT_SUBMITTED)
-                    try:
-                        self._journal.record(outcome)
-                    except BaseException:
-                        self.uncertain()
-                        raise
                 return ledger.complete(self._handle, outcome)
 
     def uncertain(self):
         """Record unknown for this operation; never assert submission."""
-        if self._journal is not None:
-            self._journal._owned()
         handle = self._handle
         attempt = ledger.Attempt(handle.effect_id, handle._directory,
                                  handle._binding, handle._secret)
@@ -97,4 +79,5 @@ def bind(handle, *, journal=None):
                 if type(journal) is not BoundJournal:
                     raise ledger.EffectError(MISMATCH)
                 journal.attach(handle)
-            return _Completion(handle, journal)
+                return journal
+            return _Completion(handle)

@@ -1,4 +1,4 @@
-"""R4 real-journal binding, Finish/revoke barriers, and cmd_merge's local M6."""
+"""R4 journal and cmd_merge M6."""
 from dataclasses import FrozenInstanceError, replace
 import fcntl
 import json
@@ -16,9 +16,8 @@ import swarm
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD = dict(unit='u', repo='r', pr='1', target='main', head='a'*40,
-       merged_as='b'*40, method='squash', merged=True, attested=True,
-       by='fixture', at='fixture-time', schema_version=1)
-
+  merged_as='b'*40, method='squash', merged=True, attested=True,
+  by='fixture', at='fixture-time', schema_version=1)
 
 class TestJournal(unittest.TestCase):
   eq = unittest.TestCase.assertEqual
@@ -45,8 +44,8 @@ class TestJournal(unittest.TestCase):
     def start():
       self.eq(len(bound), 1)
       self.assertIs(bound[0].operation, c.operation)
-      self.eq((bound[0].specification, bound[0].directory, bound[0].owner, self.path.exists()),
-          (self.spec, str(c.directory), os.getpid(), False))
+      self.eq((bound[0].spec, bound[0].directory, bound[0].owner, self.path.exists()),
+        (self.spec, str(c.directory), os.getpid(), False))
     c.boundary.on_start = start
     append = swarm.SJ._fsync_append
     def record(path, data):
@@ -142,7 +141,7 @@ class TestJournal(unittest.TestCase):
     self.eq(len(self.path.read_text().splitlines()), 2)
 
   def test_recorder_failure(self):
-    for after, ledger_first in ((False, False), (True, False), (False, True)):
+    for after, ledger_first in ((False, False), (True, False), (False, True), (True, True)):
       with self.subTest(after=after, ledger_first=ledger_first):
         c = t.TestSubmission()
         c.setUp()
@@ -159,13 +158,15 @@ class TestJournal(unittest.TestCase):
         def fail(path, data):
           if after:
             original(path, data)
+          if ledger_first:
+            t.control.revoke(*c.args, 151, 'recorder failure')
           raise OSError('recorder acknowledgement lost')
         with patch.object(swarm.SJ, '_fsync_append', side_effect=fail), \
             patch.object(t.completion, 'bind', side_effect=binding):
-          with self.raises(t.ledger.EffectError if ledger_first else OSError,
-                  'conflict' if ledger_first else 'acknowledgement lost'):
+          with self.raises(OSError, 'acknowledgement lost'):
             c.submit(journal=journal.prepare(c.state_dir, RECORD))
-        self.eq(c.rows()[0]['state'], 'completed' if ledger_first else 'unknown')
+        self.eq(sorted(r['state'] for r in c.rows()),
+          ['completed', 'unknown'] if ledger_first else ['unknown'])
         self.eq(c.probe('drain'), 'blocked')
         before = path.read_bytes() if path.exists() else None
         self.eq(json.loads(before) if before else None, RECORD if after else None)
@@ -173,14 +174,17 @@ class TestJournal(unittest.TestCase):
           saved[0].complete(t.OK)
         self.eq(path.read_bytes() if path.exists() else None, before)
         unresolved = t.ledger.unresolved(*c.args)
-        self.eq(len(unresolved), 0 if ledger_first else 1)
+        self.eq(len(unresolved), 1)
         self.yes(all(r['reconciliation_required'] for r in unresolved))
+        if ledger_first:
+          self.eq(unresolved[0]['binding']['correlation'],
+            dict(request_id=saved[0]._state["handle"].effect_id, journal=str(path)))
 
   def test_binding_refusals(self):
     c = self.c
     with self.assertRaises(FrozenInstanceError):
       self.spec.path = 'elsewhere'
-    bound = journal.bind(self.spec, c.operation, c.state_dir, str(c.directory))
+    bound = journal.bind(self.spec, c.operation, c.args, str(c.directory))
     self.submit()  # Obtain a separate completed receipt for mismatch checks.
     row = c.rows()[0]
     request = dict(record_id=c.request['grant_id'], custody=row['binding']['custody'],
@@ -190,7 +194,7 @@ class TestJournal(unittest.TestCase):
     with self.raises(t.ledger.EffectError, 'invocation mismatch'):
       t.completion.bind(receipt, journal=bound)
     other = replace(c.operation, request_id='other', intent=b'\0')
-    bound = journal.bind(self.spec, other, c.state_dir, str(c.directory))
+    bound = journal.bind(self.spec, other, c.args, str(c.directory))
     cap = t.completion.bind(receipt, journal=bound)
     for call in (lambda: cap.complete(t.OK), cap.uncertain):
       with patch.object(journal.os, 'getpid', return_value=os.getpid()+1):
@@ -205,6 +209,22 @@ class TestJournal(unittest.TestCase):
     self.eq(self.path.read_bytes(), before)
     thread, results = c.launch(lambda: cap.complete(t.OK))
     self.eq(c.join(thread, results), t.OK)
+    after = self.path.read_bytes()
+    self.eq(cap.complete(t.OK), t.OK)
+    self.eq(self.path.read_bytes(), after)
+
+  def test_prior_outcome_conflict(self):
+    bind = t.completion.bind
+    def binding(*args, **kwargs):
+      cap = bind(*args, **kwargs)
+      if kwargs.get('journal') is not None:
+        t.ledger.complete(args[0], dict(status='failed', detail='prior failure'))
+      return cap
+    with patch.object(t.completion, 'bind', side_effect=binding):
+      with self.raises(t.ledger.EffectError, 'conflict'):
+        self.submit()
+    self.no(self.path.exists())
+    self.eq(self.c.probe('drain'), 'blocked')
 
   def test_failed_effect(self):
     self.c.boundary.on_finish = lambda: dict(status='failed', detail='no merge')
@@ -212,13 +232,12 @@ class TestJournal(unittest.TestCase):
     self.no(self.path.exists())
     self.eq(self.c.rows()[0]['state'], 'completed')
 
-
 class TestM6(unittest.TestCase):
   eq = unittest.TestCase.assertEqual
   yes = unittest.TestCase.assertTrue
   def capture(self, version, case):
     result = subprocess.run([sys.executable, '-B', str(ROOT / 'tests/fixtures/d5/r4_m6.py'),
-                version, case], capture_output=True, text=True, timeout=40)
+      version, case], capture_output=True, text=True, timeout=40)
     self.eq(result.returncode, 0, result.stdout + result.stderr)
     return json.loads(result.stdout)
 
@@ -235,7 +254,6 @@ class TestM6(unittest.TestCase):
   def test_premature_activation(self):
     capture = self.capture('current', 'active')
     self.eq(capture, dict(result=swarm.EXIT_CONFLICT, events=[], changed={}, removed=[]))
-
 
 if __name__ == '__main__':
   unittest.main()
