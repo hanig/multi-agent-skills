@@ -108,9 +108,10 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
     if not isinstance(operation, Operation):
         raise ValueError("D5 operation requires immutable fields")
     provider = completion.provider_for(operation.kind)
-    entry = readiness.bound(ready, registry.lookup(checkout, plan_id, state_dir))
+    entry = registry.lookup(checkout, plan_id, state_dir)
     if entry is None:
         raise AuthorityError("not registered")
+    readiness.bound(ready, entry)
     request = dict(grant_id=grant_id, session_id=session_id, anchor=anchor,
                    generation=generation, scope=operation.scope)
     with protocol.pin(entry["record_dir"]) as pinned, pinned.drain() as drain:
