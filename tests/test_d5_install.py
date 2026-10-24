@@ -19,7 +19,6 @@ import d5_host as host
 import d5_locks as locks
 import d5_protocol_locks as protocol
 from tests.test_d5_authority import grant, MANDATE
-from tests.fixtures.d5.ready import ready
 from tests.test_d5_locks import isolate_pool
 
 ANCHOR = host.ProcessIdentity(42, 9000001)
@@ -49,14 +48,6 @@ class TestInstall(unittest.TestCase):
     def directory(self, name, kind="initial"):
         directory = self.root / name
         directory.mkdir(mode=0o700)
-        if kind == "replace":
-            repo, state = directory / "repo", directory / "state"
-            state.mkdir()
-            subprocess.run(["git", "init", str(repo)], check=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
-            with mock.patch.object(install.registry.CP, "_external_base",
-                                   return_value=directory / "external"):
-                directory = Path(ready(self, repo, "p", state)["record_dir"])
         if kind != "initial":
             store.create(directory, grant())
         return directory
@@ -357,7 +348,7 @@ class TestInstall(unittest.TestCase):
         subprocess.run(["git", "init", str(repo)], check=True,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
         with mock.patch.object(install.registry.CP, "_external_base", return_value=self.root / "external"):
-            entry = ready(self, repo, "p", state)
+            entry = install.registry.register(repo, "p", state)
         directory = Path(entry["record_dir"])
         self.assertTrue(directory.is_dir())
         self.assertFalse((directory / store.RECORD_NAME).exists())
@@ -378,13 +369,9 @@ class TestInstall(unittest.TestCase):
                 other = self.directory(second.name + "/record", kind)
                 prior = Path.cwd()
                 try:
-                    os.chdir(directory.parent)
-                    relative = Path(directory.name)
-                    # The peer fixture uses the same relative spelling.
-                    if other.name != directory.name:
-                        (other.parent / directory.name).symlink_to(other, target_is_directory=True)
-                    with self.waiter(lambda: self.call(kind, relative), directory) as (results, errors):
-                        os.chdir(other.parent)
+                    os.chdir(first)
+                    with self.waiter(lambda: self.call(kind, Path("record")), directory) as (results, errors):
+                        os.chdir(second)
                 finally:
                     os.chdir(prior)
                 self.assertEqual(errors, [])

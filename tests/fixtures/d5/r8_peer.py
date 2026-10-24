@@ -33,9 +33,7 @@ def setup(root):
         stack.enter_context(mock.patch.object(t.registry, 'd5_active', return_value=True))
         stack.enter_context(mock.patch.object(t.host, 'session_anchor',
                                               return_value=('native', t.ANCHOR)))
-        case = t.unittest.TestCase()
-        stack.callback(case.doCleanups)
-        entry = t.ready(case, *args)
+        entry = t.registry.register(*args)
         t.lease.grant(*args, issued_at=100, confirmed_at=100, expires_at=200,
             mandate_bytes=t.MANDATE, scope=scope, owner_response='fixture',
             displayed_bounds='fixture')

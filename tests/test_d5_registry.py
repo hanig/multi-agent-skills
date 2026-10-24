@@ -19,8 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
 import d5_registry as R
 import d5_lease as lease
-import d5_install as install
-from tests.fixtures.d5.ready import ready
 import d5_authority_store as store
 
 
@@ -37,7 +35,7 @@ class TestD5VersionGate(unittest.TestCase):
                  mock.patch.object(R, "_directory", side_effect=AssertionError("R/P")), \
                  mock.patch.object(R, "_entries", side_effect=AssertionError("registry")), \
                  mock.patch.object(store, "present", side_effect=AssertionError("lstat")):
-                for call in (install.stage, R.lookup):
+                for call in (R.register, R.lookup):
                     with self.subTest(operation=call.__name__), \
                          self.assertRaisesRegex(R.AuthorityError, "unsupported Git version"):
                         call("/unused", "p", "/unused-state")
@@ -47,7 +45,7 @@ class TestD5VersionGate(unittest.TestCase):
             with self.assertRaisesRegex(R.AuthorityError, "D5 is not active"):
                 R.register("/unused", "p", "/unused-state")
             with mock.patch.object(R, "d5_active", return_value=True):
-                for call in (install.stage, R.lookup):
+                for call in (R.register, R.lookup):
                     with self.assertRaisesRegex(R.AuthorityError, "invalid plan_id"):
                         call("/unused", "../p", "/unused-state")
 
@@ -93,13 +91,7 @@ class TestD5Registry(unittest.TestCase):
 
     def register(self, repo=None, plan="p", state=None):
         with mock.patch.object(R, "d5_active", return_value=True):
-            if self._testMethodName in (
-                    "test_idempotent_retry_syncs_file_and_all_directory_links",
-                    "test_lookup_and_lease_status_create_nothing_and_inherit_refusal"):
-                if not hasattr(self, "ready_entry"):
-                    self.ready_entry = ready(self, self.repo, "p", self.state)
-                return R.register(repo or self.repo, plan, state or self.state)
-            return install.stage(repo or self.repo, plan, state or self.state)
+            return R.register(repo or self.repo, plan, state or self.state)
 
     def tree(self, root=None):
         result = {}
@@ -195,7 +187,7 @@ class TestD5Registry(unittest.TestCase):
         first = self.register()
         fd = os.open(str(self.state), os.O_RDONLY | os.O_DIRECTORY)
         self.addCleanup(os.close, fd)  # Hold old inode to prevent immediate reuse.
-        self.state.rename(self.d / "retired-state")
+        self.state.rmdir()
         self.state.mkdir()
         self.assertNotEqual(first["state_key"], [self.state.stat().st_dev, self.state.stat().st_ino])
         before = self.tree(self.root)
@@ -222,7 +214,7 @@ class TestD5Registry(unittest.TestCase):
                 self.register(state=path)
         with mock.patch.object(R, "d5_active", return_value=True):
             with self.assertRaisesRegex(R.AuthorityError, "state_dir is required"):
-                install.stage(self.repo, "p", None)
+                R.register(self.repo, "p", None)
         self.assertFalse(self.base.exists())
 
     def test_missing_lookup_creates_nothing(self):
@@ -449,7 +441,7 @@ class TestD5Registry(unittest.TestCase):
         # flock on independently opened descriptors serializes even same-process writers.
         with mock.patch.object(R, "d5_active", return_value=True):
             with ThreadPoolExecutor(max_workers=4) as pool:
-                entries = list(pool.map(lambda _: install.stage(self.repo, "p", self.state), range(4)))
+                entries = list(pool.map(lambda _: R.register(self.repo, "p", self.state), range(4)))
         self.assertTrue(all(entry == entries[0] for entry in entries))
         self.assertEqual(len(json.loads((self.root / "registry.json").read_bytes())["entries"]), 1)
 
@@ -1224,7 +1216,7 @@ class TestD5Registry(unittest.TestCase):
         for plan, state, message in (
                 ("p", other, "registry: state_key mismatch: state directory replaced or conflicting"),
                 ("unregistered", self.state, "registry: state_key already registered to another plan")):
-            for operation in (R.lookup, install.stage):
+            for operation in (R.lookup, R.register):
                 before = self.tree()
                 with self.subTest(plan=plan, operation=operation.__name__), \
                      mock.patch.object(R, "d5_active", return_value=True), \
