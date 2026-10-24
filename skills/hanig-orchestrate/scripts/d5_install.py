@@ -74,19 +74,8 @@ def install_initial(directory, record):
 
 def replace_authority(directory, record):
     """Apply the store's replacement rules to the freshly read predecessor."""
-    _active()
-    directory = os.fsdecode(directory)
-    if ".." in directory.split(os.sep):
-        raise store.AuthorityError("D5 locator contains ..")
-    directory = _bound(directory, os.getcwdb() if not os.path.isabs(directory) else b"")
-    # Resolve the state binding by local IO before any record lock acquisition.
-    from pathlib import Path
-    installed = readiness._validated(readiness._read(Path(directory) / readiness.INSTALLATION))
-    with readiness.installer_lease(installed["state_dir"]):
-        readiness.require(installed["state_dir"])
-        with _installation(directory) as (directory, _, _):
-            readiness.successor_gate(installed)
-            return store.replace(directory, record)
+    with _installation(directory) as (directory, _, _):
+        return store.replace(directory, record)
 
 
 def claim_custody(directory, *, mandate_path):
