@@ -17,27 +17,23 @@ import swarm
 import d5_activation
 
 def capture(version, case):
-  module = swarm
+  m = swarm
   if version == 'base':
-    raw = subprocess.check_output(['git', 'show',
-      '276e76af05a83846ea9c45ae7d030cf11a2e4e94:skills/hanig-swarm/scripts/swarm.py'], cwd=ROOT)
-    module = types.ModuleType('r4_base')
-    module.__file__ = swarm.__file__
-    exec(compile(raw, module.__file__, 'exec'), module.__dict__)
-  with tempfile.TemporaryDirectory() as temporary:
-    root = Path(temporary).resolve()
+    raw = subprocess.check_output(['git', 'show', '276e76af05a83846ea9c45ae7d030cf11a2e4e94:skills/hanig-swarm/scripts/swarm.py'], cwd=ROOT)
+    m = types.ModuleType('r4_base')
+    m.__file__ = swarm.__file__
+    exec(compile(raw, m.__file__, 'exec'), m.__dict__)
+  with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp).resolve()
     repo, state = root / 'repo', root / 'state'
     subprocess.run(['git', 'init', str(repo)], capture_output=True, check=True)
     state.mkdir()
     if case == 'corrupt':
       (state / swarm.SE.MERGE_RECEIPTS).write_bytes(b'bad\n')
-    args = argparse.Namespace(state_dir=None if case == 'active' else str(state),
-      unit='u', repo='r', pr='1', target='main', head='a'*40, merged_as='b'*40,
-      method='invalid' if case == 'invalid' else 'squash',
-      target_commit='c'*40, integration_status='fixture')
+    args = argparse.Namespace(state_dir=None if case == 'active' else str(state), unit='u', repo='r', pr='1', target='main', head='a'*40, merged_as='b'*40,
+      method='invalid' if case == 'invalid' else 'squash', target_commit='c'*40, integration_status='fixture')
     def snapshot():
-      return {str(p.relative_to(root)): p.read_bytes().hex() if p.is_file() else None
-        for p in root.rglob('*')}
+      return {str(p.relative_to(root)): p.read_bytes().hex() if p.is_file() else None for p in root.rglob('*')}
     before, events, enabled = snapshot(), [], False
     def audit(event, values):
       if enabled:
@@ -50,19 +46,18 @@ def capture(version, case):
     sys.addaudithook(audit)
     os.chdir(repo)
     with patch.object(d5_activation, 'd5_active', return_value=case == 'active'), \
-        patch.object(module.CP, '_external_base', return_value=root / 'external'), \
-        patch.object(module.time, 'strftime', return_value='fixture-time'), \
+        patch.object(m.CP, '_external_base', return_value=root / 'external'), \
+        patch.object(m.time, 'strftime', return_value='fixture-time'), \
         patch.dict(os.environ, {'USER': 'fixture'}), \
         redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
       enabled = True
       try:
-        result = module.cmd_merge(args)
+        result = m.cmd_merge(args)
       finally:
         enabled = False
         os.chdir(ROOT)
     after = snapshot()
-    data = dict(result=result, events=events, removed=sorted(set(before) - set(after)),
-      changed={k: v for k, v in after.items() if k not in before or before[k] != v})
+    data = dict(result=result, events=events, removed=sorted(set(before) - set(after)), changed={k: v for k, v in after.items() if k not in before or before[k] != v})
     return json.loads(json.dumps(data).replace(str(root), '<root>'))
 
 if __name__ == '__main__':

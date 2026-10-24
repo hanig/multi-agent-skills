@@ -16,8 +16,7 @@ import swarm
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD = dict(unit='u', repo='r', pr='1', target='main', head='a'*40,
-  merged_as='b'*40, method='squash', merged=True, attested=True,
-  by='fixture', at='fixture-time', schema_version=1)
+  merged_as='b'*40, method='squash', merged=True, attested=True, by='fixture', at='fixture-time', schema_version=1)
 
 class TestJournal(unittest.TestCase):
   eq = unittest.TestCase.assertEqual
@@ -36,25 +35,38 @@ class TestJournal(unittest.TestCase):
 
   def test_pre_start_binding(self):
     c, bound = self.c, []
-    original = journal.bind
+    real = journal.bind
     def binding(*args):
-      result = original(*args)
+      result = real(*args)
       bound.append(result)
       return result
     def start():
       self.eq(len(bound), 1)
       self.assertIs(bound[0].operation, c.operation)
-      self.eq((bound[0].spec, bound[0].directory, bound[0].owner, self.path.exists()),
-        (self.spec, str(c.directory), os.getpid(), False))
+      self.eq((bound[0].spec, bound[0].directory, bound[0].owner, self.path.exists()), (self.spec, str(c.directory), os.getpid(), False))
     c.boundary.on_start = start
     append = swarm.SJ._fsync_append
+    ready, resume = threading.Event(), threading.Event()
     def record(path, data):
       self.eq(c.probe('start'), 'available')
       self.eq(c.probe('drain'), 'blocked')
+      ready.set()
+      if not resume.wait(15):
+        raise AssertionError('recorder timeout')
       return append(path, data)
     with patch.object(journal, 'bind', side_effect=binding), \
         patch.object(swarm.SJ, '_fsync_append', side_effect=record):
-      self.eq(self.submit().outcome, t.OK)
+      first, results = c.launch(self.submit)
+      try:
+        self.yes(ready.wait(10), 'recorder timeout')
+        second, duplicates = c.launch(lambda: bound[0].complete(dict(t.OK)))
+        second.join(3)
+      finally:
+        resume.set()
+        result = c.join(first, results)
+      self.assertIsInstance(result, t.submission.Result)
+      self.eq(result.outcome, t.OK)
+      self.eq(c.join(second, duplicates), t.OK)
     self.eq(json.loads(self.path.read_bytes()), RECORD)
     self.eq(c.rows()[0]['state'], 'completed')
     self.eq(c.probe('drain'), 'available')
@@ -69,11 +81,11 @@ class TestJournal(unittest.TestCase):
       with self.raises(t.authority.AuthorityError, 'expired'):
         self.submit()
     c.clock.return_value = 150
-    immutable = self.spec
-    self.spec = replace(immutable, payload=bytearray(immutable.payload))
+    spec = self.spec
+    self.spec = replace(spec, payload=bytearray(spec.payload))
     with self.raises(t.ledger.EffectError, 'target mismatch'):
       self.submit()
-    self.spec = replace(immutable, path=str(c.root / 'other'))
+    self.spec = replace(spec, path=str(c.root / 'other'))
     with self.raises(t.ledger.EffectError, 'target mismatch'):
       self.submit()
     self.eq(c.boundary.calls, [])
@@ -97,17 +109,17 @@ class TestJournal(unittest.TestCase):
     def paused(bound, outcome):
       ready.set()
       if not resume.wait(10):
-        raise AssertionError('recorder watchdog')
+        raise AssertionError('recorder timeout')
       return record(bound, outcome)
-    original = swarm.SJ._fsync_append
+    real = swarm.SJ._fsync_append
     def append(path, data):
       reached.set()
-      return original(path, data)
+      return real(path, data)
     with patch.object(swarm.SJ, '_fsync_append', side_effect=append), \
         patch.object(journal.BoundJournal, 'record', paused):
       thread, results = c.launch(self.submit)
       try:
-        self.yes(ready.wait(10), 'recorder watchdog')
+        self.yes(ready.wait(10), 'recorder timeout')
         self.eq(c.boundary.calls[-1], ('finish',))
         self.eq(c.probe('start'), 'available')
         self.eq(c.probe('drain'), 'blocked')
@@ -141,32 +153,31 @@ class TestJournal(unittest.TestCase):
     self.eq(len(self.path.read_text().splitlines()), 2)
 
   def test_recorder_failure(self):
-    for after, ledger_first in ((False, False), (True, False), (False, True), (True, True)):
-      with self.subTest(after=after, ledger_first=ledger_first):
+    for after, prior in ((False, False), (True, False), (False, True), (True, True)):
+      with self.subTest(after=after, prior=prior):
         c = t.TestSubmission()
         c.setUp()
         self.addCleanup(c.doCleanups)
         path = swarm.merge_journal_path(c.state_dir)
-        original, saved, bind = swarm.SJ._fsync_append, [], t.completion.bind
+        real, saved, bind = swarm.SJ._fsync_append, [], t.completion.bind
         def binding(*args, **kwargs):
           cap = bind(*args, **kwargs)
           if kwargs.get('journal') is not None:
             saved.append(cap)
-            if ledger_first:
+            if prior:
               t.ledger.complete(args[0], t.OK)
           return cap
         def fail(path, data):
           if after:
-            original(path, data)
-          if ledger_first:
+            real(path, data)
+          if prior:
             t.control.revoke(*c.args, 151, 'recorder failure')
           raise OSError('recorder acknowledgement lost')
         with patch.object(swarm.SJ, '_fsync_append', side_effect=fail), \
             patch.object(t.completion, 'bind', side_effect=binding):
           with self.raises(OSError, 'acknowledgement lost'):
             c.submit(journal=journal.prepare(c.state_dir, RECORD))
-        self.eq(sorted(r['state'] for r in c.rows()),
-          ['completed', 'unknown'] if ledger_first else ['unknown'])
+        self.eq(sorted(r['state'] for r in c.rows()), ['completed', 'unknown'] if prior else ['unknown'])
         self.eq(c.probe('drain'), 'blocked')
         before = path.read_bytes() if path.exists() else None
         self.eq(json.loads(before) if before else None, RECORD if after else None)
@@ -176,19 +187,17 @@ class TestJournal(unittest.TestCase):
         unresolved = t.ledger.unresolved(*c.args)
         self.eq(len(unresolved), 1)
         self.yes(all(r['reconciliation_required'] for r in unresolved))
-        if ledger_first:
-          self.eq(unresolved[0]['binding']['correlation'],
-            dict(request_id=saved[0]._state["handle"].effect_id, journal=str(path)))
+        if prior:
+          self.eq(unresolved[0]['binding']['correlation'], dict(request_id=saved[0]._state["handle"].effect_id, journal=str(path)))
 
   def test_binding_refusals(self):
     c = self.c
     with self.assertRaises(FrozenInstanceError):
       self.spec.path = 'elsewhere'
     bound = journal.bind(self.spec, c.operation, c.args, str(c.directory))
-    self.submit()  # Obtain a separate completed receipt for mismatch checks.
+    self.submit()
     row = c.rows()[0]
-    request = dict(record_id=c.request['grant_id'], custody=row['binding']['custody'],
-      kind='fixture', scope=c.scope, correlation={'request_id': 'other', 'intent': '00'})
+    request = dict(record_id=c.request['grant_id'], custody=row['binding']['custody'], kind='fixture', scope=c.scope, correlation={'request_id': 'other', 'intent': '00'})
     attempt = t.ledger.prepare(*c.args, **request)
     receipt = t.ledger._classify(attempt, 'submitted')
     with self.raises(t.ledger.EffectError, 'invocation mismatch'):
@@ -236,8 +245,7 @@ class TestM6(unittest.TestCase):
   eq = unittest.TestCase.assertEqual
   yes = unittest.TestCase.assertTrue
   def capture(self, version, case):
-    result = subprocess.run([sys.executable, '-B', str(ROOT / 'tests/fixtures/d5/r4_m6.py'),
-      version, case], capture_output=True, text=True, timeout=40)
+    result = subprocess.run([sys.executable, '-B', str(ROOT / 'tests/fixtures/d5/r4_m6.py'), version, case], capture_output=True, text=True, timeout=40)
     self.eq(result.returncode, 0, result.stdout + result.stderr)
     return json.loads(result.stdout)
 
