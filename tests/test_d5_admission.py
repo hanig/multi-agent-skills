@@ -24,6 +24,7 @@ import d5_host as host
 import d5_lease as lease
 import d5_protocol_locks as protocol
 import d5_registry as registry
+from tests.fixtures.d5.ready import ready
 from tests.test_d5_locks import isolate_pool
 
 MANDATE = b"fixture mandate\r\n\xff"
@@ -51,7 +52,7 @@ class TestAdmission(unittest.TestCase):
                                              return_value=("native", ANCHOR)))
         self.clock = self.stack.enter_context(mock.patch.object(admission.time, "time", return_value=150))
         self.args = self.repo, "p", self.state
-        self.entry = registry.register(*self.args)
+        self.entry = ready(self, *self.args)
         self.directory = Path(self.entry["record_dir"])
         self.scope = dict(plans=["p"], repositories=["r"], actions=["write"], trackers=["t"])
         lease.grant(*self.args, issued_at=100, confirmed_at=100, expires_at=200,
