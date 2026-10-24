@@ -122,7 +122,7 @@ class BoundJournal:
       L._write(fd, name, entry)
 
   def record(self, outcome, *, reconcile=False):
-    with self._locked() as fh:
+    with self._drain(), self._locked() as fh:
       found = self._lookup()
       if reconcile:
         L._require(found is not None, "D5 journal absent; reconciliation unresolved")
