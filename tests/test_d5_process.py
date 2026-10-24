@@ -333,6 +333,26 @@ class TestProcess(unittest.TestCase):
             self.eq(popen.call_args.kwargs['stdout'], f.fileno())
             self.eq(popen.call_args.kwargs['stderr'], f.fileno())
 
+    def test_stream_snapshot_reaches_child(self):
+        _, drain = self.holding()
+        child = self.root / 'observe.py'
+        child.write_text('import os,json,sys; s=os.fstat(1); '
+                         'print(json.dumps([s.st_dev,s.st_ino]),file=sys.stderr)')
+        with tempfile.TemporaryFile() as f:
+            calls = []
+            class Stream:
+                def fileno(self):
+                    calls.append(1)
+                    return f.fileno() if len(calls) == 1 else drain
+            with designated(str(child)):
+                proc = self.own(process.protected_spawn(
+                    self.directory, drain, str(child), stdout=Stream()))
+                _, error = proc.communicate(timeout=5)
+            self.eq(proc.returncode, 0)
+            self.eq(json.loads(error), identity(f.fileno()))
+            self.assertNotEqual(json.loads(error), identity(drain))
+            self.eq(calls, [1])
+
     def test_protocol_locks_cannot_be_communication(self):
         _, drain = self.holding()
         for fd in (drain, self.opened('authority.start.lock'), self.opened('authority.lock')):

@@ -92,10 +92,11 @@ class TestLauncher(unittest.TestCase):
 	def test_sol_stdout_pipe(self):
 		self.switching('stdout', [L.CAPTURE, sp.PIPE])
 	def test_snapshot_leaves(self):
+		calls = []
 		class Int(int):
-			def __index__(self): self.fail()
-			def __eq__(self, value): self.fail()
-			def __hash__(self): self.fail()
+			def __index__(self): calls.append('index'); return -3
+			def __eq__(self, value): calls.append('eq'); return True
+			def __hash__(self): calls.append('hash'); return 0
 		class Dict(dict): pass
 		for kw in ({'stdin': Int(-3)}, {'stdout': Int(-3)}, {'cwd': Equal('.')},
 				{'stdout': L.Log(Equal(str(self.tmp / 'log')))},
@@ -103,6 +104,37 @@ class TestLauncher(unittest.TestCase):
 				{'env': Dict()}, {'env': {Equal('k'): 'v'}},
 				{'env': {'k': Equal('v')}}, {'new_session': Int(1)}):
 			with self.subTest(kw=kw): self.refused(L.Options(**kw))
+		self.eq(calls, [])
+	def test_raising_subclass_properties(self):
+		for base, fields in ((L.Options, ('cwd', 'env', 'stdin', 'stdout', 'stderr', 'new_session')),
+				(L.Log, ('path', 'mode'))):
+			for field in fields:
+				calls = []
+				def raised(obj):
+					calls.append(field)
+					raise AssertionError('caller property was read')
+				obj = object.__new__(type('Raising', (base,), {field: property(raised)}))
+				with self.subTest(base=base, field=field):
+					self.refused(L.Options(stdout=obj) if base is L.Log else obj)
+					self.eq(calls, [])
+	def test_fspath_result_type(self):
+		class Bytes(bytes): pass
+		for value in (Equal('.'), Bytes(b'.'), 1):
+			for field in ('cwd', 'log', 'argv'):
+				calls = []
+				class Path:
+					def __fspath__(obj): calls.append(1); return value
+				path = Path()
+				with self.subTest(value=type(value), field=field):
+					if field == 'argv':
+						with mock.patch.object(L.subprocess, 'Popen') as spawned:
+							with self.assertRaises((TypeError, ValueError)):
+								L.launch([path])
+							spawned.assert_not_called()
+					else:
+						self.refused(L.Options(**({'cwd': path} if field == 'cwd'
+								else {'stdout': L.Log(path)})))
+					self.eq(calls, [1])
 	def test_snapshot_delivery(self):
 		class PathOnce:
 			def __fspath__(obj):
