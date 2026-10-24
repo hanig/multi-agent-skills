@@ -93,17 +93,18 @@ class TestEffectChild(unittest.TestCase):
         self.assertFalse(adopted['inheritable'])
         self.assertEqual(self.case.rows(), [])  # Launch is not submission.
         self.send(proc, 'request')
-        self.event(proc, 'waiting')
-        self.send(proc, 'finish')
         result = self.event(proc, 'returned')
-        self.assertIsNone(result['error'])
-        self.assertFalse(result['retained'])
+        self.assertEqual(result['error'], 'D5 readiness: caller-held coordinator lease required')
+        self.assertTrue(result['retained'])
+        self.assertEqual(result['calls'], [])
+        self.assertEqual(self.case.rows(), [])
         self.assertEqual(result['order'][:2], ['set_inheritable', 'pin'])
         # R7-UNLOCK-ON-ADOPTED-CLOSE: child's close must leave our SH intact.
         self.assertEqual(self.case.probe('drain'), 'blocked')
         stack.close()
-        self.assertEqual(self.case.probe('drain'), 'available')
+        self.assertEqual(self.case.probe('drain'), 'blocked')
         self.finish(proc)
+        self.assertEqual(self.case.probe('drain'), 'available')
 
     def test_launched_child_rechecks_at_request(self):
         # U3-M9 / R7-TRUST-LAUNCH-CHECK: revocation outside final START.
@@ -114,7 +115,7 @@ class TestEffectChild(unittest.TestCase):
         stack.close()
         self.send(proc, 'request')
         result = self.event(proc, 'returned')
-        self.assertEqual(result['error'], 'D5 authority is invalidated')
+        self.assertEqual(result['error'], 'D5 readiness: caller-held coordinator lease required')
         self.assertEqual(result['calls'], [])
         self.assertEqual(self.case.rows(), [])
         self.assertTrue(result['retained'])
@@ -126,62 +127,46 @@ class TestEffectChild(unittest.TestCase):
         # U3-M5: child's fresh R6 operation owns its local R4 capability.
         proc, _ = self.launch('close-barrier', ancestor=True)
         self.event(proc, 'adopted')
-        self.send(proc, 'request')
-        self.event(proc, 'waiting')
-        self.assertEqual(self.case.rows()[0]['state'], 'submitted')
         os.write(self.death, b'die')
         self.assertEqual(proc.wait(timeout=15), 0)
         self.assertEqual(self.case.probe('drain'), 'blocked')
         self.assertEqual(self.case.probe('start'), 'available')
-        # Completion must not reauthorize after revocation or ancestor death.
         t.control.revoke(*self.case.args, 151, 'ancestor gone')
-        self.send(proc, 'finish')
-        self.event(proc, 'closing')
-        row, = self.case.rows()
-        self.assertEqual(row['state'], 'completed')
-        self.assertEqual(row['outcome'], t.OK)
-        self.assertEqual(row['binding']['correlation']['request_id'], 'child')
-        # R6 has returned and closed its holder; R7's original still protects.
-        self.assertEqual(self.case.probe('drain'), 'blocked')
-        self.send(proc, 'close')
+        self.send(proc, 'request')
         result = self.event(proc, 'returned')
-        self.assertIsNone(result['error'])
-        self.assertEqual(result['calls'], ['start', 'finish'])
-        self.assertFalse(result['retained'])
-        self.assertEqual(self.case.probe('drain'), 'available')
+        self.assertEqual(result['error'], 'D5 readiness: caller-held coordinator lease required')
+        self.assertEqual(result['calls'], [])
+        self.assertEqual(self.case.rows(), [])
+        self.assertTrue(result['retained'])
+        self.assertEqual(self.case.probe('drain'), 'blocked')
         self.finish(proc)
+        self.assertEqual(self.case.probe('drain'), 'available')
 
     def test_uncertainty_and_errors_retain_original_until_exit(self):
         # R7-RELEASE-UNKNOWN / R7-CLOSE-ON-ERROR: fstat of the original
         # prevents R6's separate retained holder from masking this defect.
-        scenarios = [('unknown', 'unknown', None),
-            ('start-error', 'unknown', 'start error'),
-            ('finish-error', 'unknown', 'finish error'),
-            ('accounting-error', 'submitted', t.ledger.DURABILITY),
-            ('inactive-completion', 'submitted', 'D5 inactive'),
-            ('close-error', 'completed', 'adopted close error')]
-        for mode, state, error in scenarios:
+        # These child-only paths are deferred with R8b; none may reach START.
+        scenarios = ('unknown', 'start-error', 'finish-error', 'accounting-error',
+                     'inactive-completion', 'close-error')
+        for mode in scenarios:
             with self.subTest(mode=mode):
                 proc, stack = self.launch(mode)
                 self.event(proc, 'adopted')
                 stack.close()
-                before = {r['effect_id'] for r in self.case.rows()}
+                before = self.case.rows()
                 self.send(proc, 'request')
-                self.event(proc, 'waiting')
-                self.send(proc, 'finish')
                 result = self.event(proc, 'returned')
-                self.assertEqual(result['error'], error)
+                self.assertEqual(result['error'], 'D5 readiness: caller-held coordinator lease required')
                 self.assertTrue(result['retained'])
-                self.assertEqual(result['calls'], ['start', 'finish'])
-                row, = [r for r in self.case.rows() if r['effect_id'] not in before]
-                self.assertEqual(row['state'], state)
+                self.assertEqual(result['calls'], [])
+                self.assertEqual(self.case.rows(), before)
                 self.assertEqual(self.case.probe('drain'), 'blocked')
                 self.finish(proc)
                 self.assertEqual(self.case.probe('drain'), 'available')
 
     def test_not_submitted_and_inactive(self):
         for mode, error, state, retained, calls in [
-                ('not-submitted', None, 'not_submitted', False, ['start']),
+                ('not-submitted', 'D5 readiness: caller-held coordinator lease required', None, True, []),
                 ('inactive', 'D5 is inactive', None, True, [])]:
             with self.subTest(mode=mode):
                 proc, stack = self.launch(mode)

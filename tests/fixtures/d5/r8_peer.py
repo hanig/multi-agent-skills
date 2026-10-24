@@ -147,8 +147,9 @@ def closed_streams(root, low_first=False):
         case.stack.close()
         case.eq(case.probe(), 'blocked')
         case.complete_effect(proc)
-        case.eq(case.probe(), 'available')
+        case.eq(case.probe(), 'blocked')
         case.finish(proc, None)
+        case.eq(case.probe(), 'available')
         _, fd = case.holding()
         for stream in ('stdin', 'stdout', 'stderr'):
             saved = [(n, os.dup(n)) for n in (0, 1, 2)]
@@ -189,7 +190,7 @@ def installer(raw):
     def replacing(*args):
         rows = [json.loads(p.read_bytes()) for p in
                 (directory / t.ledger.DIRECTORY).glob('*.json')]
-        assert len(rows) == 1 and rows[0]['state'] == 'completed', rows
+        assert rows == [], rows  # Child submission is deferred with R8b.
         return replace(*args)
 
     with mock.patch.object(t.registry, 'd5_active', return_value=True), \
