@@ -1,7 +1,6 @@
 """U4.3 actual merge boundary, split START, durable provider and no replay."""
 import argparse
 from contextlib import ExitStack
-from dataclasses import replace
 import hashlib
 import json
 import os
@@ -37,7 +36,8 @@ class TestMergeProvider(unittest.TestCase):
         tools.mkdir()
         (tools / 'git').symlink_to(shutil.which('git'))
         gh = tools / 'gh'
-        gh.write_text('#!' + sys.executable + '\n' + legacy.GH_STUB)
+        gh.write_text('#!' + sys.executable + '\n' + legacy.GH_STUB.replace(
+            'elif args[:1] ==', '    if data.get("fail_merge_after"): sys.exit(1)\nelif args[:1] =='))
         gh.chmod(0o755)
         self.stack.enter_context(mock.patch.dict(os.environ, {'PATH': str(tools)}))
         self.c = t.TestSubmission()
@@ -255,13 +255,14 @@ class TestMergeProvider(unittest.TestCase):
 
     def test_response_wait_is_outside_start_with_drain(self):
         paused, release = threading.Event(), threading.Event()
-        finish = self.boundary.finish
-        def finishing():
-            paused.set()
-            if not release.wait(8):
-                raise AssertionError('finish watchdog')
-            return finish()
-        with mock.patch.object(self.boundary, 'finish', finishing):
+        communicate = subprocess.Popen.communicate
+        def finishing(process, *args, **kwargs):
+            if process.args[:3] == ['gh', 'pr', 'merge']:
+                paused.set()
+                if not release.wait(8):
+                    raise AssertionError('finish watchdog')
+            return communicate(process, *args, **kwargs)
+        with mock.patch.object(subprocess.Popen, 'communicate', finishing):
             thread, results = self.c.launch(self.c.submit)
             try:
                 self.assertTrue(paused.wait(8))
@@ -275,7 +276,7 @@ class TestMergeProvider(unittest.TestCase):
         self.assertEqual(self.row()['d5']['state'], 'Recorded')
 
     def test_failed_merge_never_recorded(self):
-        self.forge['fail_merge'] = True
+        self.forge['fail_merge_after'] = True
         self.save_forge()
         with self.assertRaisesRegex(ValueError, 'merge command failed'):
             self.c.submit()
@@ -353,6 +354,35 @@ class TestMergeProvider(unittest.TestCase):
             J.recover(self.c.state_dir, self.row(), outcome)
         self.assertEqual(self.row()['d5']['state'], 'Recorded')
         self.assertEqual(len(self.merges()), before)
+
+
+class TestOperator(unittest.TestCase):
+    def test_ready_operator_merges_and_recovers_without_recorder_or_advance(self):
+        c = legacy.TestMergeUnit()
+        c.setUp()
+        self.addCleanup(c.doCleanups)
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, c.env))
+            stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+            stack.enter_context(mock.patch.object(t.registry.CP, '_external_base', return_value=c.directory / 'external'))
+            stack.enter_context(mock.patch.object(t.host, 'session_anchor', return_value=('native', t.ANCHOR)))
+            stack.enter_context(mock.patch.object(t.admission.time, 'time', return_value=150))
+            mandate = c.repo / 'docs/orchestrator-mandate.md'
+            mandate.parent.mkdir(exist_ok=True)
+            mandate.write_bytes(t.MANDATE)
+            entry = t.ready(self, c.repo, c.plan['name'], c.state_dir)
+            scope = dict(plans=[c.plan['name']], repositories=[c.remote], actions=['merge'], trackers=[])
+            t.lease.grant(c.repo, c.plan['name'], c.state_dir, issued_at=100, confirmed_at=100,
+                expires_at=200, mandate_bytes=t.MANDATE, scope=scope, owner_response='fixture', displayed_bounds='fixture')
+            t.store.claim(entry['record_dir'], 101, t.MANDATE, 'native', t.ANCHOR, lambda _: 'alive')
+            argv = [str(c.plan_path), '--state-dir', str(c.state_dir), '--unit', 'u', '--pr', '7', '--approver', 'Operator']
+            self.assertEqual(M.main(argv), 0)
+            before = tree_bytes(c.state_dir)
+            self.assertEqual(M.main(argv), 0)
+            self.assertEqual(tree_bytes(c.state_dir), before)
+            forge = json.loads(Path(c.env['FORGE_STATE']).read_text())
+            self.assertEqual(len(forge['merge_operations']), 1)
+            self.assertEqual(json.loads((c.state_dir / legacy.S.MERGE_RECEIPTS).read_text())['integration_status'], 'candidate-verified')
 
 
 class TestInactiveAndEntry(unittest.TestCase):
