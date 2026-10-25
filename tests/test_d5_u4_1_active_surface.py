@@ -187,6 +187,12 @@ class SurfaceFixture:
                 return emit(*args, **kwargs)
             stack.enter_context(mock.patch.object(self.s.SO, "emit_intent", track))
             with no_effects() as (launches, writes):
+                # NamedTemporaryFile enters io.open first in 3.12, os.open in
+                # 3.9. Capture its creation request before that implementation
+                # detail; all lower-level write/launch tripwires remain armed.
+                def temporary(*args, **kwargs):
+                    writes.append("NamedTemporaryFile")
+                    raise AssertionError("unexpected NamedTemporaryFile")
                 # Retain the exact requested argv as well as the primitive name.
                 def launching(original):
                     def capture(command, *args, **kwargs):
@@ -194,6 +200,7 @@ class SurfaceFixture:
                         return original(command, *args, **kwargs)
                     return capture
                 with ExitStack() as launch_stack:
+                    launch_stack.enter_context(mock.patch.object(tempfile, "NamedTemporaryFile", temporary))
                     for primitive in ("Popen", "run"):
                         launch_stack.enter_context(mock.patch.object(subprocess, primitive,
                             launching(getattr(subprocess, primitive))))
@@ -209,7 +216,10 @@ class SurfaceFixture:
                                             if before.get(k) != after.get(k)),
                     "output": output.getvalue()}
         text = json.dumps(captured, default=str).replace(str(self.directory), "<fixture>")
-        return json.loads(text.replace(str(ROOT), "<checkout>").replace(sys.executable, "<python>"))
+        text = text.replace(str(ROOT), "<checkout>")
+        for executable in (str(Path(sys.executable).resolve()), sys.executable):
+            text = text.replace(executable, "<python>")
+        return json.loads(text)
 
 
 class TestActiveSurface(unittest.TestCase):
