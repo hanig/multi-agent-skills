@@ -32,6 +32,7 @@ sys.path.insert(0, str(_SWARM_DIR / "scripts"))
 import child_environment as CE
 import coordinator_paths as CP
 import swarm as S
+import d5_activation as D5
 import verify as V
 import remote_verify as RV
 
@@ -42,6 +43,26 @@ PR_FIELDS = "number,url,state,headRefOid,baseRefName,mergeCommit,title"
 
 class Refusal(ValueError):
     pass
+
+
+def _d5_refuse(route):
+    if D5.d5_active():
+        raise Refusal("D5 active: {} is outside the supported merge profile".format(route))
+
+
+def _d5_merge_entry(args):
+    """Select the first active profile without entering legacy preparation.
+
+    U4.3 owns its authority binding and in-process receipt recording. Until
+    that binding exists, even the supported synchronous merge must stop here.
+    There is deliberately no legacy fallback or runtime opt-out.
+    """
+    if D5.d5_active():
+        if (args.verify_integration or args.abandon_intent
+                or args.retrieve_remote_evidence or args.remote_recovery_attestation):
+            raise Refusal("D5 active: verification and abandonment are outside "
+                          "the supported merge profile")
+        raise Refusal("D5 active: synchronous merge requires U4.3 binding")
 
 
 def nonempty(value):
@@ -92,6 +113,7 @@ def durable_write(path, value):
 
 
 def run(command, allowed=(0,)):
+    _d5_refuse('run')
     print("+ " + shlex.join(command), flush=True)
     result = subprocess.run(command, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -399,6 +421,7 @@ def current_intent(state_dir, binding, root, repair=True):
     intent unmarked, finish that local update before permitting a successor.
     No worker file or filesystem timestamp selects the current operation.
     """
+    _d5_refuse('current_intent')
     operation_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
     while True:
         path = state_dir / ("merge-unit-" + operation_id + ".json")
@@ -478,6 +501,7 @@ def current_intent(state_dir, binding, root, repair=True):
 
 
 def abandon(args, intent_path, intent, pr, operation_id):
+    _d5_refuse('abandon')
     record_path = intent_path.with_name(
         "merge-abandonment-" + operation_id + ".json")
     record = {"schema_version": 1, "operation_id": operation_id,
@@ -517,6 +541,7 @@ def cancel_before_request(intent_path, intent, observed, reason):
 
 
 def reconcile(args, plan):
+    _d5_merge_entry(args)
     state_dir, root, binding, host, repo_path, scope_binding, repo = authority(args, plan)
     cmd = commands(args, root, binding, host, repo_path)
     operation_id, intent_path, intent = current_intent(
@@ -728,6 +753,7 @@ def verify_integration(args, repo, snapshot):
     Like integration_evidence, this helper receives the local repository as an
     explicit argument; it introduces no repository-key reader of its own.
     """
+    _d5_refuse('verify_integration')
     binding, target = snapshot["binding"], snapshot["target"]
     evidences, error = V.run_merge_preconditions(
         S.U.run, repo, binding["head"], target,
@@ -874,6 +900,7 @@ def print_pending_close(args, plan):
 
 def print_tracker_drain(args):
     """Best-effort operator mutation after advance; never a merge prerequisite."""
+    _d5_refuse('print_tracker_drain')
     key = None
     try:
         project_dir = skill_paths.sibling_skill_root(
@@ -983,6 +1010,7 @@ def main(argv=None):
     if args.reason and not args.abandon_intent:
         parser.error("--reason requires --abandon-intent")
     try:
+        _d5_merge_entry(args)
         plan = read_object(args.plan)
         # Validate external paths BEFORE even opening a coordinator lock.
         authority(args, plan)
