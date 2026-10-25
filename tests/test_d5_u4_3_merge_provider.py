@@ -336,6 +336,7 @@ class TestMergeProvider(unittest.TestCase):
 
     def test_receipt_append_flock_and_directory_durability(self):
         sync, flock = J.journal._fsync_directory, J.journal.fcntl.flock
+        fsync = os.fsync
         events = []
         def locked(fd, mode):
             if mode == J.journal.fcntl.LOCK_EX:
@@ -344,7 +345,20 @@ class TestMergeProvider(unittest.TestCase):
         def directory(path):
             events.append('directory')
             self.assertTrue(self.receipts.exists())
-            return sync(path)
+            fd = os.open(self.receipts, os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    flock(fd, J.journal.fcntl.LOCK_EX | J.journal.fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+            synced = []
+            def syncing(fd):
+                synced.append(os.path.samestat(os.fstat(fd), Path(path).stat()))
+                return fsync(fd)
+            with mock.patch.object(os, 'fsync', syncing):
+                result = sync(path)
+            self.eq(synced, [True], 'directory entry must reach os.fsync')
+            return result
         with mock.patch.object(J.journal.fcntl, 'flock', locked), \
                 mock.patch.object(J.journal, '_fsync_directory', directory):
             self.c.submit()
