@@ -37,12 +37,18 @@ def patches(name):
     if name == 'typed-receipt':
         return [replacement(tests.M, '_d5_result_receipt',
             'J.encoded(r) == J.encoded(expected)', 'r == expected')]
+    if name == 'malformed-bound-custody':
+        return [replacement(tests.M, '_d5_journal_binding',
+            'bound = intent["d5"]["binding"]', 'return intent["d5"]["binding"]')]
     if name == 'historical-grant':
         # Remove both the provider fence and the consumer fence to demonstrate
         # that even an old successful receipt must not acquire D5 authority.
         return [replacement(tests.J, 'recover',
             '_require(type(intent.get("d5")) is dict, "legacy intent cannot authorize active recovery")',
             'if "d5" not in intent:\n        return outcome'),
+            replacement(tests.M, '_d5_journal_binding',
+            'bound = intent["d5"]["binding"]',
+            'if "d5" not in intent:\n        return {}\n    bound = intent["d5"]["binding"]'),
             replacement(tests.M, '_d5_result_receipt',
             'if current != operation_id or not isinstance((intent or {}).get("d5"), dict):',
             'if "d5" not in intent:\n        return {}\n'
@@ -59,6 +65,7 @@ CASES = {
     'historical-grant': 'OperatorCase.test_historical_intent_and_receipt_never_gain_active_authority',
     'stale-m6-base': 'TestInactiveAndPremature.test_inactive_capture_on_recorded_base_with_inherited_sinfo',
     'typed-receipt': 'OperatorCase.test_readback_rejects_boolean_integer_aliases',
+    'malformed-bound-custody': 'OperatorCase.test_matching_malformed_bindings_cannot_supply_their_own_expected_types',
 }
 
 

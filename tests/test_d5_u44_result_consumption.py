@@ -195,6 +195,45 @@ class OperatorCase(unittest.TestCase):
                     consumer(self.f.c.state_dir, 'u', self.f.binding['head'])
             self.assertEqual(effects, ([], []))
 
+    def test_matching_malformed_bindings_cannot_supply_their_own_expected_types(self):
+        self.assertEqual(self.invoke(), (0, ''))
+        original, receipt = self.f.row(), json.loads(self.f.receipts.read_text())
+        cases = [(('custody', key), value) for key in ('generation', 'anchor_pid', 'anchor_start_us')
+                 for value in (True, 1.0, 0, 2**63)]
+        cases += [(('record_id',), 1), (('kind',), 'fixture'),
+                  (('custody', 'session_id'), ''), (('scope', 'plans'), 'p'),
+                  (('correlation', 'request_id'), 'wrong'),
+                  (('installation', 'schema_version'), True)]
+        for path, value in cases:
+            with self.subTest(path=path, value=value):
+                row, rec = copy.deepcopy(original), copy.deepcopy(receipt)
+                # Include the embedded copy: agreeing corrupted records do
+                # not define the schema of the admitted request.
+                for record in (row, row['d5']['receipt'], rec):
+                    target = record['d5']['binding']
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = value
+                self.f.path.write_text(json.dumps(row))
+                self.f.receipts.write_text(json.dumps(rec) + '\n')
+                before = tree_bytes(self.f.c.state_dir)
+                self.assert_refused()
+                self.assertEqual(tree_bytes(self.f.c.state_dir), before)
+                self.assertEqual(len(self.f.merges()), 1)
+
+    def test_malformed_bound_request_refuses_before_recovery_writes(self):
+        self.assertEqual(self.invoke(), (0, ''))
+        row = self.f.row()
+        row['d5']['state'], row['phase'] = 'Attempted', 'merge_requested'
+        del row['d5']['receipt']
+        row['d5']['binding']['custody']['generation'] = True
+        self.f.path.write_text(json.dumps(row))
+        self.f.receipts.unlink()
+        before = tree_bytes(self.f.c.state_dir)
+        self.assert_refused()
+        self.assertEqual(tree_bytes(self.f.c.state_dir), before)
+        self.assertEqual(len(self.f.merges()), 1)
+
 
 class TestInactiveAndPremature(unittest.TestCase):
     def test_inactive_capture_on_recorded_base_with_inherited_sinfo(self):
@@ -226,7 +265,7 @@ class TestInactiveAndPremature(unittest.TestCase):
             with self.assertRaisesRegex(SE.OutboxError, 'D5 active:'):
                 SE.admit_merge(root, 'u', 'a' * 40)
             with self.assertRaisesRegex(ValueError, 'coordinator lease required'):
-                M._d5_result_receipt(root, {}, 'runs', 'op', None)
+                M._d5_result_receipt(root, {}, 'runs', 'op', None, 'repo')
             self.assertEqual(effects, ([], []))
 
 
