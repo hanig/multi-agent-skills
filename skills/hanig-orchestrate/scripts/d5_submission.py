@@ -1,4 +1,4 @@
-"""Inert U3-R6 concrete submission lifecycle; no production callers.
+"""R6 submission lifecycle and the closed synchronous merge adapter.
 
 Supported envelope and accepted limits
 -------------------------------------
@@ -33,8 +33,8 @@ C = authoritative durable completion. Release remains exactly
 H and S and (not A or N or (F and C)). No exit/reap/timeout implies C.
 Only C's evidence source changes under OD7: ledger completion for ledger classes,
 bound journal-provider completion for the closed merge class (see d5_completion).
-F alone is not C. START placement, lifetime ownership and retention on unknown
-are unchanged. Production merge remains refused before START without a provider.
+F alone is not C. OD2 changes START placement only for the closed merge class.
+Lifetime ownership and retention on unknown are unchanged.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
