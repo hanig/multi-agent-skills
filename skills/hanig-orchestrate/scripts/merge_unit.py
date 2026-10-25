@@ -570,6 +570,11 @@ def _d5_result_receipt(state_dir, binding, root, operation_id, outcome):
         row = J._read(handle)
         expected = J._receipt(handle, row, outcome)
         J._readback(handle, expected)
+        # Python object equality aliases true/1 and 1/1.0. Compare the
+        # provider's JSON encoding too, preserving those authority types.
+        receipts, problems = S.load_merge_receipts(state_dir)
+        if problems or not any(J.encoded(r) == J.encoded(expected) for r in receipts):
+            raise Refusal("D5 completion readback differs in value or JSON type")
     return expected
 
 
