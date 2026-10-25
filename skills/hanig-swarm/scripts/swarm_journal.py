@@ -7,26 +7,37 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 
 from swarm_types import OutboxError
 
 
-def _heal_jsonl_tail(fh):
+def _heal_jsonl_tail(fh, *, reader_lines=False):
     """Under an exclusive lock, preserve complete JSON and drop only a tear."""
     fh.seek(0, os.SEEK_END)
     if not fh.tell():
         return
     fh.seek(-1, os.SEEK_END)
-    if fh.read(1) == b"\n":
+    last = fh.read(1)
+    if last == b"\n" or (reader_lines and last == b"\r"):
         return
     fh.seek(0)
     data = fh.read()
-    cut = data.rfind(b"\n")
-    tail = data[cut + 1:]
+    if reader_lines:
+        # Match the receipt reader without normalizing any decision bytes.
+        breaks = list(re.finditer(rb"\r\n|[\n\r\v\f\x1c-\x1e]|\xc2\x85|\xe2\x80[\xa8\xa9]", data))
+        end = len(data)
+        if breaks and breaks[-1].end() == end:
+            end = breaks.pop().start()
+        cut = breaks[-1].end() if breaks else 0
+        tail = data[cut:end]
+    else:
+        cut = data.rfind(b"\n") + 1
+        tail = data[cut:]
     try:
         json.loads(tail.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        fh.truncate(0 if cut < 0 else cut + 1)
+        fh.truncate(cut)
         return
     except (ValueError, RecursionError):
         pass  # Parser limits cannot establish an incomplete tail.
@@ -74,7 +85,10 @@ def _fsync_append(path, record, *, sync_directory=False, unique_key=()):
         # the new receipt to the broken one, turning a recoverable interrupted
         # write into corruption that takes the next record with it. An
         # incomplete record has no meaning, so dropping it loses nothing.
-        _heal_jsonl_tail(fh)
+        if unique_key:
+            _heal_jsonl_tail(fh, reader_lines=True)
+        else:
+            _heal_jsonl_tail(fh)
 
         found = False
         if unique_key:
@@ -86,9 +100,12 @@ def _fsync_append(path, record, *, sync_directory=False, unique_key=()):
             if identity is None:
                 raise OutboxError("journal record has no idempotency key")
             fh.seek(0)
-            for raw in fh:
+            try:
+                lines = fh.read().decode("utf-8").splitlines()
+            except UnicodeDecodeError as exc:
+                raise OutboxError("cannot read journal for idempotent append") from exc
+            for text in lines:
                 try:
-                    text = raw.decode("utf-8")
                     if not text.strip():
                         continue  # Same blank-line contract as receipt readers.
                     prior = json.loads(text)

@@ -22,6 +22,8 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from urllib.parse import quote, urlsplit
 
 import skill_paths
@@ -831,8 +833,56 @@ def reconcile(args, plan):
     return cmd["advance"]
 
 
+def _bounded_observation(command, *, timeout, **options):
+    """Bound the caller's read, including Popen construction, by one deadline.
+
+    This worker runs the designated read-only command. Its fixed call path
+    does not record, release a lease, or merge; no lease/DRAIN fd is passed in.
+    A constructor returning after cancellation kills/reaps its read process;
+    its late result is never admitted. Cleanup may outlive the bounded wait.
+    """
+    deadline = time.monotonic() + timeout
+    done, cancelled = threading.Event(), threading.Event()
+    processes, results = [], []
+    def read_only():
+        try:
+            if cancelled.is_set() or time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            with subprocess.Popen(command, **options) as process:
+                processes.append(process)
+                try:
+                    remaining = deadline - time.monotonic()
+                    if cancelled.is_set() or remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    out, err = process.communicate(timeout=remaining)
+                    results.append(subprocess.CompletedProcess(command, process.returncode, out, err))
+                except BaseException:
+                    process.kill()
+                    process.communicate()
+                    raise
+        except BaseException as exc:
+            results.append(exc)
+        finally:
+            done.set()
+    worker = threading.Thread(target=read_only, daemon=True)
+    worker.start()
+    try:
+        if not done.wait(max(0, deadline - time.monotonic())) or time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(command, timeout)
+        result = results[0]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+    finally:
+        if not done.is_set():
+            cancelled.set()
+            if processes:
+                processes[0].kill()
+
+
 class _MergeBoundary:
     """One designated Popen; observations and response waits stay outside START."""
+    _observation_timeout = 60
     def __init__(self, state_dir, binding, repo, host, repo_path, cmd, intent):
         import d5_submission as DS
         # R6's existing named-adapter contract avoids loading the active
@@ -842,7 +892,7 @@ class _MergeBoundary:
         self.host, self.repo_path, self.cmd, self.intent = host, repo_path, cmd, intent
         self.process = None
 
-    def read(self, command, allowed=(0,), *, timeout=300):
+    def read(self, command, allowed=(0,), *, timeout=300, hard_deadline=False):
         import d5_readiness as DR
         DR.require(self.state_dir)
         # Closed observation vocabulary; no arbitrary commands.
@@ -852,7 +902,8 @@ class _MergeBoundary:
             if command[:-1] != prefix[:-1] or not command[-1].startswith(prefix[-1]):
                 raise Refusal("D5 merge observation command is not designated")
             oid(command[-1][len(prefix[-1]):])
-        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        runner = _bounded_observation if hard_deadline else subprocess.run
+        result = runner(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, timeout=timeout,
             env=(CE.child_env() if command[:2] == [sys.executable, SWARM]
                  else {k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"}))
@@ -861,8 +912,8 @@ class _MergeBoundary:
                 result.returncode, result.stdout, result.stderr))
         return result
 
-    def target(self, *, timeout=300):
-        ref = json.loads(self.read(self.cmd["target"], timeout=timeout).stdout)
+    def target(self, *, timeout=300, hard_deadline=False):
+        ref = json.loads(self.read(self.cmd["target"], timeout=timeout, hard_deadline=hard_deadline).stdout)
         if (not isinstance(ref, dict) or ref.get("ref") != "refs/heads/" + self.binding["target"]
                 or not isinstance(ref.get("object"), dict) or ref["object"].get("type") != "commit"):
             raise Refusal("forge returned a different or invalid target branch ref")
@@ -870,7 +921,7 @@ class _MergeBoundary:
 
     def observe(self, operation):
         # OD2 bounds only the observation between the two START sections.
-        return self.target(timeout=60)
+        return self.target(timeout=min(60, self._observation_timeout), hard_deadline=True)
 
     def check_observation(self, operation, observation):
         import d5_merge_journal as J
