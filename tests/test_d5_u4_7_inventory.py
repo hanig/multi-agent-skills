@@ -3,6 +3,7 @@ import ast
 import json
 from pathlib import Path
 import re
+import tempfile
 import unittest
 
 
@@ -14,25 +15,22 @@ VENDORED = ("agent-bus", "paseo", "paseo-advisor", "paseo-committee",
 
 
 def source_files(root):
-    """Tracked-layout inputs, including hidden launch configuration, without Git.
+    """Repository-layout inputs, including hidden launch configuration, without Git.
 
     Fixture strings are data, not launch sites. Exclude this inventory's own
     assertions so the census cannot satisfy itself. No caller's HOME is read.
     """
     files = []
-    for directory in ("bin", "lib", "scripts", "skills", "tests", "docs",
-                      "verifiers", ".claude", ".github"):
-        for path in (root / directory).rglob("*"):
-            rel = path.relative_to(root)
-            if (path.is_file() and not path.is_symlink()
-                    and "__pycache__" not in rel.parts
-                    and not str(rel).startswith("tests/fixtures/")
-                    and path.name != Path(__file__).name
-                    and (path.suffix in (".py", ".sh", ".md", ".json", ".yml", ".yaml", ".plist")
-                         or directory == "bin")):
-                files.append(path)
-    files += [root / p for p in ("install.sh", "README.md", "CLAUDE.md", "verifiers.json")]
-    return sorted(p for p in files if p.is_file())
+    for path in root.rglob("*"):
+        rel = path.relative_to(root)
+        if (path.is_file() and not path.is_symlink()
+                and not {".git", "__pycache__"}.intersection(rel.parts)
+                and not rel.as_posix().startswith("tests/fixtures/")
+                and path.name != Path(__file__).name
+                and (path.suffix in (".py", ".sh", ".md", ".json", ".yml", ".yaml", ".plist", ".cron")
+                     or rel.parts[0] == "bin")):
+            files.append(path)
+    return sorted(files)
 
 
 def tree_for(path):
@@ -87,7 +85,9 @@ def discover(root=ROOT):
         if path.name == "SKILL.md" and path.parent.name in VENDORED:
             add(path, path, 1, "vendored-workflow")
         for line, value in enumerate(text.splitlines(), 1):
-            if re.search(r"python\d*(?:\.\d+)*\s+|run_sandbox\(|\bexec\s|launchd|cron", value):
+            if path.suffix in (".plist", ".cron"):
+                referenced(value, path, line, "launch-config")
+            if re.search(r"python\d*(?:\.\d+)*\s+|run_sandbox\(|\bexec\s", value):
                 referenced(value, path, line, "text-launch")
         if tree is None:
             continue
@@ -229,6 +229,7 @@ def load_inventory(path=FIXTURE):
 
 def assert_reconciliation(case, data, manifest):
     records = {r["id"]: r for r in data["records"]}
+    root_names = {r["id"]: Path(r["path"]).name for r in data["roots"]}
     case.assertEqual(len(records), len(data["records"]))
     case.assertEqual(set(data["boundaries"]), set(manifest["boundaries"]))
     case.assertEqual(set(data["routes"]), {str(n) for n in range(1, 77)})
@@ -242,13 +243,19 @@ def assert_reconciliation(case, data, manifest):
         case.assertTrue(row["site"])
         for ref in row["records"]:
             case.assertIn(route, records[ref]["routes"])
+        owners = {"S": "swarm.py", "M": "merge_unit.py", "W/unit.py": "unit.py"}
+        expected = {owners[site.strip().split(":", 1)[0]] for site in row["site"].split(",")}
+        case.assertEqual({root_names[records[ref]["root"]] for ref in row["records"]}, expected)
     for tool, mapping in data["parsers"].items():
         expected = set(manifest["tools"][tool]["commands"])
         expected.update(manifest["tools"][tool].get("modes", {}))
         case.assertEqual(set(mapping), expected)
-        for refs in mapping.values():
+        for selector, refs in mapping.items():
             case.assertTrue(refs)
             case.assertTrue(set(refs) <= set(records))
+            case.assertEqual(set(refs), {key for key, record in records.items()
+                                        if root_names[record["root"]] == tool
+                                        and selector in record["mode"]})
     for key, record in records.items():
         case.assertTrue(record["boundaries"] or record["routes"] or record["new"])
         for boundary in record["boundaries"]:
@@ -369,6 +376,52 @@ class TestD5Inventory(unittest.TestCase):
         mutated["boundaries"].pop(next(iter(mutated["boundaries"])))
         with self.assertRaises(AssertionError):
             assert_reconciliation(self, mutated, self.manifest)
+
+    def test_repository_config_and_new_directories_are_discovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for folder in ("config", "new-launchers"):
+                path = root / folder / "launch.py"
+                path.parent.mkdir()
+                path.write_text("if __name__ == '__main__': pass\n")
+                self.assertIn(path.relative_to(root).as_posix(), discover(root))
+
+    def test_negative_cron_prose_is_not_a_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "lib").mkdir()
+            (root / "lib/helper.py").write_text("def helper(): return 1\n")
+            note = root / "README.md"
+            note.write_text("cron does not invoke lib/helper.py\n")
+            self.assertNotIn("lib/helper.py", discover(root))
+            note.write_text("python3 lib/helper.py\n")
+            self.assertIn("lib/helper.py", discover(root))
+            note.write_text("")
+            for name in ("job.plist", "job.cron"):
+                config = root / name
+                config.write_text("<string>lib/helper.py</string>\n")
+                self.assertIn("lib/helper.py", discover(root))
+                config.unlink()
+
+    def test_parser_mapping_rejects_wrong_root_and_mode(self):
+        from copy import deepcopy
+        for parser, selector, ref in (("swarm.py", "validate", "r01.0"),
+                                     ("merge_unit.py", "--verify-integration", "r31.0")):
+            with self.subTest(parser=parser):
+                data = deepcopy(self.data)
+                data["parsers"][parser][selector] = [ref]
+                with self.assertRaises(AssertionError):
+                    assert_reconciliation(self, data, self.manifest)
+
+    def test_route_75_retains_both_owners(self):
+        from copy import deepcopy
+        self.assertIn("r31.0", self.data["routes"]["75"]["records"])
+        self.assertIn("75", next(r for r in self.data["records"] if r["id"] == "r31.0")["routes"])
+        data = deepcopy(self.data)
+        data["routes"]["75"]["records"].remove("r31.0")
+        next(r for r in data["records"] if r["id"] == "r31.0")["routes"].remove("75")
+        with self.assertRaises(AssertionError):
+            assert_reconciliation(self, data, self.manifest)
 
 
 if __name__ == "__main__":
