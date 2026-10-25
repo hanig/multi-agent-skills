@@ -102,7 +102,7 @@ class TestMergeProvider(unittest.TestCase):
         def launching(argv, *args, **kwargs):
             if argv[:3] == ['gh', 'pr', 'merge']:
                 launches.append(argv)
-                self.assertNotIn('pass_fds', kwargs)
+                self.assertFalse('pass_fds' in kwargs, 'merge child must not receive extra descriptors')
                 self.assertTrue(kwargs.get('close_fds', True))
             return popen(argv, *args, **kwargs)
         with mock.patch.object(subprocess, 'Popen', launching):
