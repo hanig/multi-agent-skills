@@ -1,0 +1,6 @@
+{
+  "base": "3f17265c35d5e44cd2c04fa366976968c0b00fb3",
+  "module_sha256": "657056e6119aedc7ad13d08c3cb5404caa58ee617f75f643599104653706112e",
+  "scope": "Exact signature, docstring and initial inactive guard; exercised only with d5_active forced False.",
+  "source": "def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,\n           generation, operation, boundary):\n    \"\"\"Admit one operation; refuse ambient START.\"\"\"\n    if not registry.d5_active():\n        raise AuthorityError(\"D5 is inactive\")\n"
+}

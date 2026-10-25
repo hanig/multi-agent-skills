@@ -6,6 +6,7 @@ then existing exclusive DRAIN/START; no deployed durability claim (U8).
 Installation generations are separate from prospective authority grants.
 """
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -183,8 +184,24 @@ def successor_gate(entry):
                 value = merge_unit.read_object(source)
             _require(path.name == "merge-unit-" + value["operation_id"] + ".json",
                      "merge intent filename mismatch")
-            _, _, current = merge_unit.current_intent(
+            _, current_path, current = merge_unit.current_intent(
                 directory, value["binding"], value["root"], repair=False)
+            # Follow the already validated resolution chain, including the
+            # pending rollback view, to bind every inventoried source to it.
+            operation = hashlib.sha256(json.dumps(value["binding"], sort_keys=True).encode()).hexdigest()
+            for _ in range(len(paths) + 1):
+                member = directory / ("merge-unit-" + operation + ".json")
+                if member == path:
+                    break
+                _require(member != current_path, "unreachable merge intent")
+                prior = member.with_suffix(".cancellation-pending")
+                if not prior.exists() or member.with_suffix(".cancellation-committed").exists():
+                    prior = member
+                phase = merge_unit.read_object(prior).get("phase")
+                suffix = ":after-cancellation" if phase == "cancelled_before_request" else ":after-abandonment"
+                operation = hashlib.sha256((operation + suffix).encode()).hexdigest()
+            else:
+                _require(False, "unreachable merge intent")
             _require(current is None or current.get("phase") == "receipt_recorded",
                      "unresolved merge intent")
     except registry.AuthorityError:
