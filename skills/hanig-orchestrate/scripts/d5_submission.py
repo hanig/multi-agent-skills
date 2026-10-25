@@ -17,6 +17,15 @@ The registered checkout stays at the path recorded at registration for the regis
 Non-claims: the helper cannot prove nonblocking behavior of arbitrary injected
 code; no exactly-once execution; no implicit retries.
 
+OD5 caller precondition: hold the coordinator lease for the entire submit call.
+Do not release it, unlock it or last-close its descriptor from another thread,
+a signal handler or a callback during the call. lease_required and holds_lease
+detect a lease already lost; they do not fence a later release. U4.3's lease
+continuity guarantee depends on this precondition, not a release/submit fence.
+flock ownership follows the open file description. An independently opened
+descriptor cannot unlock it; a child inheriting the description, or a process
+receiving an alias, can. The merge child receives no lease or DRAIN descriptor.
+
 Named, trusted Boundary adapters start one effect without response waits,
 deferral, retries or additional effects. The merge adapter observes outside
 START and starts without waiting in its second START. A normal Finish return means the

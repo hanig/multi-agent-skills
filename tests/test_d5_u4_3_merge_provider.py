@@ -91,6 +91,25 @@ class TestMergeProvider(unittest.TestCase):
     def handle(self):
         return J.Handle(self.effect, str(self.c.state_dir), J.encoded(self.row()['d5']['binding']))
 
+    def test_coordinator_lease_descriptor_is_non_inheritable(self):
+        fd = state._LOCK_FDS[str(self.c.state_dir.resolve())]
+        self.assertTrue(state.holds_lease(self.c.state_dir))
+        self.assertFalse(os.get_inheritable(fd))
+
+    def test_merge_child_receives_no_lease_or_drain_descriptors(self):
+        popen = subprocess.Popen
+        launches = []
+        def launching(argv, *args, **kwargs):
+            if argv[:3] == ['gh', 'pr', 'merge']:
+                launches.append(argv)
+                self.assertNotIn('pass_fds', kwargs)
+                self.assertTrue(kwargs.get('close_fds', True))
+            return popen(argv, *args, **kwargs)
+        with mock.patch.object(subprocess, 'Popen', launching):
+            self.c.submit()
+        self.eq(len(launches), 1)
+        self.eq(len(self.merges()), 1)
+
     def test_actual_process_order_and_in_process_recording(self):
         events = []
         write, popen, sync = M.durable_write, subprocess.Popen, os.fsync
@@ -347,39 +366,6 @@ class TestMergeProvider(unittest.TestCase):
             with self.assertRaisesRegex(OutboxError, 'merge receipt journal cannot be read in full'):
                 capability.complete(result.outcome)
 
-    def test_review_lease_loss_at_launch_refuses_effect(self):
-        start = self.boundary.start
-        reached = []
-        def releasing(operation):
-            state.release_lease(self.c.state_dir)
-            reached.append(state.holds_lease(self.c.state_dir))
-            return start(operation)
-        with mock.patch.object(self.boundary, 'start', releasing):
-            try:
-                self.c.submit()
-            except Exception:
-                pass  # The observable effect, not the exception, is the guard.
-        self.eq(reached, [False])
-        self.eq(self.merges(), [])
-
-    def test_review_lease_loss_at_write_preserves_bound(self):
-        write = M.durable_write
-        snapshot = []
-        def releasing(path, row):
-            if row.get('d5', {}).get('classification') == 'not_submitted':
-                snapshot.append(self.journal_bytes())
-                state.release_lease(self.c.state_dir)
-            return write(path, row)
-        with mock.patch.object(self.boundary, 'observe', side_effect=OSError('observation failed')), \
-                mock.patch.object(M, 'durable_write', releasing):
-            try:
-                self.c.submit()
-            except Exception:
-                pass
-        self.eq(len(snapshot), 1)
-        self.eq(self.merges(), [])
-        self.eq(self.journal_bytes(), snapshot[0])
-
     def resolved_successor(self, disposition):
         if disposition == 'abandonment':
             name = 'merge-abandonment-' + self.effect + '.json'
@@ -426,6 +412,8 @@ class TestMergeProvider(unittest.TestCase):
             before = self.journal_bytes()
             J.recover(self.c.state_dir, self.row(), outcome)
             self.eq(self.journal_bytes(), before)
+            J.PROVIDER.bind(self.handle()).uncertain()
+            self.eq(self.journal_bytes(), before)
         self.eq(len(self.merges()), 1)
 
     def test_review_interrupted_recording_reuses_durable_receipt(self):
@@ -443,6 +431,19 @@ class TestMergeProvider(unittest.TestCase):
             J.recover(self.c.state_dir, self.row(), self.boundary.completion())
         self.eq(self.receipts.read_bytes(), before)
         self.eq(self.row()['d5']['state'], 'Recorded')
+        self.eq(len(self.merges()), 1)
+
+    def test_successor_id_cannot_skip_unresolved_predecessor(self):
+        self.c.submit()
+        before = self.journal_bytes()
+        successor = hashlib.sha256((self.effect + ':after-abandonment').encode()).hexdigest()
+        self.intent = dict(self.intent, operation_id=successor)
+        self.boundary.intent = self.intent
+        self.c.operation = t.submission.Operation(
+            successor, 'merge', J.encoded(self.scope), J.encoded(self.intent))
+        with self.assertRaisesRegex(ValueError, 'operation mismatch'):
+            self.c.submit()
+        self.eq(self.journal_bytes(), before)
         self.eq(len(self.merges()), 1)
 
     def test_missing_or_mismatched_readback_never_records(self):

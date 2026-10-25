@@ -5,7 +5,6 @@ Only a matching durable receipt validated on readback establishes completion.
 Trusted single-host writers, stable lock identities; no process attribution.
 """
 from dataclasses import dataclass
-import hashlib
 import json
 from pathlib import Path
 
@@ -114,17 +113,17 @@ class Capability:
 
     def complete(self, outcome):
         row = _read(self.handle)
-        _require(row["d5"].get("classification") in ("submitted", "unknown") or
-                 (self.recovery and row["d5"]["state"] == "Bound"),
-                 "submission is unconfirmed")
         expected = _receipt(self.handle, row, outcome)
         if row["d5"]["state"] == "Recorded":
             _require(row["d5"]["receipt"] == expected, "conflicting completion")
             _readback(self.handle, expected)
             return outcome
+        _require(row["d5"].get("classification") in ("submitted", "unknown") or
+                 (self.recovery and row["d5"]["state"] == "Bound"),
+                 "submission is unconfirmed")
         readiness.lease_required(self.handle.state_dir)
         journal._fsync_append(Path(self.handle.state_dir) / "merge-receipts.jsonl",
-                              expected, sync_directory=True)
+                              expected, sync_directory=True, unique_key=("d5", "operation_id"))
         _readback(self.handle, expected)
         row["d5"].update(state="Recorded", receipt=expected)
         row["phase"] = "receipt_recorded"
@@ -144,7 +143,10 @@ class MergeProvider(Provider):
         _require(binding["kind"] == "merge", "wrong operation class")
         original = json.loads(bytes.fromhex(binding["correlation"]["intent"]))
         effect_id = binding["correlation"]["request_id"]
-        operation = hashlib.sha256(json.dumps(original["binding"], sort_keys=True).encode()).hexdigest()
+        # The legacy key starts the chain; durable resolutions select its
+        # successor. The same reader retains every unresolved-intent fence.
+        operation, path, prior = M.current_intent(
+            Path(state_dir), original["binding"], original["root"], repair=False)
         _require(effect_id == operation == original["operation_id"], "operation mismatch")
         _require(original["phase"] == "merge_requested" and "d5" not in original,
                  "invalid request")
@@ -153,7 +155,6 @@ class MergeProvider(Provider):
         _require(ready["plan_id"] == plan_id, "plan mismatch")
         bound = dict(binding, installation=ready)
         handle = Handle(effect_id, str(readiness.lease_required(state_dir)), encoded(bound))
-        _, path, prior = M.current_intent(Path(state_dir), original["binding"], original["root"], repair=False)
         _require(path == _path(handle) and prior is None, "unresolved request cannot replay")
         M.S.load_merge_receipts(state_dir)
         row = dict(original, d5=dict(state="Bound", binding=bound))
