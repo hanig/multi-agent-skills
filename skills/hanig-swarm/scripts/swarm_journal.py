@@ -88,7 +88,10 @@ def _fsync_append(path, record, *, sync_directory=False, unique_key=()):
             fh.seek(0)
             for raw in fh:
                 try:
-                    prior = json.loads(raw)
+                    text = raw.decode("utf-8")
+                    if not text.strip():
+                        continue  # Same blank-line contract as receipt readers.
+                    prior = json.loads(text)
                 except (ValueError, RecursionError) as exc:
                     raise OutboxError("cannot read journal for idempotent append") from exc
                 if key(prior) == identity:

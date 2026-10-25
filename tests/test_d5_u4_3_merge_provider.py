@@ -433,6 +433,16 @@ class TestMergeProvider(unittest.TestCase):
         self.eq(self.row()['d5']['state'], 'Recorded')
         self.eq(len(self.merges()), 1)
 
+    def test_idempotent_receipt_append_accepts_readable_blank_lines(self):
+        before = '\n \t\n\u00a0\n'.encode('utf-8')
+        self.receipts.write_bytes(before)
+        self.eq(M.S.load_merge_receipts(self.c.state_dir), ([], []))
+        self.c.submit()
+        self.assertTrue(self.receipts.read_bytes().startswith(before))
+        self.eq(len(M.S.load_merge_receipts(self.c.state_dir)[0]), 1)
+        self.eq(self.row()['d5']['state'], 'Recorded')
+        self.eq(len(self.merges()), 1)
+
     def test_successor_id_cannot_skip_unresolved_predecessor(self):
         self.c.submit()
         before = self.journal_bytes()
