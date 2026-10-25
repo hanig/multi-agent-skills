@@ -7,6 +7,8 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -34,6 +36,50 @@ S_ENTRIES = ("_submit", "maybe_continue", "advance", "_start_code_terminal_watch
              "cmd_seq_floor", "cmd_outbox", "main")
 M_ENTRIES = ("run", "current_intent", "abandon", "reconcile", "verify_integration",
              "print_tracker_drain", "main")
+
+
+def normalize_capture(captured, paths=()):
+    """Parse command records before mapping paths; retain other effect data.
+
+    Both the untouched embedded base and live captures use this representation.
+    Only '+ ' records emitted by shlex.join are interpreted as commands.
+    """
+    captured = json.loads(json.dumps(captured, default=str))
+    lines = iter(captured["output"].splitlines(keepends=True))
+    records = []
+    for line in lines:
+        if not line.startswith("+ "):
+            records.append(line)
+            continue
+        while True:
+            ending = "\n" if line.endswith("\n") else ""
+            body = line[2:-1] if ending else line[2:]
+            try:
+                tokens = shlex.split(body)
+                break
+            except ValueError as exc:
+                # shlex.join can quote a token containing a literal newline.
+                following = next(lines, None) if str(exc) == "No closing quotation" else None
+                if following is None:
+                    raise ValueError("malformed M6 command record") from exc
+                line += following
+        if not tokens or not tokens[0]:
+            raise ValueError("malformed M6 command record: empty command")
+        records.append({"argv": tokens, "ending": ending})
+    captured["output"] = records
+    mappings = dict(paths)
+    pattern = (re.compile("|".join(re.escape(p) for p in
+               sorted(mappings, key=len, reverse=True))) if mappings else None)
+
+    def normalize(value):
+        if isinstance(value, str):
+            return pattern.sub(lambda m: mappings[m.group()], value) if pattern else value
+        if isinstance(value, list):
+            return [normalize(v) for v in value]
+        if isinstance(value, dict):
+            return {normalize(k): normalize(v) for k, v in value.items()}
+        return value
+    return normalize(captured)
 
 
 class SurfaceFixture:
@@ -221,14 +267,10 @@ class SurfaceFixture:
                     "files_changed": sorted(k for k in before.keys() | after.keys()
                                             if before.get(k) != after.get(k)),
                     "output": output.getvalue()}
-        text = json.dumps(captured, default=str)
-        # An interpreter may live under either parent; replace it first so
-        # parent-path rendering cannot hide the executable's identity.
-        for executable in (str(Path(sys.executable).resolve()), sys.executable):
-            text = text.replace(executable, "<python>")
-        text = text.replace(str(self.directory), "<fixture>")
-        text = text.replace(str(ROOT), "<checkout>")
-        return json.loads(text)
+        return normalize_capture(captured, (
+            (str(ROOT), "<checkout>"), (str(self.directory), "<fixture>"),
+            (str(Path(sys.executable).resolve()), "<python>"),
+            (sys.executable, "<python>")))
 
 
 class TestActiveSurface(unittest.TestCase):
@@ -245,7 +287,7 @@ class TestActiveSurface(unittest.TestCase):
         for key, expected in data["captures"].items():
             with self.subTest(entry=key):
                 tool, name = key.split(".")
-                self.assertEqual(self.capture(tool, name, False), expected)
+                self.assertEqual(self.capture(tool, name, False), normalize_capture(expected))
 
     def test_m6_inherited_scheduler_path_matches_recorded_base(self):
         captures = json.loads(FIXTURE.read_text())["captures"]
@@ -260,11 +302,11 @@ class TestActiveSurface(unittest.TestCase):
                 for key, expected in captures.items():
                     with self.subTest(entry=key):
                         tool, name = key.split(".")
-                        self.assertEqual(self.capture(tool, name, False), expected)
+                        self.assertEqual(self.capture(tool, name, False), normalize_capture(expected))
                         self.assertEqual(os.environ["PATH"], inherited_path)
 
     def test_inactive_capture_normalizes_interpreter_before_parent_paths(self):
-        expected = json.loads(FIXTURE.read_text())["captures"]["operator.reconcile"]
+        expected = normalize_capture(json.loads(FIXTURE.read_text())["captures"]["operator.reconcile"])
         for location in ("checkout", "fixture"):
             with self.subTest(location=location), tempfile.TemporaryDirectory() as tmp:
                 fixture = SurfaceFixture(tmp)
@@ -275,7 +317,7 @@ class TestActiveSurface(unittest.TestCase):
                     self.assertEqual(fixture.observe("operator", "reconcile", False), expected)
 
     def test_inactive_capture_normalizes_quoted_interpreter_path(self):
-        expected = json.loads(FIXTURE.read_text())["captures"]["operator.reconcile"]
+        expected = normalize_capture(json.loads(FIXTURE.read_text())["captures"]["operator.reconcile"])
         with tempfile.TemporaryDirectory() as tmp:
             fixture = SurfaceFixture(tmp)
             executable = str(ROOT / ".u41 review venv/bin/python")
@@ -283,6 +325,47 @@ class TestActiveSurface(unittest.TestCase):
                 observed = fixture.observe("operator", "reconcile", False)
         self.assertEqual(observed["commands"], expected["commands"])
         self.assertEqual(observed, expected)
+
+    def test_inactive_capture_normalizes_quoted_checkout_and_local_venv(self):
+        expected = normalize_capture(json.loads(FIXTURE.read_text())["captures"]["operator.reconcile"])
+        for leaf in ("checkout space", "checkout's space", 'checkout "quote"\\path\nnext'):
+            for local_venv in (False, True):
+                with self.subTest(leaf=leaf, local_venv=local_venv), \
+                        tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                    checkout = Path(tmp) / leaf
+                    directory = checkout / "capture space"
+                    directory.mkdir(parents=True)
+                    fixture = SurfaceFixture(directory)
+                    # Exercise the real command builder under relocated paths.
+                    # Launches are trapped; no checkout or interpreter is installed.
+                    stack.enter_context(mock.patch(__name__ + ".ROOT", checkout))
+                    stack.enter_context(mock.patch.object(M, "SWARM",
+                        str(checkout / "skills/hanig-swarm/scripts/swarm.py")))
+                    if local_venv:
+                        stack.enter_context(mock.patch.object(sys, "executable",
+                            str(checkout / ".venv space/bin/python")))
+                    self.assertEqual(fixture.observe("operator", "reconcile", False), expected)
+
+    def test_m6_rejects_malformed_command_records(self):
+        for record in ("+ 'unterminated\n", "+ echo \\", "+ \n", "+ ''\n"):
+            with self.subTest(record=record), tempfile.TemporaryDirectory() as tmp:
+                fixture = SurfaceFixture(tmp)
+                with mock.patch.object(fixture, "case", return_value=lambda: print(record, end="")):
+                    with self.assertRaisesRegex(ValueError, "malformed M6 command record"):
+                        fixture.observe("operator", "run", False)
+
+    def test_m6_normalizer_retains_noncommand_effects_and_token_boundaries(self):
+        captured = json.loads(FIXTURE.read_text())["captures"]["operator.run"]
+        captured["output"] = "before 'quoted'\n+ tool 'two words' ''\nafter  spaced\n"
+        expected = dict(captured, output=["before 'quoted'\n",
+            {"argv": ["tool", "two words", ""], "ending": "\n"}, "after  spaced\n"])
+        self.assertEqual(normalize_capture(captured), expected)
+        for field, value in (("writes", ["extra"]), ("launches", []),
+                ("tracker_intents", ["extra"]), ("outcome", ["return", 0]),
+                ("files_changed", ["extra"]), ("commands", [["tool", "two", "words"]]),
+                ("output", "before 'quoted'\n+ tool two words ''\nafter  spaced\n")):
+            with self.subTest(field=field):
+                self.assertNotEqual(normalize_capture(dict(captured, **{field: value})), expected)
 
     def test_premature_activation_direct_entries_before_first_effect(self):
         for tool, names in (("swarm", S_ENTRIES), ("operator", M_ENTRIES)):
@@ -292,7 +375,7 @@ class TestActiveSurface(unittest.TestCase):
                     self.assertEqual(observed["launches"], [])
                     self.assertEqual(observed["writes"], [])
                     self.assertEqual(observed["files_changed"], [])
-                    self.assertIn("D5 active:", str(observed["outcome"]) + observed["output"])
+                    self.assertIn("D5 active:", str(observed["outcome"]) + str(observed["output"]))
                     if tool == "operator" and name == "main":
                         self.assertEqual(observed["outcome"], ["return", 1])
 
@@ -366,7 +449,7 @@ class TestActiveSurface(unittest.TestCase):
     def assert_refused(self, observed):
         self.assertEqual(observed["launches"], [])
         self.assertEqual(observed["writes"], [])
-        self.assertIn("D5 active:", str(observed["outcome"]) + observed["output"])
+        self.assertIn("D5 active:", str(observed["outcome"]) + str(observed["output"]))
 
     def test_mutation_route_not_refused(self):
         # Independent barriers can be redundant. Remove a leaf barrier to expose
