@@ -430,6 +430,38 @@ class TestOperator(unittest.TestCase):
 
 
 class TestInactiveAndEntry(unittest.TestCase):
+    def test_installed_ready_operator_uses_its_shipped_helpers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            installed = Path(tmp) / 'installed'
+            for name in ('hanig-orchestrate', 'hanig-swarm', 'hanig-project',
+                         'hanig-review-gate', 'hanig-portable-handoff'):
+                shutil.copytree(t.ROOT / 'skills' / name, installed / name,
+                                ignore=shutil.ignore_patterns('__pycache__'))
+            probe = r'''
+import importlib, pathlib, sys, unittest
+root = pathlib.Path(sys.argv[1]).resolve()
+operator = root / 'hanig-orchestrate/scripts'
+sys.path.insert(0, str(operator))
+import merge_unit
+assert pathlib.Path(merge_unit.__file__).parent == operator
+# Load the shipped runtime before exposing the source-tree test fixtures.
+for path in sorted(operator.glob('d5_*.py')):
+    importlib.import_module(path.stem)
+sys.path.append(sys.argv[2])
+from tests.test_d5_u4_3_merge_provider import TestOperator
+result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([
+    TestOperator('test_ready_operator_merges_and_recovers_without_recorder_or_advance')]))
+for name, module in list(sys.modules.items()):
+    if name.startswith('d5_'):
+        assert root in pathlib.Path(module.__file__).resolve().parents, (name, module.__file__)
+sys.exit(not result.wasSuccessful())
+'''
+            env = {k: v for k, v in os.environ.items() if not k.startswith('HANIG_')}
+            result = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', probe,
+                str(installed), str(t.ROOT)], cwd=tmp, env=env,
+                capture_output=True, text=True, timeout=300)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_inactive_embedded_base_and_inherited_scheduler_path(self):
         data = json.loads((FIXTURES / 'u4_3_inactive_base.json').read_text())
         self.assertEqual(data['base'], BASE)
