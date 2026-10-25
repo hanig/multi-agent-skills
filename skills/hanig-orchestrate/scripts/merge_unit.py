@@ -11,6 +11,7 @@ GitHub's head compare protects the merge, not a concurrent CI rerun/retarget.
 """
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -21,6 +22,8 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from urllib.parse import quote, urlsplit
 
 import skill_paths
@@ -62,7 +65,11 @@ def _d5_merge_entry(args):
                 or args.retrieve_remote_evidence or args.remote_recovery_attestation):
             raise Refusal("D5 active: verification and abandonment are outside "
                           "the supported merge profile")
-        raise Refusal("D5 active: synchronous merge requires U4.3 binding")
+        try:
+            import d5_readiness as DR
+            DR.require(args.state_dir)
+        except ValueError as exc:
+            raise Refusal("D5 active: " + str(exc)) from exc
 
 
 def nonempty(value):
@@ -421,7 +428,11 @@ def current_intent(state_dir, binding, root, repair=True):
     intent unmarked, finish that local update before permitting a successor.
     No worker file or filesystem timestamp selects the current operation.
     """
-    _d5_refuse('current_intent')
+    if D5.d5_active():
+        if repair:
+            _d5_refuse('current_intent')
+        import d5_readiness as DR
+        DR.lease_required(state_dir)
     operation_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
     while True:
         path = state_dir / ("merge-unit-" + operation_id + ".json")
@@ -542,6 +553,81 @@ def cancel_before_request(intent_path, intent, observed, reason):
 
 def reconcile(args, plan):
     _d5_merge_entry(args)
+    if D5.d5_active():
+        import d5_authority_store as store
+        import d5_host as host_api
+        import d5_merge_journal as J
+        import d5_protocol_locks as protocol
+        import d5_readiness as DR
+        import d5_registry as registry
+        import d5_submission as DS
+        ready = DR.require(args.state_dir)
+        state_dir, root, binding, host, repo_path, scope_binding, repo = authority(args, plan)
+        entry = DR.bound(ready, registry.lookup(repo, plan["name"], state_dir))
+        operation_id, intent_path, intent = current_intent(state_dir, binding, root, repair=False)
+        if args.dry_run:
+            print("DRY RUN: D5 synchronous merge; no forge calls, writes or advancement.")
+            return None
+        cmd = commands(args, root, binding, host, repo_path)
+        boundary = _MergeBoundary(state_dir, binding, repo, host, repo_path, cmd, intent)
+        scope = boundary.read(cmd["scope"], allowed=(0, 1, 2))
+        report = json.loads(scope.stdout)
+        validate_scope_report(report, scope.returncode, scope_binding)
+        S.load_merge_receipts(state_dir)
+        pr = json.loads(boundary.read(cmd["view"]).stdout)
+        check_pr(pr, binding)
+        observed_pr_url(pr, host, repo_path, args.pr)
+        if intent is not None:
+            if pr["state"] != "MERGED":
+                raise Refusal("earlier merge request has an unresolved outcome; refusing a second merge call")
+            # Recovery observes/completes the original request without dispatch.
+            with protocol.pin(entry["record_dir"]) as pinned, pinned.drain():
+                J.recover(state_dir, intent, boundary.completion(pr))
+            return None
+        if pr["state"] != "OPEN":
+            raise Refusal("D5 completion recovery requires a bound merge intent")
+        if scope.returncode != 0 and not (scope.returncode == 2 and report["status"] == "unchecked"
+                                         and args.allow_unchecked_scope):
+            raise Refusal("scope-check exited {}: {}".format(scope.returncode, scope.stdout))
+        checks = json.loads(boundary.read(cmd["checks"]).stdout)
+        if not isinstance(checks, list) or not checks or any(
+                not isinstance(c, dict) or c.get("state") != "SUCCESS" for c in checks):
+            raise Refusal("at least one CI check is required and every check must be SUCCESS")
+        target = boundary.target()
+        evidence, error = integration_evidence(state_dir, binding, repo, target)
+        if error:
+            raise Refusal("integration-tests precondition: " + error + ". " + verification_hint(args))
+        latest = json.loads(boundary.read(cmd["view"]).stdout)
+        check_pr(latest, binding)
+        if latest["state"] != "OPEN":
+            raise Refusal("PR or target moved during preflight")
+        title = latest.get("title")
+        if not isinstance(title, str) or not title or title.isspace() or title.startswith("RECOVERY"):
+            raise Refusal("PR title is empty, invalid or begins with RECOVERY")
+        cmd["merge"] += ["--subject", "{} (#{})".format(title, latest["number"])]
+        observation = dict(approver=args.approver, already_merged=False, scope_exit=scope.returncode,
+            scope=report, scope_stdout=scope.stdout, scope_stderr=scope.stderr,
+            allow_unchecked_scope=args.allow_unchecked_scope, checks=checks, integration=evidence,
+            required_merge_claims=[V.INTEGRATION_CLAIM] +
+                ([V.STABILITY_CLAIM] if V.STABILITY_CLAIM in evidence else []))
+        intent = dict(schema_version=1, operation_id=operation_id, binding=binding, root=root,
+                      phase="merge_requested", preconditions=observation, target_before_request=target)
+        if boundary.target() != target:
+            raise Refusal("target moved during preflight")
+        boundary.intent = intent
+        native = host_api.session_anchor()
+        if isinstance(native, host_api.Unknown):
+            raise Refusal("D5 anchor is not verifiable")
+        session_id, anchor = native
+        grant = store.read(entry["record_dir"])
+        custody = grant["custody"]
+        if custody is None:
+            raise Refusal("D5 custody is not current")
+        scope = dict(plans=[plan["name"]], repositories=[binding["repo"]], actions=["merge"], trackers=[])
+        operation = DS.Operation(operation_id, "merge", J.encoded(scope), J.encoded(intent))
+        DS.submit(repo, plan["name"], state_dir, grant_id=grant["grant_id"], session_id=session_id,
+                  anchor=anchor, generation=custody["generation"], operation=operation, boundary=boundary)
+        return None
     state_dir, root, binding, host, repo_path, scope_binding, repo = authority(args, plan)
     cmd = commands(args, root, binding, host, repo_path)
     operation_id, intent_path, intent = current_intent(
@@ -745,6 +831,174 @@ def reconcile(args, plan):
             raise Refusal("merge occurred but its integration precondition is invalid; "
                           "receipt retained, advancement withheld")
     return cmd["advance"]
+
+
+def _bounded_observation(command, *, timeout, **options):
+    """Bound the caller's read, including Popen construction, by one deadline.
+
+    This worker runs the designated read-only command. Its fixed call path
+    does not record, release a lease, or merge; no lease/DRAIN fd is passed in.
+    A constructor returning after cancellation kills/reaps its read process;
+    its late result is never admitted. Cleanup may outlive the bounded wait.
+    """
+    deadline = time.monotonic() + timeout
+    done, cancelled = threading.Event(), threading.Event()
+    processes, results = [], []
+    def read_only():
+        try:
+            if cancelled.is_set() or time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            with subprocess.Popen(command, **options) as process:
+                processes.append(process)
+                try:
+                    remaining = deadline - time.monotonic()
+                    if cancelled.is_set() or remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    out, err = process.communicate(timeout=remaining)
+                    results.append(subprocess.CompletedProcess(command, process.returncode, out, err))
+                except BaseException:
+                    process.kill()
+                    process.communicate()
+                    raise
+        except BaseException as exc:
+            results.append(exc)
+        finally:
+            done.set()
+    worker = threading.Thread(target=read_only, daemon=True)
+    worker.start()
+    try:
+        if not done.wait(max(0, deadline - time.monotonic())) or time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(command, timeout)
+        result = results[0]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+    finally:
+        if not done.is_set():
+            cancelled.set()
+            if processes:
+                processes[0].kill()
+
+
+class _MergeBoundary:
+    """One designated Popen; observations and response waits stay outside START."""
+    _observation_timeout = 60
+    def __init__(self, state_dir, binding, repo, host, repo_path, cmd, intent):
+        import d5_submission as DS
+        # R6's existing named-adapter contract avoids loading the active
+        # runtime merely to import an inactive or unavailable operator.
+        DS.Boundary.register(_MergeBoundary)
+        self.state_dir, self.binding, self.repo = state_dir, binding, repo
+        self.host, self.repo_path, self.cmd, self.intent = host, repo_path, cmd, intent
+        self.process = None
+
+    def read(self, command, allowed=(0,), *, timeout=300, hard_deadline=False):
+        import d5_readiness as DR
+        DR.require(self.state_dir)
+        # Closed observation vocabulary; no arbitrary commands.
+        permitted = [self.cmd[k] for k in ("scope", "view", "target", "checks")]
+        if command not in permitted:
+            prefix = parent_command(self.host, self.repo_path, "")
+            if command[:-1] != prefix[:-1] or not command[-1].startswith(prefix[-1]):
+                raise Refusal("D5 merge observation command is not designated")
+            oid(command[-1][len(prefix[-1]):])
+        runner = _bounded_observation if hard_deadline else subprocess.run
+        result = runner(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=timeout,
+            env=(CE.child_env() if command[:2] == [sys.executable, SWARM]
+                 else {k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"}))
+        if result.returncode not in allowed:
+            raise Refusal("command exited {}: {}{}".format(
+                result.returncode, result.stdout, result.stderr))
+        return result
+
+    def target(self, *, timeout=300, hard_deadline=False):
+        ref = json.loads(self.read(self.cmd["target"], timeout=timeout, hard_deadline=hard_deadline).stdout)
+        if (not isinstance(ref, dict) or ref.get("ref") != "refs/heads/" + self.binding["target"]
+                or not isinstance(ref.get("object"), dict) or ref["object"].get("type") != "commit"):
+            raise Refusal("forge returned a different or invalid target branch ref")
+        return oid(ref["object"].get("sha"))
+
+    def observe(self, operation):
+        # OD2 bounds only the observation between the two START sections.
+        return self.target(timeout=min(60, self._observation_timeout), hard_deadline=True)
+
+    def check_observation(self, operation, observation):
+        import d5_merge_journal as J
+        if (operation.intent != J.encoded(self.intent) or
+                observation != self.intent["target_before_request"]):
+            raise Refusal("target moved after intent publication")
+
+    def start(self, operation):
+        import d5_submission as DS
+        self.process = subprocess.Popen(self.cmd["merge"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"})
+        return DS.Initiation.SUBMITTED
+
+    def finish(self):
+        if self.process is None:
+            raise Refusal("merge launch outcome is unknown")
+        try:
+            out, err = self.process.communicate(timeout=300)
+        except BaseException:
+            # Local termination does not establish the remote outcome or C.
+            self.process.kill()
+            self.process.communicate()
+            raise
+        if self.process.returncode != 0:
+            raise Refusal("merge command failed: " + out + err)
+        return self.completion()
+
+    def completion(self, pr=None):
+        import d5_merge_journal as J
+        pr = pr if pr is not None else json.loads(self.read(self.cmd["view"]).stdout)
+        check_pr(pr, self.binding)
+        if pr["state"] != "MERGED":
+            raise Refusal("merge not observed (possibly queued); rerun to reconcile, never re-merge")
+        url = observed_pr_url(pr, self.host, self.repo_path, self.binding["pr"])
+        merged = oid((pr.get("mergeCommit") or {}).get("oid"))
+        commit = json.loads(self.read(parent_command(self.host, self.repo_path, merged)).stdout)
+        parents = commit.get("parents")
+        if commit.get("sha") != merged or not isinstance(parents, list) or len(parents) != 1:
+            raise Refusal("squash reconciliation requires the observed single-parent merge commit")
+        target = oid(parents[0].get("sha"))
+        evidence = self.intent["preconditions"]["integration"]
+        if (target != self.intent["target_before_request"] or evidence.get("target_commit") != target
+                or evidence.get("subject_head") != self.binding["head"] or evidence.get("result") != "pass"):
+            raise Refusal("retained integration evidence does not match the observed merge")
+        problem = retained_integration_problem(self.intent["preconditions"], evidence,
+                    self.binding, self.repo, target, self.state_dir)
+        if problem:
+            raise Refusal(problem)
+        expected = dict((k, self.binding[k]) for k in ("unit", "repo", "target", "head"))
+        expected.update(pr=url, merged_as=merged, method="squash", target_commit=target,
+                        merged=True, attested=True, integration_status="candidate-verified")
+        return J.Observed(self.intent["operation_id"], J.encoded(expected))
+
+
+
+
+@contextmanager
+def _active_entry_lease(args):
+    """Read-only installation preflight before acquiring the existing lease."""
+    if (args.verify_integration or args.abandon_intent or args.retrieve_remote_evidence
+            or args.remote_recovery_attestation):
+        _d5_merge_entry(args)
+    try:
+        directory = Path(args.state_dir)
+        if not directory.is_dir():
+            raise Refusal("existing coordinator state directory required")
+        import d5_readiness as DR
+        preliminary = DR._validated(DR._read(directory / DR.MARKER))
+        DR._require(preliminary["state_dir"] == str(directory.resolve()), "state directory mismatch")
+        DR._require((directory / "lease.lock").is_file(), "existing coordinator lock required")
+        # No epoch bump or lease metadata write on this operator acquisition.
+        with DR.installer_lease(directory):
+            _d5_merge_entry(args)
+            yield
+    except ValueError as exc:
+        raise Refusal("D5 active: " + str(exc)) from exc
 
 
 def verify_integration(args, repo, snapshot):
@@ -1010,6 +1264,11 @@ def main(argv=None):
     if args.reason and not args.abandon_intent:
         parser.error("--reason requires --abandon-intent")
     try:
+        if D5.d5_active():
+            with _active_entry_lease(args):
+                plan = read_object(args.plan)
+                reconcile(args, plan)
+                return 2 if args.dry_run else 0
         _d5_merge_entry(args)
         plan = read_object(args.plan)
         # Validate external paths BEFORE even opening a coordinator lock.

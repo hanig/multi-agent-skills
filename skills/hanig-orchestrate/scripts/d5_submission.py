@@ -1,9 +1,12 @@
-"""Inert U3-R6 concrete submission lifecycle; no production callers.
+"""R6 submission lifecycle and the closed synchronous merge adapter.
 
 Supported envelope and accepted limits
 -------------------------------------
 P/H plus the explicit adapter contract. Local provider operations may lengthen
-START; remote response waits may not. Trusted local execution, stable record
+START; remote response waits may not. OD2 permits only the closed merge-journal
+class to release START after durable Bound preparation, observe its target once
+with a hard timeout of at most 60 seconds, then reacquire START and revalidate
+before launch. DRAIN spans both sections and the observation. Trusted local execution, stable record
 and lock identities, and participating control/install callers are required.
 R1 repairs owner permissions in place to 0600, without directory chmod or lock
 replacement. Resources and filesystem operations may fail. Raw mandate edits
@@ -14,8 +17,18 @@ The registered checkout stays at the path recorded at registration for the regis
 Non-claims: the helper cannot prove nonblocking behavior of arbitrary injected
 code; no exactly-once execution; no implicit retries.
 
+OD5 caller precondition: hold the coordinator lease for the entire submit call.
+Do not release it, unlock it or last-close its descriptor from another thread,
+a signal handler or a callback during the call. lease_required and holds_lease
+detect a lease already lost; they do not fence a later release. U4.3's lease
+continuity guarantee depends on this precondition, not a release/submit fence.
+flock ownership follows the open file description. An independently opened
+descriptor cannot unlock it; a child inheriting the description, or a process
+receiving an alias, can. The merge child receives no lease or DRAIN descriptor.
+
 Named, trusted Boundary adapters start one effect without response waits,
-deferral, retries or additional effects. A normal Finish return means the
+deferral, retries or additional effects. The merge adapter observes outside
+START and starts without waiting in its second START. A normal Finish return means the
 started operation has terminated; children use the protected-child protocol.
 Callers supply unique request_id and accurate immutable scope/intent.
 Accounting errors, including inactive D5, propagate and retain the entry.
@@ -29,8 +42,8 @@ C = authoritative durable completion. Release remains exactly
 H and S and (not A or N or (F and C)). No exit/reap/timeout implies C.
 Only C's evidence source changes under OD7: ledger completion for ledger classes,
 bound journal-provider completion for the closed merge class (see d5_completion).
-F alone is not C. START placement, lifetime ownership and retention on unknown
-are unchanged. Production merge remains refused before START without a provider.
+F alone is not C. OD2 changes START placement only for the closed merge class.
+Lifetime ownership and retention on unknown are unchanged.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -108,6 +121,8 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
     if not isinstance(operation, Operation):
         raise ValueError("D5 operation requires immutable fields")
     provider = completion.provider_for(operation.kind)
+    if hasattr(provider, "validate_request"):
+        provider.validate_request(operation, boundary)
     entry = registry.lookup(checkout, plan_id, state_dir)
     if entry is None:
         raise AuthorityError("not registered")
@@ -126,24 +141,47 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
         capability, accounting_error = None, None
         outcome, response_error = None, None
         try:
-            with pinned.start():
-                try:
-                    admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
-                    attempt = provider.prepare(checkout, plan_id, state_dir,
-                        record_id=grant_id, custody=dict(generation=generation,
-                        session_id=session_id, anchor_pid=anchor.pid, anchor_start_us=anchor.start_us),
-                        kind=operation.kind, scope=json.loads(operation.scope),
-                        correlation={"request_id": operation.request_id, "intent": bytes.hex(operation.intent)})
-                    admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
-                    readiness.lease_required(state_dir)
-                    A = True
-                    state = boundary.start(operation)
-                except BaseException as exc:
-                    start_error = exc
+            observation, observation_error = None, None
+            phases = ("prepare", "launch") if operation.kind == "merge" else ("both",)
+            for phase in phases:
+                with pinned.start():
+                    try:
+                        if phase != "launch":
+                            admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
+                            attempt = provider.prepare(checkout, plan_id, state_dir,
+                                record_id=grant_id, custody=dict(generation=generation,
+                                session_id=session_id, anchor_pid=anchor.pid, anchor_start_us=anchor.start_us),
+                                kind=operation.kind, scope=json.loads(operation.scope),
+                                correlation={"request_id": operation.request_id, "intent": bytes.hex(operation.intent)})
+                        if phase != "prepare":
+                            admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
+                            if operation.kind == "merge":
+                                if observation_error is not None:
+                                    raise observation_error
+                                boundary.check_observation(operation, observation)
+                            readiness.lease_required(state_dir)
+                            A = True
+                            state = boundary.start(operation)
+                    except BaseException as exc:
+                        start_error = exc
+                if start_error is not None:
+                    break
+                if phase == "prepare":
+                    # OD2: one bounded target read with lifetime DRAIN held,
+                    # no START, and no journal fsync before the eventual launch.
+                    try:
+                        observation = boundary.observe(operation)
+                    except BaseException as exc:
+                        observation_error = exc
             S = True
             if not A:
                 if attempt is not None:
-                    provider.classify(attempt, "not_submitted")
+                    try:
+                        provider.classify(attempt, "not_submitted")
+                    except BaseException as exc:
+                        # OD3: a lost coordinator lease forbids even N. Keep
+                        # Bound and propagate, but still reach the R6 epilogue.
+                        accounting_error = exc
             else:
                 if type(state) is not Initiation:
                     state = Initiation.UNCERTAIN
