@@ -207,6 +207,8 @@ class TestInactiveAndPremature(unittest.TestCase):
                 mock.patch.object(activation, 'd5_active', return_value=True), no_effects() as effects:
             with self.assertRaisesRegex(SE.OutboxError, 'D5 active:'):
                 SE.admit_merge(root, 'u', 'a' * 40)
+            with self.assertRaisesRegex(ValueError, 'coordinator lease required'):
+                M._d5_result_receipt(root, {}, 'runs', 'op', None)
             self.assertEqual(effects, ([], []))
 
 
