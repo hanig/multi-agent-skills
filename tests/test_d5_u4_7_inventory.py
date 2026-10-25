@@ -147,7 +147,20 @@ def parser_tokens(path):
     for source in paths:
         tree = tree_for(source)
         if tree is None:
+            text = source.read_text()
+            if text.startswith("#!/bin/sh"):
+                for line in text.splitlines():
+                    if re.match(r"\s*--?[a-z][^)]*\)", line):
+                        tokens.update(re.findall(r"--?[a-z][a-z-]*", line.split(")", 1)[0]))
+                    if re.search(r'\[.*\$.*=.*"--[a-z-]+".*\]', line):
+                        tokens.update(re.findall(r'"(--[a-z-]+)"', line))
             continue
+        if source.name in ("agent-view", "agent-manager"):
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Compare):
+                    tokens.update(c.value for c in ast.walk(node)
+                                  if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                                  and c.value.startswith("--"))
         bindings = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.For):
@@ -305,6 +318,12 @@ class TestD5Inventory(unittest.TestCase):
         committee = ROOT / "skills/hanig-review-gate/scripts/committee.py"
         self.assertTrue({"synthesize", "tiebreak"} <= set(parser_tokens(committee)))
         self.assertEqual(parser_tokens(ROOT / "scripts/docs_index.py"), ["--root", "write"])
+
+    def test_manual_cli_selectors(self):
+        self.assertEqual(parser_tokens(ROOT / "bin/doctor"), ["--help", "--json", "--prefix", "-h"])
+        self.assertEqual(parser_tokens(ROOT / "bin/probe.sh"), ["--json"])
+        self.assertTrue({"--all", "--json", "--web"} <= set(parser_tokens(ROOT / "bin/agent-view")))
+        self.assertEqual(parser_tokens(ROOT / "bin/agent-manager"), ["--once"])
 
     def test_selector_and_finding_references(self):
         data = self.data
