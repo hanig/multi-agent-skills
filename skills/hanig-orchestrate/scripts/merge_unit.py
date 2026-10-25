@@ -575,7 +575,8 @@ def _d5_journal_binding(intent, ready, repo):
     A._keys(original, {"schema_version", "operation_id", "binding", "root", "phase",
                        "preconditions", "target_before_request"}, "merge request")
     A._require(type(original["schema_version"]) is int and original["schema_version"] == 1
-               and original["phase"] == "merge_requested", "merge request", "invalid schema/phase")
+               and original["phase"] == "merge_requested"
+               and J.encoded(original).hex() == correlation["intent"], "merge request", "invalid encoding/schema")
     keys = set(original) - {"phase"}
     A._require(J.encoded({k: intent[k] for k in keys}) == J.encoded({k: original[k] for k in keys}),
                "merge request", "changed value or JSON type")
@@ -601,8 +602,7 @@ def _d5_result_receipt(state_dir, binding, root, operation_id, outcome, repo):
         row = J._read(handle)
         expected = J._receipt(handle, row, outcome)
         J._readback(handle, expected)
-        # Python object equality aliases true/1 and 1/1.0. Compare the
-        # provider's JSON encoding too, preserving those authority types.
+        # JSON encoding preserves types that Python equality aliases.
         receipts, problems = S.load_merge_receipts(state_dir)
         if problems or not any(J.encoded(r) == J.encoded(expected) for r in receipts):
             raise Refusal("D5 completion readback differs in value or JSON type")

@@ -205,6 +205,7 @@ class OperatorCase(unittest.TestCase):
                   (('correlation', 'request_id'), 'wrong'),
                   (('installation', 'schema_version'), True)]
         request = json.loads(bytes.fromhex(original['d5']['binding']['correlation']['intent']))
+        cases += [(('correlation', 'intent'), (b'{"schema_version":1,' + J.encoded(request)[1:]).hex())]
         cases += [(('correlation', 'intent'), J.encoded(r).hex()) for r in
                   [dict(schema_version=1, phase='merge_requested')] +
                   [{k: v for k, v in request.items() if k != omitted} for omitted in request]]
