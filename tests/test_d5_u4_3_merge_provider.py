@@ -28,6 +28,7 @@ BASE = '46423308a6a30bc4a2b96fa6f728ca8072e4fb12'
 
 
 class TestMergeProvider(unittest.TestCase):
+    eq = unittest.TestCase.assertEqual
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -98,17 +99,17 @@ class TestMergeProvider(unittest.TestCase):
             return write(path, row)
         def launching(argv, *args, **kwargs):
             if argv[:3] == ['gh', 'pr', 'merge']:
-                self.assertEqual(self.row()['d5']['state'], 'Bound')
-                self.assertEqual(self.c.probe('start'), 'blocked')
-                self.assertEqual(events[-1], 'observed')
+                self.eq(self.row()['d5']['state'], 'Bound')
+                self.eq(self.c.probe('start'), 'blocked')
+                self.eq(events[-1], 'observed')
                 self.assertFalse(self.receipts.exists())
                 events.append('launched')
             self.assertNotEqual(argv[:3], [sys.executable, M.SWARM, 'merge'])
             return popen(argv, *args, **kwargs)
         observe = self.boundary.observe
         def observing(operation):
-            self.assertEqual(self.row()['d5']['state'], 'Bound')
-            self.assertEqual(self.c.probe('start'), 'available')
+            self.eq(self.row()['d5']['state'], 'Bound')
+            self.eq(self.c.probe('start'), 'available')
             value = observe(operation)
             events.append('observed')
             return value
@@ -119,12 +120,12 @@ class TestMergeProvider(unittest.TestCase):
                 mock.patch.object(self.boundary, 'observe', observing), mock.patch.object(os, 'fsync', syncing):
             result = self.c.submit()
         self.assertIsInstance(result.outcome, J.Observed)
-        self.assertEqual(events, ['Bound', 'observed', 'launched', 'Attempted', 'Recorded'])
-        self.assertEqual(len(self.merges()), 1)
-        self.assertEqual(self.row()['phase'], 'receipt_recorded')
-        self.assertEqual(self.c.probe('drain'), 'available')
+        self.eq(events, ['Bound', 'observed', 'launched', 'Attempted', 'Recorded'])
+        self.eq(len(self.merges()), 1)
+        self.eq(self.row()['phase'], 'receipt_recorded')
+        self.eq(self.c.probe('drain'), 'available')
         self.assertFalse((self.c.directory / t.ledger.DIRECTORY).exists())
-        self.assertEqual(json.loads(self.receipts.read_text())['d5']['binding']['installation'], readiness.require(self.c.state_dir))
+        self.eq(json.loads(self.receipts.read_text())['d5']['binding']['installation'], readiness.require(self.c.state_dir))
 
     def gap(self, change, lease_loss=False):
         paused, resume = threading.Event(), threading.Event()
@@ -139,23 +140,23 @@ class TestMergeProvider(unittest.TestCase):
             thread, results = self.c.launch(self.c.submit)
             try:
                 self.assertTrue(paused.wait(8), 'preparation watchdog')
-                self.assertEqual(self.c.probe('start'), 'available')
-                self.assertEqual(self.c.probe('drain'), 'blocked')
+                self.eq(self.c.probe('start'), 'available')
+                self.eq(self.c.probe('drain'), 'blocked')
                 change()
             finally:
                 resume.set()
                 result = self.c.join(thread, results)
         self.assertIsInstance(result, t.authority.AuthorityError)
-        self.assertEqual(self.merges(), [])
-        self.assertEqual(self.c.probe('drain'), 'available')
+        self.eq(self.merges(), [])
+        self.eq(self.c.probe('drain'), 'available')
         if lease_loss:
             self.assertIn('caller-held coordinator lease required', str(result))
-            self.assertEqual(self.journal_bytes(), snapshot[0])
-            self.assertEqual(self.row()['d5']['state'], 'Bound')
+            self.eq(self.journal_bytes(), snapshot[0])
+            self.eq(self.row()['d5']['state'], 'Bound')
             ok, reason = state.acquire_lease(self.c.state_dir, bump_epoch=False)
             self.assertTrue(ok, reason)
         else:
-            self.assertEqual(self.row()['d5']['classification'], 'not_submitted')
+            self.eq(self.row()['d5']['classification'], 'not_submitted')
         self.assertFalse(self.receipts.exists())
         # Both consumers must retain the unresolved fence after DRAIN release.
         with self.assertRaisesRegex(ValueError, 'unresolved'):
@@ -171,9 +172,9 @@ class TestMergeProvider(unittest.TestCase):
                 remote_recovery_attestation=None))
             with self.assertRaisesRegex(ValueError, 'unresolved outcome'):
                 M.reconcile(args, dict(name='p'))
-        self.assertEqual(self.merges(), [])
+        self.eq(self.merges(), [])
         if lease_loss:
-            self.assertEqual(self.journal_bytes(), snapshot[0])
+            self.eq(self.journal_bytes(), snapshot[0])
         return result
 
     def test_r_revocation_completes_in_gap(self):
@@ -224,15 +225,15 @@ class TestMergeProvider(unittest.TestCase):
             worker, output = self.c.launch(revoke)
             try:
                 self.assertFalse(revoked.wait(.15))
-                self.assertEqual(self.c.probe('start'), 'blocked')
+                self.eq(self.c.probe('start'), 'blocked')
             finally:
                 release.set()
                 result = self.c.join(thread, results)
                 self.c.join(worker, output)
         self.assertTrue(observed.is_set() and revoked.is_set())
         self.assertIsInstance(result, t.authority.AuthorityError)
-        self.assertEqual(self.row()['d5']['classification'], 'not_submitted')
-        self.assertEqual(self.merges(), [])
+        self.eq(self.row()['d5']['classification'], 'not_submitted')
+        self.eq(self.merges(), [])
 
     def test_observation_failure_and_movement_cancel_without_replay(self):
         for failure in (OSError('read failed'), 'd' * 40):
@@ -246,8 +247,8 @@ class TestMergeProvider(unittest.TestCase):
                         return failure
                     with mock.patch.object(case.boundary, 'observe', observe), case.assertRaises((OSError, ValueError)):
                         case.c.submit()
-                    case.assertEqual(case.row()['d5']['classification'], 'not_submitted')
-                    case.assertEqual(case.merges(), [])
+                    case.eq(case.row()['d5']['classification'], 'not_submitted')
+                    case.eq(case.merges(), [])
                     with case.assertRaisesRegex(ValueError, 'unresolved'):
                         case.c.submit()
                 finally:
@@ -266,24 +267,24 @@ class TestMergeProvider(unittest.TestCase):
             thread, results = self.c.launch(self.c.submit)
             try:
                 self.assertTrue(paused.wait(8))
-                self.assertEqual(self.c.probe('start'), 'available')
-                self.assertEqual(self.c.probe('drain'), 'blocked')
+                self.eq(self.c.probe('start'), 'available')
+                self.eq(self.c.probe('drain'), 'blocked')
                 t.control.revoke(*self.c.args, 151, 'stop')
             finally:
                 release.set()
                 result = self.c.join(thread, results)
         self.assertIsInstance(result, t.submission.Result)
-        self.assertEqual(self.row()['d5']['state'], 'Recorded')
+        self.eq(self.row()['d5']['state'], 'Recorded')
 
     def test_failed_merge_never_recorded(self):
         self.forge['fail_merge_after'] = True
         self.save_forge()
         with self.assertRaisesRegex(ValueError, 'merge command failed'):
             self.c.submit()
-        self.assertEqual(len(self.merges()), 1)
+        self.eq(len(self.merges()), 1)
         self.assertFalse(self.receipts.exists())
-        self.assertEqual(self.row()['d5']['classification'], 'unknown')
-        self.assertEqual(self.c.probe('drain'), 'blocked')
+        self.eq(self.row()['d5']['classification'], 'unknown')
+        self.eq(self.c.probe('drain'), 'blocked')
 
     def test_ambiguous_popen_is_not_not_submitted(self):
         popen = subprocess.Popen
@@ -293,8 +294,8 @@ class TestMergeProvider(unittest.TestCase):
             return popen(argv, *args, **kwargs)
         with mock.patch.object(subprocess, 'Popen', ambiguous), self.assertRaisesRegex(OSError, 'ambiguous'):
             self.c.submit()
-        self.assertEqual(self.row()['d5']['classification'], 'unknown')
-        self.assertEqual(self.c.probe('drain'), 'blocked')
+        self.eq(self.row()['d5']['classification'], 'unknown')
+        self.eq(self.c.probe('drain'), 'blocked')
         self.assertFalse(self.receipts.exists())
 
     def test_legacy_boolean_cannot_complete(self):
@@ -302,8 +303,8 @@ class TestMergeProvider(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, 'invalid observed outcome'):
             self.c.submit()
         self.assertFalse(self.receipts.exists())
-        self.assertEqual(self.row()['d5']['classification'], 'unknown')
-        self.assertEqual(self.c.probe('drain'), 'blocked')
+        self.eq(self.row()['d5']['classification'], 'unknown')
+        self.eq(self.c.probe('drain'), 'blocked')
 
     def test_recorded_absorbing_and_receipt_readback_required(self):
         result = self.c.submit()
@@ -311,8 +312,8 @@ class TestMergeProvider(unittest.TestCase):
         with t.protocol.pin(self.c.directory) as pinned, pinned.drain():
             capability = J.PROVIDER.bind(self.handle())
             capability.uncertain()
-            self.assertEqual(capability.complete(result.outcome), result.outcome)
-            self.assertEqual(self.journal_bytes(), before)
+            self.eq(capability.complete(result.outcome), result.outcome)
+            self.eq(self.journal_bytes(), before)
             self.receipts.write_text(json.dumps(dict(merged=True, attested=True)) + '\n')
             with self.assertRaises(ValueError):
                 capability.complete(result.outcome)
@@ -321,8 +322,8 @@ class TestMergeProvider(unittest.TestCase):
         with mock.patch.object(J, '_readback', side_effect=ValueError('missing receipt')), \
                 self.assertRaisesRegex(ValueError, 'missing receipt'):
             self.c.submit()
-        self.assertEqual(self.row()['d5']['state'], 'Attempted')
-        self.assertEqual(self.c.probe('drain'), 'blocked')
+        self.eq(self.row()['d5']['state'], 'Attempted')
+        self.eq(self.c.probe('drain'), 'blocked')
 
     def test_receipt_append_flock_and_directory_durability(self):
         sync, flock = J.journal._fsync_directory, J.journal.fcntl.flock
@@ -339,7 +340,7 @@ class TestMergeProvider(unittest.TestCase):
                 mock.patch.object(J.journal, '_fsync_directory', directory):
             self.c.submit()
         self.assertIn('lock', events[:events.index('directory')])
-        self.assertEqual(events.count('directory'), 1)
+        self.eq(events.count('directory'), 1)
 
     def test_bound_completion_only_recovery_no_new_merge_after_expiry(self):
         def interrupted():
@@ -352,8 +353,8 @@ class TestMergeProvider(unittest.TestCase):
         with t.protocol.pin(self.c.directory) as pinned, pinned.drain():
             outcome = self.boundary.completion()
             J.recover(self.c.state_dir, self.row(), outcome)
-        self.assertEqual(self.row()['d5']['state'], 'Recorded')
-        self.assertEqual(len(self.merges()), before)
+        self.eq(self.row()['d5']['state'], 'Recorded')
+        self.eq(len(self.merges()), before)
 
 
 class TestOperator(unittest.TestCase):
