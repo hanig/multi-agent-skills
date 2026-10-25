@@ -181,6 +181,8 @@ def successor_gate(entry):
                 value = merge_unit.read_object(source)["intent"]
             else:
                 value = merge_unit.read_object(source)
+            _require(path.name == "merge-unit-" + value["operation_id"] + ".json",
+                     "merge intent filename mismatch")
             _, _, current = merge_unit.current_intent(
                 directory, value["binding"], value["root"], repair=False)
             _require(current is None or current.get("phase") == "receipt_recorded",
