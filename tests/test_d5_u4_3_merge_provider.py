@@ -208,7 +208,8 @@ class TestMergeProvider(unittest.TestCase):
             if kwargs['timeout'] < 61:
                 raise subprocess.TimeoutExpired(command, kwargs['timeout'])
             return subprocess.CompletedProcess(command, 0, json.dumps(self.forge['ref']), '')
-        with mock.patch.object(subprocess, 'run', side_effect=slow):
+        with mock.patch.object(subprocess, 'run', side_effect=slow), \
+                mock.patch.object(M, '_bounded_observation', side_effect=slow):
             for name in ('scope', 'view', 'checks'):
                 self.eq(self.boundary.read(self.cmd[name]).returncode, 0)
             self.eq(self.boundary.target(), self.intent['target_before_request'])
@@ -222,6 +223,42 @@ class TestMergeProvider(unittest.TestCase):
 
     def test_a_expiry_in_gap(self):
         self.gap(lambda: setattr(self.c.clock, 'return_value', 200))
+
+    def test_observation_deadline_covers_process_creation(self):
+        entered, resume, finished = (threading.Event() for _ in range(3))
+        popen = subprocess.Popen
+        process_exit = popen.__exit__
+        def stalled(command, *args, **kwargs):
+            if command == self.cmd['target']:
+                entered.set()
+                if not resume.wait(8):
+                    raise AssertionError('constructor watchdog')
+            return popen(command, *args, **kwargs)
+        def exiting(process, *args):
+            try:
+                return process_exit(process, *args)
+            finally:
+                if process.args == self.cmd['target']:
+                    finished.set()
+        with mock.patch.object(self.boundary, '_observation_timeout', 1, create=True), \
+                mock.patch.object(popen, '__exit__', exiting), \
+                mock.patch.object(subprocess, 'Popen', stalled):
+            thread, results = self.c.launch(self.c.submit)
+            try:
+                self.assertTrue(entered.wait(8))
+                thread.join(3)
+                self.assertFalse(thread.is_alive(), 'observation deadline excludes process creation')
+                self.assertIsInstance(results[0], subprocess.TimeoutExpired)
+                self.eq(self.merges(), [])
+                self.eq(self.row()['d5']['classification'], 'not_submitted')
+                self.eq(self.c.probe('drain'), 'available')
+                self.assertTrue(state.holds_lease(self.c.state_dir))
+                self.assertFalse(self.receipts.exists())
+            finally:
+                resume.set()
+                self.c.join(thread, results)
+                self.assertTrue(finished.wait(8), 'late read cleanup watchdog')
+        self.eq(self.merges(), [])
 
     def test_b_relinquishment_in_gap(self):
         self.gap(lambda: t.control.relinquish(*self.c.args, now=151))
@@ -440,6 +477,34 @@ class TestMergeProvider(unittest.TestCase):
         self.c.submit()
         self.assertTrue(self.receipts.read_bytes().startswith(before))
         self.eq(len(M.S.load_merge_receipts(self.c.state_dir)[0]), 1)
+        self.eq(self.row()['d5']['state'], 'Recorded')
+        self.eq(len(self.merges()), 1)
+
+    def test_reader_line_separators_survive_interrupted_recording(self):
+        separators = ('\n', '\r', '\r\n', '\v', '\f', '\x1c', '\x1d', '\x1e', '\x85', '\u2028', '\u2029')
+        prior = dict(unit='prior', repo=self.binding['repo'], target='main', head='d' * 40,
+            pr='https://github.com/example/project/pull/5', merged_as='e' * 40, method='squash',
+            target_commit='b' * 40, merged=True, attested=True, integration_status='candidate-verified')
+        before = (''.join(json.dumps(dict(prior, unit='prior-' + str(n))) + separator
+                          for n, separator in enumerate(separators)) + json.dumps(prior)).encode('utf-8')
+        self.receipts.write_bytes(before)
+        rows, problems = M.S.load_merge_receipts(self.c.state_dir)
+        self.eq(len(rows), len(separators) + 1)
+        self.eq(problems, [])
+        write = J._write
+        def interrupted(handle, row):
+            if row['d5']['state'] == 'Recorded':
+                raise OSError('interruption after receipt')
+            return write(handle, row)
+        with mock.patch.object(J, '_write', interrupted), \
+                self.assertRaisesRegex(OSError, 'interruption after receipt'):
+            self.c.submit()
+        self.assertTrue(self.receipts.read_bytes().startswith(before))
+        durable = self.receipts.read_bytes()
+        with t.protocol.pin(self.c.directory) as pinned, pinned.drain():
+            J.recover(self.c.state_dir, self.row(), self.boundary.completion())
+        self.eq(self.receipts.read_bytes(), durable)
+        self.eq(len(M.S.load_merge_receipts(self.c.state_dir)[0]), len(separators) + 2)
         self.eq(self.row()['d5']['state'], 'Recorded')
         self.eq(len(self.merges()), 1)
 
