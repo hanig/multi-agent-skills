@@ -181,6 +181,26 @@ class TestMergeProvider(unittest.TestCase):
     def test_r_revocation_completes_in_gap(self):
         self.gap(lambda: t.control.revoke(*self.c.args, 151, 'stop'))
 
+    def test_slow_reads_keep_legacy_budget_outside_gap(self):
+        calls = []
+        def slow(command, **kwargs):
+            calls.append(kwargs['timeout'])
+            # A virtual 61-second response is valid under the legacy budget.
+            if kwargs['timeout'] < 61:
+                raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+            return subprocess.CompletedProcess(command, 0, json.dumps(self.forge['ref']), '')
+        with mock.patch.object(subprocess, 'run', side_effect=slow):
+            for name in ('scope', 'view', 'checks'):
+                self.eq(self.boundary.read(self.cmd[name]).returncode, 0)
+            self.eq(self.boundary.target(), self.intent['target_before_request'])
+            parent = M.parent_command('github.com', 'example/project', 'c' * 40)
+            self.eq(self.boundary.read(parent).returncode, 0)
+            with self.assertRaises(subprocess.TimeoutExpired) as refused:
+                self.boundary.observe(self.c.operation)
+        self.eq(calls[:-1], [300] * 5)
+        self.assertGreater(refused.exception.timeout, 0)
+        self.assertLessEqual(refused.exception.timeout, 60)
+
     def test_a_expiry_in_gap(self):
         self.gap(lambda: setattr(self.c.clock, 'return_value', 200))
 
