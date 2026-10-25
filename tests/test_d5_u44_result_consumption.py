@@ -169,6 +169,24 @@ class OperatorCase(unittest.TestCase):
                 self.assertEqual(tree_bytes(self.f.c.state_dir), before)
                 self.assertEqual(len(self.f.merges()), 1)
 
+    def test_readback_rejects_boolean_integer_aliases(self):
+        self.assertEqual(self.invoke(), (0, ''))
+        receipt = json.loads(self.f.receipts.read_text())
+        for path, value in ((('merged',), 1), (('attested',), 1),
+                (('d5', 'schema_version'), True), (('d5', 'schema_version'), 1.0),
+                (('d5', 'binding', 'custody', 'generation'), True)):
+            with self.subTest(path=path, value=value):
+                row = copy.deepcopy(receipt)
+                target = row
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                self.f.receipts.write_text(json.dumps(row) + '\n')
+                before = tree_bytes(self.f.c.state_dir)
+                self.assert_refused()
+                self.assertEqual(tree_bytes(self.f.c.state_dir), before)
+                self.assertEqual(len(self.f.merges()), 1)
+
     def test_direct_consumption_refuses_even_ready_valid_receipt(self):
         self.assertEqual(self.invoke(), (0, ''))
         with no_effects() as effects:

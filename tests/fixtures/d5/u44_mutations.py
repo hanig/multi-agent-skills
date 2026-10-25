@@ -33,7 +33,10 @@ def patches(name):
             'if D5.d5_active():', 'if False:')]
     if name == 'report-before-readback':
         return [replacement(tests.M, '_d5_result_receipt',
-            'J._readback(handle, expected)', 'pass')]
+            'J._readback(handle, expected)', 'return expected')]
+    if name == 'typed-receipt':
+        return [replacement(tests.M, '_d5_result_receipt',
+            'J.encoded(r) == J.encoded(expected)', 'r == expected')]
     if name == 'historical-grant':
         # Remove both the provider fence and the consumer fence to demonstrate
         # that even an old successful receipt must not acquire D5 authority.
@@ -55,6 +58,7 @@ CASES = {
     'report-before-readback': 'OperatorCase.test_result_without_durable_readback_never_reports_success',
     'historical-grant': 'OperatorCase.test_historical_intent_and_receipt_never_gain_active_authority',
     'stale-m6-base': 'TestInactiveAndPremature.test_inactive_capture_on_recorded_base_with_inherited_sinfo',
+    'typed-receipt': 'OperatorCase.test_readback_rejects_boolean_integer_aliases',
 }
 
 
@@ -79,7 +83,7 @@ def main():
         print('RESTORED ' + name, flush=True)
         if not run_test(name).wasSuccessful():
             raise AssertionError('restored regression failed: ' + name)
-    print('All five mutations killed; all restored regressions passed.')
+    print('All mutations killed; all restored regressions passed.')
 
 
 if __name__ == '__main__':
