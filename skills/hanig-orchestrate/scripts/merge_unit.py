@@ -551,6 +551,28 @@ def cancel_before_request(intent_path, intent, observed, reason):
     rollback_path.unlink()
 
 
+def _d5_result_receipt(state_dir, binding, root, operation_id, outcome):
+    """Consume completion through the admitted provider, never intent labels.
+
+    The caller retains the coordinator lease. Reuse the provider's request,
+    installation and outcome checks under DRAIN, then its strict readback.
+    This reader neither records completion nor corrects coordinator state.
+    """
+    import d5_merge_journal as J
+    import d5_protocol_locks as protocol
+    import d5_readiness as DR
+    ready = DR.require(state_dir)
+    current, _, intent = current_intent(state_dir, binding, root, repair=False)
+    if current != operation_id or not isinstance((intent or {}).get("d5"), dict):
+        raise Refusal("D5 completion requires the admitted bound intent")
+    handle = J.Handle(operation_id, str(state_dir), J.encoded(intent["d5"]["binding"]))
+    with protocol.pin(ready["record_dir"]) as pinned, pinned.drain():
+        row = J._read(handle)
+        expected = J._receipt(handle, row, outcome)
+        J._readback(handle, expected)
+    return expected
+
+
 def reconcile(args, plan):
     _d5_merge_entry(args)
     if D5.d5_active():
@@ -582,8 +604,8 @@ def reconcile(args, plan):
                 raise Refusal("earlier merge request has an unresolved outcome; refusing a second merge call")
             # Recovery observes/completes the original request without dispatch.
             with protocol.pin(entry["record_dir"]) as pinned, pinned.drain():
-                J.recover(state_dir, intent, boundary.completion(pr))
-            return None
+                outcome = J.recover(state_dir, intent, boundary.completion(pr))
+            return _d5_result_receipt(state_dir, binding, root, operation_id, outcome)
         if pr["state"] != "OPEN":
             raise Refusal("D5 completion recovery requires a bound merge intent")
         if scope.returncode != 0 and not (scope.returncode == 2 and report["status"] == "unchecked"
@@ -625,9 +647,12 @@ def reconcile(args, plan):
             raise Refusal("D5 custody is not current")
         scope = dict(plans=[plan["name"]], repositories=[binding["repo"]], actions=["merge"], trackers=[])
         operation = DS.Operation(operation_id, "merge", J.encoded(scope), J.encoded(intent))
-        DS.submit(repo, plan["name"], state_dir, grant_id=grant["grant_id"], session_id=session_id,
+        result = DS.submit(repo, plan["name"], state_dir, grant_id=grant["grant_id"], session_id=session_id,
                   anchor=anchor, generation=custody["generation"], operation=operation, boundary=boundary)
-        return None
+        if (type(result) is not DS.Result or result.effect_id != operation_id
+                or result.initiation is not DS.Initiation.SUBMITTED):
+            raise Refusal("D5 merge submission did not return the admitted completion")
+        return _d5_result_receipt(state_dir, binding, root, operation_id, result.outcome)
     state_dir, root, binding, host, repo_path, scope_binding, repo = authority(args, plan)
     cmd = commands(args, root, binding, host, repo_path)
     operation_id, intent_path, intent = current_intent(
