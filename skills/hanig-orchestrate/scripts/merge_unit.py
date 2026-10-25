@@ -836,7 +836,7 @@ class _MergeBoundary(DS.Boundary):
         self.host, self.repo_path, self.cmd, self.intent = host, repo_path, cmd, intent
         self.process = None
 
-    def read(self, command, allowed=(0,)):
+    def read(self, command, allowed=(0,), *, timeout=300):
         DR.require(self.state_dir)
         # Closed observation vocabulary; no arbitrary commands.
         permitted = [self.cmd[k] for k in ("scope", "view", "target", "checks")]
@@ -846,7 +846,7 @@ class _MergeBoundary(DS.Boundary):
                 raise Refusal("D5 merge observation command is not designated")
             oid(command[-1][len(prefix[-1]):])
         result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, timeout=60,
+            stderr=subprocess.PIPE, text=True, timeout=timeout,
             env=(CE.child_env() if command[:2] == [sys.executable, SWARM]
                  else {k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"}))
         if result.returncode not in allowed:
@@ -854,15 +854,16 @@ class _MergeBoundary(DS.Boundary):
                 result.returncode, result.stdout, result.stderr))
         return result
 
-    def target(self):
-        ref = json.loads(self.read(self.cmd["target"]).stdout)
+    def target(self, *, timeout=300):
+        ref = json.loads(self.read(self.cmd["target"], timeout=timeout).stdout)
         if (not isinstance(ref, dict) or ref.get("ref") != "refs/heads/" + self.binding["target"]
                 or not isinstance(ref.get("object"), dict) or ref["object"].get("type") != "commit"):
             raise Refusal("forge returned a different or invalid target branch ref")
         return oid(ref["object"].get("sha"))
 
     def observe(self, operation):
-        return self.target()
+        # OD2 bounds only the observation between the two START sections.
+        return self.target(timeout=60)
 
     def check_observation(self, operation, observation):
         import d5_merge_journal as J
