@@ -16,4 +16,57 @@
 "l7":{"file":"remote_verify.py","function":"cleanup_slurm_locked","order":"sibling then stage EX|NB"}},
 "worker_gate":{"source":{"file":"swarm_code_protocol.py","function":"_code_completion_protocol"},
 "path":"Completion requires loaded review.py; no D5 permit."},
-"entry_columns":["classification","locks","boundaries","worker","rationale","note"],"boundary_columns":["file","function","starts","can_outlive_command","lifetime"]}
+"entry_columns":["classification","locks","boundaries","worker","rationale","note"],"boundary_columns":["file","function","starts","can_outlive_command","lifetime"],
+"u41_active_surface":{
+  "owners": {
+    "71": {
+      "owner": "U4.1",
+      "verification": "U4.7"
+    },
+    "72": {
+      "owner": "U4.1",
+      "verification": "U4.7"
+    },
+    "73": {
+      "owner": "U4.1",
+      "verification": "U4.7"
+    },
+    "74": {
+      "owner": "U4.1",
+      "verification": "U4.7"
+    }
+  },
+  "swarm_entries": [
+    "_submit",
+    "maybe_continue",
+    "advance",
+    "_start_code_terminal_watchers",
+    "cmd_watch_code_terminal",
+    "_prepare_command_paths",
+    "cmd_continue",
+    "cmd_validate",
+    "cmd_run",
+    "cmd_advance",
+    "cmd_stop_unit",
+    "promote",
+    "cmd_promote",
+    "_integration_verification_fence",
+    "cmd_verify",
+    "cmd_merge",
+    "cmd_seq_floor",
+    "cmd_outbox",
+    "main"
+  ],
+  "operator_entries": [
+    "run",
+    "current_intent",
+    "abandon",
+    "reconcile",
+    "verify_integration",
+    "print_tracker_drain",
+    "main"
+  ],
+  "policy": "Default refusal at active dispatch and direct legacy entries; schema, status, scope-check and validate without seed fetching retain observation behavior.",
+  "merge": "Synchronous merge entry reserved; merge effect refuses until U4.3 binding. No legacy fallback.",
+  "tracker": "U6 owns tracker helper/backfill closure; U4.1 refuses containing S/M commands."
+}}
