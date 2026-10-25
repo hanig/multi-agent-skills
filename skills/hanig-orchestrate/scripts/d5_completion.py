@@ -169,12 +169,19 @@ class _LedgerProvider(Provider):
         ledger._outcome(outcome)
 
 
-_PROVIDERS = MappingProxyType({"ledger": _LedgerProvider(), "journal": None})
+def _merge_provider():
+    from d5_merge_journal import PROVIDER
+    return PROVIDER
+
+
+_PROVIDERS = MappingProxyType({"ledger": _LedgerProvider(), "journal": _merge_provider})
 
 
 def provider_for(kind):
-    """Fixed pre-START mapping; no provider for merge in production yet."""
+    """Fixed pre-START mapping; result fields cannot select a provider."""
     provider = _PROVIDERS[admission.recording_authority(kind)]
+    if provider is _merge_provider:
+        return _merge_provider()
     if provider is None:
         raise AuthorityError("D5 journal request requires journal binding")
     return provider

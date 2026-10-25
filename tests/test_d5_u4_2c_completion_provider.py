@@ -180,6 +180,8 @@ class TestCompletionProvider(unittest.TestCase):
         self.c.operation = replace(self.c.operation, kind="merge")
 
     def fixture(self):
+        self.c.boundary.observe = lambda operation: None
+        self.c.boundary.check_observation = lambda operation, observation: None
         self.c.stack.enter_context(mock.patch.object(C, "_PROVIDERS",
             dict(C._PROVIDERS, journal=self.provider)))
         # A failing fallback must be observed even when R6 catches its exception.
@@ -339,7 +341,8 @@ class TestCompletionProvider(unittest.TestCase):
         self.assert_no_ledger()
 
     def test_m6_premature_activation_refuses_before_START_without_effects(self):
-        self.assertIsNone(C._PROVIDERS["journal"])
+        import d5_merge_journal as J
+        self.assertIs(C.provider_for("merge"), J.PROVIDER)
         with self.assertRaises(TypeError):
             C._PROVIDERS["journal"] = self.provider
         before = tree_bytes(self.c.root)
