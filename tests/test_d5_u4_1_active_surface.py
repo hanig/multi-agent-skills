@@ -274,6 +274,16 @@ class TestActiveSurface(unittest.TestCase):
                 with mock.patch.object(sys, "executable", executable):
                     self.assertEqual(fixture.observe("operator", "reconcile", False), expected)
 
+    def test_inactive_capture_normalizes_quoted_interpreter_path(self):
+        expected = json.loads(FIXTURE.read_text())["captures"]["operator.reconcile"]
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = SurfaceFixture(tmp)
+            executable = str(ROOT / ".u41 review venv/bin/python")
+            with mock.patch.object(sys, "executable", executable):
+                observed = fixture.observe("operator", "reconcile", False)
+        self.assertEqual(observed["commands"], expected["commands"])
+        self.assertEqual(observed, expected)
+
     def test_premature_activation_direct_entries_before_first_effect(self):
         for tool, names in (("swarm", S_ENTRIES), ("operator", M_ENTRIES)):
             for name in names:
