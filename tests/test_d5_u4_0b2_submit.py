@@ -97,6 +97,7 @@ class TestSubmitBarrier(unittest.TestCase):
         self.assertEqual(self.c.probe('drain'), 'available')
 
     def test_M6_without_git_history(self):
+        # m6-needs-history: the captured base must work in depth-one checkouts.
         with mock.patch.object(subprocess, 'check_output', side_effect=
                 subprocess.CalledProcessError(128, ['git', 'show'])) as history:
             self.test_M6_inactive_submit_matches_recorded_base()
@@ -201,6 +202,7 @@ class TestSuccessorGate(unittest.TestCase):
             renamed.unlink()
 
     def test_gate_binds_all_sources_to_reachable_operations(self):
+        # gate-trusts-recorded-id: cover both changed binding and changed ID.
         for change in ('binding', 'id'):
             for kind in ('intent', 'pending', 'abandonment'):
                 with self.subTest(change=change, kind=kind):
