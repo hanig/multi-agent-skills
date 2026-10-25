@@ -39,7 +39,10 @@ its effect owner; integrated discovery does not substitute for behavioral proof.
 
 `root_columns` and `record_columns` name each array column. `S/O/P/G` expand
 through `source_roots`; citation paths can also use a root ID. Citation line
-numbers refer to this base. `$tN` branch text expands through `text`.
+numbers refer to this immutable base; `citation-validation.txt` records the
+external `validate_citations.py` check using Git objects. The committed test
+checks tracked inputs only and ignores current citation line shifts. OD3 keeps
+proof invalidation on code changes with implementation-unit discovery. `$tN` branch text expands through `text`.
 
 `roots` contains discovery sources, parser selectors, environment **names** and
 API names. `records` links each mode group to effects, one proposed disposition,

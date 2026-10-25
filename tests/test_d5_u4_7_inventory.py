@@ -3,8 +3,10 @@ import ast
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,14 +16,23 @@ VENDORED = ("agent-bus", "paseo", "paseo-advisor", "paseo-committee",
             "paseo-handoff", "paseo-loop", "pi-fleet", "start-a-sprint")
 
 
+def track_fixture(root, *paths):
+    """Put synthetic census inputs in a disposable Git index, without commits."""
+    if not (root / ".git").exists():
+        subprocess.check_call(["git", "init", "-q", str(root)])
+    subprocess.check_call(["git", "-C", str(root), "add", "--"] + list(paths))
+
+
 def source_files(root):
-    """Repository-layout inputs, including hidden launch configuration, without Git.
+    """Tracked inputs only, including hidden launch configuration.
 
     Fixture strings are data, not launch sites. Exclude this inventory's own
     assertions so the census cannot satisfy itself. No caller's HOME is read.
     """
     files = []
-    for path in root.rglob("*"):
+    tracked = subprocess.check_output(["git", "ls-files", "-z", "--cached"], cwd=str(root))
+    for name in sorted(set(tracked.decode("utf-8").split("\0")) - {""}):
+        path = root / name
         rel = path.relative_to(root)
         if (path.is_file() and not path.is_symlink()
                 and not {".git", "__pycache__"}.intersection(rel.parts)
@@ -273,7 +284,9 @@ class TestD5Inventory(unittest.TestCase):
     def test_shape_and_dispositions(self):
         data = self.data
         self.assertEqual(data["schema"], 1)
-        self.assertEqual(len(data["base"]), 40)
+        self.assertRegex(data["base"], r"\A[0-9a-f]{40}\Z")
+        self.assertEqual(data["citation_validation"]["base"], data["base"])
+        self.assertTrue(data["citation_validation"]["output"])
         roots = {r["id"]: r for r in data["roots"]}
         self.assertEqual(len(roots), len(data["roots"]))
         effects = data["effects"]
@@ -298,19 +311,24 @@ class TestD5Inventory(unittest.TestCase):
             self.assertTrue(effect["description"])
             self.assertTrue(effect["citations"])
             for path, line in effect["citations"]:
-                prefix, _, suffix = path.partition("/")
-                if prefix in data["source_roots"]:
-                    path = data["source_roots"][prefix] + suffix
+                self.assertIsInstance(path, str)
+                self.assertTrue(path)
+                self.assertIs(type(line), int)
                 self.assertGreater(line, 0)
-                self.assertLessEqual(line, len((ROOT / path).read_text().splitlines()))
 
     def test_mechanical_census(self):
         discovered = discover()
         assert_census(self, self.data, discovered)
         for root in self.data["roots"]:
             self.assertTrue(root["discovery"])
-            for citation in root["discovery"]:
-                self.assertIn(citation, discovered[root["path"]])
+            for path, line, mechanism in root["discovery"]:
+                self.assertIsInstance(path, str)
+                self.assertTrue(path)
+                self.assertIs(type(line), int)
+                self.assertGreater(line, 0)
+                self.assertIn(mechanism, ("seed", "program", "manifest-helper",
+                                         "vendored-workflow", "launch-config",
+                                         "text-launch", "argv-path"))
             self.assertEqual(root["parser_tokens"], parser_tokens(ROOT / root["path"]))
 
     def test_bidirectional_reconciliation(self):
@@ -384,6 +402,7 @@ class TestD5Inventory(unittest.TestCase):
                 path = root / folder / "launch.py"
                 path.parent.mkdir()
                 path.write_text("if __name__ == '__main__': pass\n")
+                track_fixture(root, path.relative_to(root).as_posix())
                 self.assertIn(path.relative_to(root).as_posix(), discover(root))
 
     def test_negative_cron_prose_is_not_a_launch(self):
@@ -393,6 +412,7 @@ class TestD5Inventory(unittest.TestCase):
             (root / "lib/helper.py").write_text("def helper(): return 1\n")
             note = root / "README.md"
             note.write_text("cron does not invoke lib/helper.py\n")
+            track_fixture(root, "lib/helper.py", "README.md")
             self.assertNotIn("lib/helper.py", discover(root))
             note.write_text("python3 lib/helper.py\n")
             self.assertIn("lib/helper.py", discover(root))
@@ -400,8 +420,47 @@ class TestD5Inventory(unittest.TestCase):
             for name in ("job.plist", "job.cron"):
                 config = root / name
                 config.write_text("<string>lib/helper.py</string>\n")
+                track_fixture(root, name)
                 self.assertIn("lib/helper.py", discover(root))
                 config.unlink()
+
+    def test_local_config_and_candidates_do_not_enter_census(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / "skills/hanig-project/scripts/linear_file.py"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("def helper(): return 1\n")
+            (root / "README.md").write_text("Repository fixture\n")
+            track_fixture(root, "README.md", helper.relative_to(root).as_posix())
+            baseline = discover(root)
+            local = root / ".claude/settings.local.json"
+            local.parent.mkdir()
+            candidate = root / "config/local.py"
+            candidate.parent.mkdir()
+            for ignored in (False, True):
+                with self.subTest(ignored=ignored):
+                    if ignored:
+                        (root / ".git/info/exclude").write_text(".claude/\nconfig/\n")
+                    local.write_text('{"note":"python3 skills/hanig-project/scripts/linear_file.py"}\n')
+                    self.assertEqual(discover(root), baseline)
+                    candidate.write_text("if __name__ == '__main__': pass\n")
+                    self.assertEqual(discover(root), baseline)
+                    local.unlink()
+                    candidate.unlink()
+
+    def test_honest_line_shift_preserves_snapshot_checks(self):
+        read_text = Path.read_text
+        cited = ROOT / "skills/hanig-swarm/scripts/swarm.py"
+
+        def shifted(path, *args, **kwargs):
+            text = read_text(path, *args, **kwargs)
+            return "# Harmless line shift\n" + text if path == cited else text
+
+        with mock.patch.object(Path, "read_text", shifted):
+            self.test_mechanical_census()
+            self.test_shape_and_dispositions()
+        with mock.patch.object(Path, "read_text", side_effect=AssertionError("live citation read")):
+            self.test_shape_and_dispositions()
 
     def test_parser_mapping_rejects_wrong_root_and_mode(self):
         from copy import deepcopy
