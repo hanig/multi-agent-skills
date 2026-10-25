@@ -34,19 +34,33 @@ def source_files(root):
     for name in sorted(set(tracked.decode("utf-8").split("\0")) - {""}):
         path = root / name
         rel = path.relative_to(root)
-        if (path.is_file() and not path.is_symlink()
+        if ((path.is_symlink() or path.is_file())
                 and not {".git", "__pycache__"}.intersection(rel.parts)
                 and not rel.as_posix().startswith("tests/fixtures/")
-                and path.name != Path(__file__).name
-                and (path.suffix in (".py", ".sh", ".md", ".json", ".yml", ".yaml", ".plist", ".cron")
-                     or rel.parts[0] == "bin")):
+                and path.name != Path(__file__).name):
             files.append(path)
     return sorted(files)
 
 
+def source_text(path):
+    # A tracked alias is a launch root, not permission to read its target.
+    if path.is_symlink():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ""
+    return "" if "\0" in text else text
+
+
+def interpreter(text):
+    match = re.match(r"^#!\s*(?:\S*/env\s+(?:-S\s+)?)?(?:\S*/)?([^\s/]+)", text)
+    return match.group(1) if match else ""
+
+
 def tree_for(path):
-    text = path.read_text(encoding="utf-8")
-    if path.suffix == ".py" or text.startswith("#!/usr/bin/env python"):
+    text = source_text(path)
+    if path.suffix == ".py" or re.fullmatch(r"python\d*(?:\.\d+)*", interpreter(text)):
         return ast.parse(text)
     return None
 
@@ -78,13 +92,13 @@ def discover(root=ROOT):
 
     for path in files:
         rel = path.relative_to(root).as_posix()
-        text = path.read_text(encoding="utf-8")
+        text = source_text(path)
         tree = tree_for(path)
         mains = [n for n in (tree.body if tree else ()) if isinstance(n, ast.If)
                  and any(isinstance(x, ast.Constant) and x.value == "__main__"
                          for x in ast.walk(n.test))]
         seed = ((rel.startswith(("skills/hanig-", "lib/")) and mains)
-                or (rel.startswith("bin/") and path.stat().st_mode & 0o111)
+                or (rel.startswith("bin/") and (path.is_symlink() or path.stat().st_mode & 0o111))
                 or rel in ("install.sh", "skills/hanig-swarm/scripts/swarm-cron.sh"))
         if seed:
             add(path, path, mains[0].lineno if mains else 1, "seed")
@@ -98,8 +112,12 @@ def discover(root=ROOT):
         for line, value in enumerate(text.splitlines(), 1):
             if path.suffix in (".plist", ".cron"):
                 referenced(value, path, line, "launch-config")
-            if re.search(r"python\d*(?:\.\d+)*\s+|run_sandbox\(|\bexec\s", value):
-                referenced(value, path, line, "text-launch")
+            for launch in re.finditer(
+                    r"\b(?:python\d*(?:\.\d+)*|exec)\s+"
+                    r"((?:-[\w-]+\s+)*[\"']?[$\w{}/.~+-]+\.(?:py|sh)\b)", value):
+                prefix = value[:launch.start()].rsplit(";", 1)[-1]
+                if not re.search(r"\b(?:not|never)\b", prefix, re.I):
+                    referenced(launch.group(1), path, line, "text-launch")
         if tree is None:
             continue
         assignments = {}
@@ -158,8 +176,8 @@ def parser_tokens(path):
     for source in paths:
         tree = tree_for(source)
         if tree is None:
-            text = source.read_text()
-            if text.startswith("#!/bin/sh"):
+            text = source_text(source)
+            if interpreter(text) in ("sh", "bash", "dash", "ksh", "zsh"):
                 for line in text.splitlines():
                     if re.match(r"\s*--?[a-z][^)]*\)", line):
                         tokens.update(re.findall(r"--?[a-z][a-z-]*", line.split(")", 1)[0]))
@@ -291,6 +309,7 @@ class TestD5Inventory(unittest.TestCase):
         self.assertEqual(len(roots), len(data["roots"]))
         effects = data["effects"]
         represented = set()
+        modes = set()
         for record in data["records"]:
             self.assertIn(record["root"], roots)
             represented.add(record["root"])
@@ -298,6 +317,10 @@ class TestD5Inventory(unittest.TestCase):
             self.assertIsInstance(record["mode"], list)
             self.assertTrue(record["mode"])
             self.assertTrue(all(isinstance(m, str) and m for m in record["mode"]))
+            for mode in record["mode"]:
+                key = (record["root"], mode)
+                self.assertNotIn(key, modes, "overlapping mode dispositions")
+                modes.add(key)
             self.assertIs(type(record["new"]), bool)
             for field in ("mode", "guard", "proof", "placement", "branches"):
                 self.assertTrue(record[field], record["id"])
@@ -481,6 +504,73 @@ class TestD5Inventory(unittest.TestCase):
         next(r for r in data["records"] if r["id"] == "r31.0")["routes"].remove("75")
         with self.assertRaises(AssertionError):
             assert_reconciliation(self, data, self.manifest)
+
+    def test_tracked_config_formats_and_symlink_launchers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            (root / "tools").mkdir()
+            (root / "bin").mkdir()
+            (root / "tools/worker.py").write_text("def helper(): return 1\n")
+            track_fixture(root, "tools/worker.py")
+            for name in ("job.service", "job.conf", "job.toml", "job"):
+                with self.subTest(config=name):
+                    config = root / name
+                    config.write_text("ExecStart=/usr/bin/python3 /repo/tools/worker.py\n")
+                    track_fixture(root, name)
+                    self.assertIn("tools/worker.py", discover(root))
+                    config.write_text("")
+            target = Path(directory) / "external-tool"
+            target.write_text("#!/usr/bin/env python3\n# python3 tools/worker.py\n")
+            target.chmod(0o700)
+            link = root / "bin/alias"
+            link.symlink_to(target)
+            track_fixture(root, "bin/alias")
+            self.assertIn("bin/alias", discover(root))
+            self.assertNotIn("tools/worker.py", discover(root))
+            (root / "binary.dat").write_bytes(b"\xff\x00")
+            track_fixture(root, "binary.dat")
+            target.unlink()
+            self.assertIn("bin/alias", discover(root))
+
+    def test_prose_commands_do_not_launch_unrelated_paths(self):
+        original = Path.read_text
+        for sentence in (
+                "The example `python3 --version` does not run `lib/skill_lifecycle.py`.",
+                "The python3 interpreter only imports skills/hanig-project/scripts/linear_file.py; it is never executed by path.",
+                "Do not python3 lib/skill_lifecycle.py"):
+            with self.subTest(sentence=sentence):
+                def amended(path, *args, **kwargs):
+                    text = original(path, *args, **kwargs)
+                    return text + "\n" + sentence + "\n" if path == ROOT / "README.md" else text
+                with mock.patch.object(Path, "read_text", amended):
+                    self.test_mechanical_census()
+
+    def test_equivalent_shebangs_retain_selectors(self):
+        original = Path.read_text
+        for name, shebang in (("doctor", "#!/usr/bin/env sh"),
+                              ("doctor", "#!/bin/bash"),
+                              ("agent-view", "#!/usr/bin/python3"),
+                              ("agent-view", "#!/usr/bin/env -S python3")):
+            with self.subTest(name=name, shebang=shebang):
+                path = ROOT / "bin" / name
+                expected = parser_tokens(path)
+                def amended(source, *args, **kwargs):
+                    text = original(source, *args, **kwargs)
+                    return shebang + "\n" + text.split("\n", 1)[1] if source == path else text
+                with mock.patch.object(Path, "read_text", amended):
+                    self.assertEqual(parser_tokens(path), expected)
+
+    def test_overlapping_mode_dispositions_are_rejected(self):
+        from copy import deepcopy
+        case = TestD5Inventory()
+        case.data = deepcopy(self.data)
+        record = deepcopy(next(r for r in case.data["records"] if r["id"] == "r01.0"))
+        record.update(id="r01.1", mode=["--once"], disposition="admitted", proof="A", placement="A")
+        case.data["records"].append(record)
+        case.data["selector_records"]["r01"]["records"].append("r01.1")
+        with self.assertRaises(AssertionError):
+            case.test_shape_and_dispositions()
 
 
 if __name__ == "__main__":
