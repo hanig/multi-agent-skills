@@ -1,6 +1,9 @@
 """Journal extraction retains the facade API and patches its actual owner."""
 
 import ast
+import fcntl
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -21,6 +24,40 @@ DEFINITIONS = (
 
 
 class TestJournalExtraction(unittest.TestCase):
+    def test_idempotent_append_reads_under_flock_and_resyncs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'journal.jsonl'
+            record = {'d5': {'operation_id': 'one'}, 'value': 1}
+            legacy = {'value': 1}
+            SJ._fsync_append(path, legacy)
+            SJ._fsync_append(path, record, unique_key=('d5', 'operation_id'))
+            before = path.read_bytes()
+            loads = json.loads
+            reads = []
+            def reading(raw):
+                fd = os.open(path, os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(fd)
+                reads.append(raw)
+                return loads(raw)
+            with mock.patch.object(SJ.json, 'loads', reading), \
+                    mock.patch.object(SJ.os, 'fsync', wraps=os.fsync) as sync:
+                SJ._fsync_append(path, record, sync_directory=True,
+                                 unique_key=('d5', 'operation_id'))
+            self.assertEqual(len(reads), 2)
+            self.assertEqual(sync.call_count, 2)
+            self.assertEqual(path.read_bytes(), before)
+            with self.assertRaisesRegex(SJ.OutboxError, 'conflicting journal record'):
+                SJ._fsync_append(path, dict(record, value=2), unique_key=('d5', 'operation_id'))
+            self.assertEqual(path.read_bytes(), before)
+            other = dict(record, d5={'operation_id': 'two'})
+            SJ._fsync_append(path, other, unique_key=('d5', 'operation_id'))
+            self.assertEqual([loads(line) for line in path.read_bytes().splitlines()],
+                             [legacy, record, other])
+
     def test_every_moved_definition_is_reexported_identically(self):
         for name in DEFINITIONS:
             with self.subTest(name=name):

@@ -34,7 +34,7 @@ def _heal_jsonl_tail(fh):
     fh.write(b"\n")
 
 
-def _fsync_append(path, record, *, sync_directory=False):
+def _fsync_append(path, record, *, sync_directory=False, unique_key=()):
     """Append one JSON line durably, serialised against other writers.
 
     Everything happens under ONE lock on ONE handle. Healing the tail used to
@@ -43,9 +43,11 @@ def _fsync_append(path, record, *, sync_directory=False):
     using its stale view and deletes B's record before appending its own. The
     repair for one crash silently ate a good receipt.
 
-    The lock is advisory and process-scoped: the kernel drops it when this
-    process exits, including when it is killed, so a crash cannot wedge the
-    journal.
+    The advisory flock belongs to the open file description and is released
+    on its last close. An inherited or transferred alias shares that ownership.
+    unique_key optionally names a nested field path: read back under this same
+    lock, reuse an equal record, and refuse a conflicting record with that key.
+    A retry still syncs the file and requested directory before returning.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,8 +76,28 @@ def _fsync_append(path, record, *, sync_directory=False):
         # incomplete record has no meaning, so dropping it loses nothing.
         _heal_jsonl_tail(fh)
 
-        fh.seek(0, os.SEEK_END)
-        fh.write(line)
+        found = False
+        if unique_key:
+            def key(value):
+                for field in unique_key:
+                    value = value.get(field) if isinstance(value, dict) else None
+                return value
+            identity = key(record)
+            if identity is None:
+                raise OutboxError("journal record has no idempotency key")
+            fh.seek(0)
+            for raw in fh:
+                try:
+                    prior = json.loads(raw)
+                except (ValueError, RecursionError) as exc:
+                    raise OutboxError("cannot read journal for idempotent append") from exc
+                if key(prior) == identity:
+                    if prior != record:
+                        raise OutboxError("conflicting journal record for idempotency key")
+                    found = True
+        if not found:
+            fh.seek(0, os.SEEK_END)
+            fh.write(line)
         fh.flush()
         os.fsync(fh.fileno())
         if sync_directory:
