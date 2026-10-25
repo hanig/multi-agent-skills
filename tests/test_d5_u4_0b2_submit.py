@@ -96,11 +96,16 @@ class TestSubmitBarrier(unittest.TestCase):
         self.assertEqual(self.c.rows(), [])
         self.assertEqual(self.c.probe('drain'), 'available')
 
+    def test_M6_without_git_history(self):
+        with mock.patch.object(subprocess, 'check_output', side_effect=
+                subprocess.CalledProcessError(128, ['git', 'show'])) as history:
+            self.test_M6_inactive_submit_matches_recorded_base()
+            history.assert_not_called()
+
     def test_M6_inactive_submit_matches_recorded_base(self):
-        source = subprocess.check_output(['git', 'show',
-            '3f17265c35d5e44cd2c04fa366976968c0b00fb3:skills/hanig-orchestrate/scripts/d5_submission.py'],
-            cwd=str(t.ROOT), text=True, timeout=30)
+        source = json.loads((t.ROOT / 'tests/fixtures/d5/u4_0b2_inactive_base.json').read_text())['source']
         base = ModuleType('d5_submission_recorded_base')
+        base.__dict__.update(registry=t.registry, AuthorityError=t.authority.AuthorityError)
         with mock.patch.dict(sys.modules, {base.__name__: base}):
             exec(compile(source, '<recorded-base>', 'exec'), base.__dict__)
             self.c.active.return_value = False
@@ -171,9 +176,15 @@ class TestSuccessorGate(unittest.TestCase):
         self.intent()
         self.refusal_preserves('unresolved merge intent')
 
-    def misnamed_source(self, kind):
+    def misnamed_source(self, kind, change=None):
         path, value = self.intent()
         other = 'f' * 64
+        if change == 'binding':
+            other = value['operation_id']
+            value['binding']['pr'] = 2
+        elif change == 'id':
+            value['operation_id'] = other
+        path.write_text(json.dumps(value))
         if kind == 'abandonment':
             path.unlink()
             renamed = path.with_name('merge-abandonment-' + other + '.json')
@@ -182,8 +193,30 @@ class TestSuccessorGate(unittest.TestCase):
                 observed_pr=dict(headRefOid='a' * 40, baseRefName='main', number=1, state='OPEN'))))
         else:
             suffix = '.json' if kind == 'intent' else '.cancellation-pending'
-            path.rename(path.with_name('merge-unit-' + other + suffix))
-        self.refusal_preserves('merge intent filename mismatch')
+            renamed = path.with_name('merge-unit-' + other + suffix)
+            path.rename(renamed)
+        try:
+            self.refusal_preserves('unreachable merge intent' if change else 'merge intent filename mismatch')
+        finally:
+            renamed.unlink()
+
+    def test_gate_binds_all_sources_to_reachable_operations(self):
+        for change in ('binding', 'id'):
+            for kind in ('intent', 'pending', 'abandonment'):
+                with self.subTest(change=change, kind=kind):
+                    self.misnamed_source(kind, change)
+
+    def test_gate_follows_cancellation_chain(self):
+        path, value = self.intent('cancelled_before_request')
+        value['cancellation'] = dict(reason='closed', observed_at='2026-10-24T00:00:00')
+        path.write_text(json.dumps(value))
+        successor = hashlib.sha256((value['operation_id'] + ':after-cancellation').encode()).hexdigest()
+        next_path = path.with_name('merge-unit-' + successor + '.json')
+        next_path.write_text(json.dumps(dict(value, operation_id=successor, phase='receipt_recorded')))
+        install.promote(*self.c.args)
+        self.assertEqual(path.read_text(), json.dumps(value))
+        next_path.write_text(json.dumps(dict(value, operation_id=successor, phase='merge_requested')))
+        self.refusal_preserves('unresolved merge intent')
 
     def test_gate_refuses_renamed_unresolved_intent_before_mutation(self):
         self.misnamed_source('intent')
