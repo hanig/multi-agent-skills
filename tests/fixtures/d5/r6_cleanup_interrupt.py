@@ -6,12 +6,14 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests import test_d5_submission as t
+import swarm_state as swarm_state
 
 
 def child(data):
     case = t.TestSubmission()
     case.args, directory, case.request, scope, external = data
     case.directory = Path(directory)
+    assert swarm_state.acquire_lease(Path(case.args[2]), bump_epoch=False) == (True, None)
     case.request["anchor"] = t.ANCHOR
     case.operation = t.submission.Operation("A", "fixture", scope.encode(), b"effect")
     case.boundary = t.DeterministicBoundary()
@@ -49,6 +51,7 @@ def reproduce():
         data = [list(map(str, case.args)), str(case.directory),
                 {k: v for k, v in case.request.items() if k != "anchor"},
                 case.operation.scope.decode(), str(case.root / "external")]
+        swarm_state.release_lease(case.state_dir)
         result = subprocess.run([sys.executable, __file__, json.dumps(data)] + sys.argv[1:], timeout=30)
         assert result.returncode == 0
         assert case.probe("drain") == "available"

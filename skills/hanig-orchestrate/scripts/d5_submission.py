@@ -43,6 +43,7 @@ from d5_authority import AuthorityError
 import d5_completion as completion
 import d5_protocol_locks as protocol
 import d5_registry as registry
+import d5_readiness as readiness
 
 
 class Initiation(Enum):
@@ -101,6 +102,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
     """Admit one operation; refuse ambient START."""
     if not registry.d5_active():
         raise AuthorityError("D5 is inactive")
+    ready = readiness.require(state_dir)
     if not isinstance(boundary, Boundary):
         raise AuthorityError("D5 submission requires an explicit effect boundary")
     if not isinstance(operation, Operation):
@@ -109,6 +111,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
     entry = registry.lookup(checkout, plan_id, state_dir)
     if entry is None:
         raise AuthorityError("not registered")
+    readiness.bound(ready, entry)
     request = dict(grant_id=grant_id, session_id=session_id, anchor=anchor,
                    generation=generation, scope=operation.scope)
     with protocol.pin(entry["record_dir"]) as pinned, pinned.drain() as drain:
@@ -132,6 +135,7 @@ def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
                         kind=operation.kind, scope=json.loads(operation.scope),
                         correlation={"request_id": operation.request_id, "intent": bytes.hex(operation.intent)})
                     admission._validate_locked(pinned, checkout, plan_id, state_dir, **request)
+                    readiness.lease_required(state_dir)
                     A = True
                     state = boundary.start(operation)
                 except BaseException as exc:
