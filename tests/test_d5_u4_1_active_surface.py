@@ -221,10 +221,13 @@ class SurfaceFixture:
                     "files_changed": sorted(k for k in before.keys() | after.keys()
                                             if before.get(k) != after.get(k)),
                     "output": output.getvalue()}
-        text = json.dumps(captured, default=str).replace(str(self.directory), "<fixture>")
-        text = text.replace(str(ROOT), "<checkout>")
+        text = json.dumps(captured, default=str)
+        # An interpreter may live under either parent; replace it first so
+        # parent-path rendering cannot hide the executable's identity.
         for executable in (str(Path(sys.executable).resolve()), sys.executable):
             text = text.replace(executable, "<python>")
+        text = text.replace(str(self.directory), "<fixture>")
+        text = text.replace(str(ROOT), "<checkout>")
         return json.loads(text)
 
 
@@ -259,6 +262,17 @@ class TestActiveSurface(unittest.TestCase):
                         tool, name = key.split(".")
                         self.assertEqual(self.capture(tool, name, False), expected)
                         self.assertEqual(os.environ["PATH"], inherited_path)
+
+    def test_inactive_capture_normalizes_interpreter_before_parent_paths(self):
+        expected = json.loads(FIXTURE.read_text())["captures"]["operator.reconcile"]
+        for location in ("checkout", "fixture"):
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as tmp:
+                fixture = SurfaceFixture(tmp)
+                parent = ROOT if location == "checkout" else fixture.directory
+                # Captures intercept launches; no interpreter is installed or run.
+                executable = str(parent / ".u41-review-venv/bin/python")
+                with mock.patch.object(sys, "executable", executable):
+                    self.assertEqual(fixture.observe("operator", "reconcile", False), expected)
 
     def test_premature_activation_direct_entries_before_first_effect(self):
         for tool, names in (("swarm", S_ENTRIES), ("operator", M_ENTRIES)):
