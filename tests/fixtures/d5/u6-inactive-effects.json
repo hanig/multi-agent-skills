@@ -1,0 +1,100 @@
+{
+  "base": "46423308a6a30bc4a2b96fa6f728ca8072e4fb12",
+  "captures": {
+    "_allocate_sequence": {
+      "changed": {
+        "outbox-seq.json": "{\"high_water\": 2, \"schema_version\": 1}\n"
+      },
+      "launches": [],
+      "output": "",
+      "removed": [],
+      "result": 2
+    },
+    "_append_receipt_atomic": {
+      "changed": {
+        "outbox-receipts.jsonl": "{\"at\": \"2026-10-25T00:00:00+0000\", \"attested\": true, \"by\": \"Operator\", \"evidence_digest\": \"74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b\", \"key\": \"2e75dff4fe918457\", \"matched\": null, \"op\": \"start\", \"outcome\": null, \"ref\": \"ref\", \"schema_version\": 2, \"source\": null}\n"
+      },
+      "launches": [],
+      "output": "",
+      "removed": [],
+      "result": {
+        "at": "2026-10-25T00:00:00+0000",
+        "attested": true,
+        "by": "Operator",
+        "evidence_digest": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "key": "2e75dff4fe918457",
+        "matched": null,
+        "op": "start",
+        "outcome": null,
+        "ref": "ref",
+        "schema_version": 2,
+        "source": null
+      }
+    },
+    "_write_sequence": {
+      "changed": {
+        "outbox-seq.json": "{\"high_water\": 3, \"schema_version\": 1}\n"
+      },
+      "launches": [],
+      "output": "",
+      "removed": [],
+      "result": null
+    },
+    "backfill_tracker_intents": {
+      "changed": {
+        "outbox.jsonl": "{\"at\": \"2026-10-25T00:00:00+0000\", \"attempt_dir\": \"/fixture-runs/u/a1\", \"closing_evidence\": \"predicate_receipt\", \"envelope\": {\"attempt\": {\"directory\": \"/fixture-runs/u/a1\", \"id\": \"a1\"}, \"evidence_digest\": \"74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b\", \"idempotency_key\": \"2e75dff4fe918457\", \"project\": \"fixture\", \"requested_operation\": \"start\", \"required_connector_capability\": \"tracker.intent.idempotent-mutation-readback.v1\", \"schema_version\": 1, \"unit\": \"u\"}, \"evidence\": null, \"job_id\": \"123\", \"key\": \"2e75dff4fe918457\", \"kind\": null, \"project\": \"fixture\", \"seq\": 1, \"tracker\": \"ARC-1\", \"unit\": \"u\", \"unit_state\": \"SUBMITTED\", \"verb\": \"start\", \"why\": \"work started\"}\n"
+      },
+      "launches": [],
+      "output": "",
+      "removed": [],
+      "result": null
+    },
+    "emit_intent": {
+      "changed": {
+        "outbox-seq.json": "{\"high_water\": 2, \"schema_version\": 1}\n",
+        "outbox.jsonl": "{\"at\": \"2026-10-25T00:00:00+0000\", \"attempt_dir\": \"/fixture-runs/u/a1\", \"closing_evidence\": \"predicate_receipt\", \"envelope\": {\"attempt\": {\"directory\": \"/fixture-runs/u/a1\", \"id\": \"a1\"}, \"evidence_digest\": \"74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b\", \"idempotency_key\": \"2e75dff4fe918457\", \"project\": \"fixture\", \"requested_operation\": \"start\", \"required_connector_capability\": \"tracker.intent.idempotent-mutation-readback.v1\", \"schema_version\": 1, \"unit\": \"u\"}, \"evidence\": null, \"job_id\": \"123\", \"key\": \"2e75dff4fe918457\", \"kind\": null, \"project\": \"fixture\", \"seq\": 1, \"unit\": \"u\", \"unit_state\": \"SUBMITTED\", \"verb\": \"start\", \"why\": \"work started\"}\n{\"at\": \"2026-10-25T00:00:00+0000\", \"attempt_dir\": \"/fixture-runs/u/a1\", \"closing_evidence\": \"predicate_receipt\", \"envelope\": {\"attempt\": {\"directory\": \"/fixture-runs/u/a1\", \"id\": \"a1\"}, \"evidence_digest\": \"74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b\", \"idempotency_key\": \"b93b55bfa78bb927\", \"project\": \"fixture\", \"requested_operation\": \"start\", \"required_connector_capability\": \"tracker.intent.idempotent-mutation-readback.v1\", \"schema_version\": 1, \"unit\": \"v\"}, \"evidence\": null, \"job_id\": \"123\", \"key\": \"b93b55bfa78bb927\", \"kind\": null, \"project\": \"fixture\", \"seq\": 2, \"unit\": \"v\", \"unit_state\": \"SUBMITTED\", \"verb\": \"start\", \"why\": \"work started\"}\n"
+      },
+      "launches": [],
+      "output": "",
+      "removed": [],
+      "result": "b93b55bfa78bb927"
+    },
+    "record_receipt": {
+      "changed": {
+        "outbox-receipts.jsonl": "{\"at\": \"2026-10-25T00:00:00+0000\", \"attested\": true, \"by\": \"Operator\", \"evidence_digest\": \"74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b\", \"key\": \"2e75dff4fe918457\", \"matched\": null, \"op\": \"start\", \"outcome\": null, \"ref\": \"ref\", \"schema_version\": 2, \"source\": null}\n"
+      },
+      "launches": [],
+      "output": "",
+      "removed": [],
+      "result": {
+        "at": "2026-10-25T00:00:00+0000",
+        "attested": true,
+        "by": "Operator",
+        "evidence_digest": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "key": "2e75dff4fe918457",
+        "matched": null,
+        "op": "start",
+        "outcome": null,
+        "ref": "ref",
+        "schema_version": 2,
+        "source": null
+      }
+    },
+    "set_sequence_floor": {
+      "changed": {
+        "outbox-seq.json": "{\"approver\": \"Operator\", \"at\": \"2026-10-25T00:00:00+0000\", \"high_water\": 3, \"reason\": \"fixture recovery\", \"replaced_malformed_counter\": false, \"schema_version\": 1}\n"
+      },
+      "launches": [],
+      "output": "",
+      "removed": [],
+      "result": {
+        "approver": "Operator",
+        "at": "2026-10-25T00:00:00+0000",
+        "high_water": 3,
+        "reason": "fixture recovery",
+        "replaced_malformed_counter": false,
+        "schema_version": 1
+      }
+    }
+  }
+}

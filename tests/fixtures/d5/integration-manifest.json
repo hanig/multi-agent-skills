@@ -69,4 +69,25 @@
   "policy": "Default refusal at active dispatch and direct legacy entries; schema, status, scope-check and validate without seed fetching retain observation behavior.",
   "merge": "Synchronous merge entry reserved; merge effect refuses until U4.3 binding. No legacy fallback.",
   "tracker": "U6 owns tracker helper/backfill closure; U4.1 refuses containing S/M commands."
+},
+"u6_tracker":{
+  "row75_helpers": [
+    "_write_sequence",
+    "_allocate_sequence",
+    "set_sequence_floor",
+    "emit_intent",
+    "backfill_tracker_intents",
+    "_append_receipt_atomic",
+    "record_receipt"
+  ],
+  "containing_entries": [
+    "swarm.advance",
+    "swarm.cmd_seq_floor",
+    "swarm.cmd_outbox",
+    "merge_unit.print_tracker_drain"
+  ],
+  "row76": "merge_unit.print_tracker_audit: observation",
+  "policy": "Reject before mutation or tracker invocation, including premature activation. Active advance refuses at entry before backfill. Audit remains observation.",
+  "tracker_permissions_installed": [],
+  "tracker_bootstraps_installed": []
 }}

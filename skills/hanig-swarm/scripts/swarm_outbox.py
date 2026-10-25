@@ -15,6 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import d5_activation as D5
 import swarm_evidence as SE
 import swarm_journal as SJ
 import swarm_state as SS
@@ -426,6 +427,8 @@ def _read_sequence(state_dir):
 
 
 def _write_sequence(state_dir, record, name=OUTBOX_SEQ):
+    if D5.d5_active():
+        raise OutboxError("D5 active: tracker _write_sequence is outside the supported merge profile")
     directory = Path(state_dir)
     directory.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".outbox-seq-", dir=str(directory))
@@ -471,6 +474,8 @@ def _sequence_history(path, strict=True):
 
 def _allocate_sequence(state_dir, history):
     """Use history only for counter-less migration."""
+    if D5.d5_active():
+        raise OutboxError("D5 active: tracker _allocate_sequence is outside the supported merge profile")
     record = _read_sequence(state_dir)
     if record is None:
         receipts, problems = load_acknowledgments(state_dir)
@@ -498,6 +503,8 @@ def _allocate_sequence(state_dir, history):
 
 
 def set_sequence_floor(state_dir, floor, approver, reason):
+    if D5.d5_active():
+        raise OutboxError("D5 active: tracker set_sequence_floor is outside the supported merge profile")
     if type(floor) is not int or floor < 0:
         raise OutboxError("floor must be a non-negative integer")
     if not _nonblank_text(approver) or not _nonblank_text(reason):
@@ -555,6 +562,8 @@ def emit_intent(state_dir, project, uid, unit_state, us, evidence=None,
     a remote mutation; the key alone cannot establish what landed.
     Durability and recovery premises: capability.tracker in declarations.json.
     """
+    if D5.d5_active():
+        raise OutboxError("D5 active: tracker emit_intent is outside the supported merge profile")
     action = TRACKER_EVENTS.get(unit_state)
     if not action:
         return None
@@ -659,6 +668,8 @@ def backfill_tracker_intents(state_dir, project, units):
     additive migration of pre-tracker records, not a replay or a new intent.
     Invalid journals remain intact; failure warns without halting dispatch.
     """
+    if D5.d5_active():
+        raise OutboxError("D5 active: tracker backfill_tracker_intents is outside the supported merge profile")
     labels = {uid: u["tracker"] for uid, u in units.items() if "tracker" in u}
     path = Path(state_dir) / OUTBOX
     if not labels:
@@ -905,6 +916,8 @@ def _receipt_grade(rec):
 
 def _append_receipt_atomic(state_dir, rec):
     """Read, decide and append one receipt under the journal's single lock."""
+    if D5.d5_active():
+        raise OutboxError("D5 active: tracker _append_receipt_atomic is outside the supported merge profile")
     bad = _receipt_shape_problem(rec)
     if bad:
         raise OutboxError("refusing malformed receipt: %s" % bad)
@@ -976,6 +989,8 @@ def record_receipt(state_dir, key, ref, op=None, by=None, at=None,
     The historical key/ref form remains a weaker attestation whose source is
     unspecified. Passing a complete observation records the stronger
     read-back-confirmed grade. Neither is verified by this offline process."""
+    if D5.d5_active():
+        raise OutboxError("D5 active: tracker record_receipt is outside the supported merge profile")
     key = str(key or "").strip()
     ref = str(ref if ref is not None else "").strip()
     if not key or not ref:
