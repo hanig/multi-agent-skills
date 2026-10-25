@@ -25,7 +25,7 @@ import swarm_state as state
 from swarm_types import OutboxError
 
 FIXTURES = Path(__file__).parent / 'fixtures/d5'
-BASE = '46423308a6a30bc4a2b96fa6f728ca8072e4fb12'
+BASE = '1b61800ff263b4a10978afdbbdfc64b117195914'
 
 
 class TestMergeProvider(unittest.TestCase):
