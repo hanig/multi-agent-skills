@@ -347,6 +347,104 @@ class TestMergeProvider(unittest.TestCase):
             with self.assertRaisesRegex(OutboxError, 'merge receipt journal cannot be read in full'):
                 capability.complete(result.outcome)
 
+    def test_review_lease_loss_at_launch_refuses_effect(self):
+        start = self.boundary.start
+        reached = []
+        def releasing(operation):
+            state.release_lease(self.c.state_dir)
+            reached.append(state.holds_lease(self.c.state_dir))
+            return start(operation)
+        with mock.patch.object(self.boundary, 'start', releasing):
+            try:
+                self.c.submit()
+            except Exception:
+                pass  # The observable effect, not the exception, is the guard.
+        self.eq(reached, [False])
+        self.eq(self.merges(), [])
+
+    def test_review_lease_loss_at_write_preserves_bound(self):
+        write = M.durable_write
+        snapshot = []
+        def releasing(path, row):
+            if row.get('d5', {}).get('classification') == 'not_submitted':
+                snapshot.append(self.journal_bytes())
+                state.release_lease(self.c.state_dir)
+            return write(path, row)
+        with mock.patch.object(self.boundary, 'observe', side_effect=OSError('observation failed')), \
+                mock.patch.object(M, 'durable_write', releasing):
+            try:
+                self.c.submit()
+            except Exception:
+                pass
+        self.eq(len(snapshot), 1)
+        self.eq(self.merges(), [])
+        self.eq(self.journal_bytes(), snapshot[0])
+
+    def resolved_successor(self, disposition):
+        if disposition == 'abandonment':
+            name = 'merge-abandonment-' + self.effect + '.json'
+            self.path.write_text(json.dumps(dict(self.intent,
+                phase='resolved_by_abandonment', abandonment=name)))
+            (self.c.state_dir / name).write_text(json.dumps(dict(
+                schema_version=1, operation_id=self.effect, intent=self.intent,
+                approver='Owner', reason='Approved fresh operation',
+                observed_at='2025-01-01T00:00:00+00:00', observed_pr=self.forge['pr'])))
+        else:
+            self.path.write_text(json.dumps(dict(self.intent,
+                phase='cancelled_before_request', cancellation=dict(
+                    reason='Target moved before request', observed_target='d' * 40,
+                    observed_at='2025-01-01T00:00:00+00:00'))))
+        operation, path, prior = M.current_intent(
+            self.c.state_dir, self.binding, self.intent['root'], repair=False)
+        self.assertIsNone(prior)
+        self.assertNotEqual(operation, self.effect)
+        self.intent = dict(self.intent, operation_id=operation)
+        self.boundary.intent = self.intent
+        self.c.operation = t.submission.Operation(
+            operation, 'merge', J.encoded(self.scope), J.encoded(self.intent))
+        self.c.submit()
+        self.eq(json.loads(path.read_text())['d5']['state'], 'Recorded')
+        self.eq(len(self.merges()), 1)
+
+    def test_review_resolved_abandonment_permits_successor(self):
+        self.resolved_successor('abandonment')
+
+    def test_review_resolved_cancellation_permits_successor(self):
+        self.resolved_successor('cancellation')
+
+    def test_review_bound_recovery_remains_idempotent(self):
+        self.c.submit()
+        row = self.row()
+        row['phase'] = 'merge_requested'
+        row['d5'] = dict(state='Bound', binding=row['d5']['binding'])
+        self.path.write_text(json.dumps(row))
+        self.receipts.unlink()
+        with t.protocol.pin(self.c.directory) as pinned, pinned.drain():
+            outcome = self.boundary.completion()
+            J.recover(self.c.state_dir, self.row(), outcome)
+            self.eq(self.row()['d5']['state'], 'Recorded')
+            before = self.journal_bytes()
+            J.recover(self.c.state_dir, self.row(), outcome)
+            self.eq(self.journal_bytes(), before)
+        self.eq(len(self.merges()), 1)
+
+    def test_review_interrupted_recording_reuses_durable_receipt(self):
+        write = J._write
+        def interrupted(handle, row):
+            if row['d5']['state'] == 'Recorded':
+                raise OSError('interruption after receipt')
+            return write(handle, row)
+        with mock.patch.object(J, '_write', interrupted), \
+                self.assertRaisesRegex(OSError, 'interruption after receipt'):
+            self.c.submit()
+        self.eq(self.row()['d5']['state'], 'Attempted')
+        before = self.receipts.read_bytes()
+        with t.protocol.pin(self.c.directory) as pinned, pinned.drain():
+            J.recover(self.c.state_dir, self.row(), self.boundary.completion())
+        self.eq(self.receipts.read_bytes(), before)
+        self.eq(self.row()['d5']['state'], 'Recorded')
+        self.eq(len(self.merges()), 1)
+
     def test_missing_or_mismatched_readback_never_records(self):
         with mock.patch.object(J, '_readback', side_effect=ValueError('missing receipt')), \
                 self.assertRaisesRegex(ValueError, 'missing receipt'):
