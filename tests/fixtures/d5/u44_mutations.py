@@ -40,6 +40,9 @@ def patches(name):
     if name == 'malformed-bound-custody':
         return [replacement(tests.M, '_d5_journal_binding',
             'bound = intent["d5"]["binding"]', 'return intent["d5"]["binding"]')]
+    if name == 'truncated-request':
+        return [replacement(tests.M, '_d5_journal_binding',
+            'A._keys(original,', 'if False: A._keys(original,')]
     if name == 'historical-grant':
         # Remove both the provider fence and the consumer fence to demonstrate
         # that even an old successful receipt must not acquire D5 authority.
@@ -66,6 +69,7 @@ CASES = {
     'stale-m6-base': 'TestInactiveAndPremature.test_inactive_capture_on_recorded_base_with_inherited_sinfo',
     'typed-receipt': 'OperatorCase.test_readback_rejects_boolean_integer_aliases',
     'malformed-bound-custody': 'OperatorCase.test_matching_malformed_bindings_cannot_supply_their_own_expected_types',
+    'truncated-request': 'OperatorCase.test_matching_malformed_bindings_cannot_supply_their_own_expected_types',
 }
 
 
