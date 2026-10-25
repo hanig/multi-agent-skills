@@ -613,6 +613,10 @@ class TestOperator(unittest.TestCase):
 
 
 class TestInactiveAndEntry(unittest.TestCase):
+    def test_review_m6_matches_recorded_attempt_base(self):
+        with mock.patch(__name__ + '.BASE', '1b61800ff263b4a10978afdbbdfc64b117195914'):
+            self.test_inactive_embedded_base_and_inherited_scheduler_path()
+
     def test_installed_ready_operator_uses_its_shipped_helpers(self):
         with tempfile.TemporaryDirectory() as tmp:
             installed = Path(tmp) / 'installed'
