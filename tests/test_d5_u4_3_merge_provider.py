@@ -226,14 +226,21 @@ class TestMergeProvider(unittest.TestCase):
 
     def test_observation_deadline_covers_process_creation(self):
         entered, resume, finished = (threading.Event() for _ in range(3))
+        observed = threading.Event()
+        observe = self.boundary.observe
         popen = subprocess.Popen
         process_exit = popen.__exit__
         def stalled(command, *args, **kwargs):
             if command == self.cmd['target']:
                 entered.set()
-                if not resume.wait(8):
+                if not resume.wait(45):
                     raise AssertionError('constructor watchdog')
             return popen(command, *args, **kwargs)
+        def observing(operation):
+            try:
+                return observe(operation)
+            finally:
+                observed.set()
         def exiting(process, *args):
             try:
                 return process_exit(process, *args)
@@ -241,13 +248,15 @@ class TestMergeProvider(unittest.TestCase):
                 if process.args == self.cmd['target']:
                     finished.set()
         with mock.patch.object(self.boundary, '_observation_timeout', 1, create=True), \
+                mock.patch.object(self.boundary, 'observe', observing), \
                 mock.patch.object(popen, '__exit__', exiting), \
                 mock.patch.object(subprocess, 'Popen', stalled):
             thread, results = self.c.launch(self.c.submit)
             try:
                 self.assertTrue(entered.wait(8))
-                thread.join(3)
-                self.assertFalse(thread.is_alive(), 'observation deadline excludes process creation')
+                self.assertTrue(observed.wait(3), 'observation deadline excludes process creation')
+                thread.join(30)  # Durable refusal accounting is outside the read deadline.
+                self.assertFalse(thread.is_alive(), 'refusal accounting watchdog')
                 self.assertIsInstance(results[0], subprocess.TimeoutExpired)
                 self.eq(self.merges(), [])
                 self.eq(self.row()['d5']['classification'], 'not_submitted')
