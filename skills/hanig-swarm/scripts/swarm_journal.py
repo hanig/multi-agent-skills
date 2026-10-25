@@ -34,7 +34,7 @@ def _heal_jsonl_tail(fh):
     fh.write(b"\n")
 
 
-def _fsync_append(path, record):
+def _fsync_append(path, record, *, sync_directory=False):
     """Append one JSON line durably, serialised against other writers.
 
     Everything happens under ONE lock on ONE handle. Healing the tail used to
@@ -78,6 +78,8 @@ def _fsync_append(path, record):
         fh.write(line)
         fh.flush()
         os.fsync(fh.fileno())
+        if sync_directory:
+            _fsync_directory(path.parent)
 
 
 class _RawJournal:
