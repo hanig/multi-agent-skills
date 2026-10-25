@@ -36,8 +36,6 @@ import swarm as S
 import d5_activation as D5
 import verify as V
 import remote_verify as RV
-import d5_submission as DS
-import d5_readiness as DR
 
 
 SWARM = str(_SWARM_DIR / "scripts" / "swarm.py")
@@ -66,6 +64,7 @@ def _d5_merge_entry(args):
             raise Refusal("D5 active: verification and abandonment are outside "
                           "the supported merge profile")
         try:
+            import d5_readiness as DR
             DR.require(args.state_dir)
         except ValueError as exc:
             raise Refusal("D5 active: " + str(exc)) from exc
@@ -430,6 +429,7 @@ def current_intent(state_dir, binding, root, repair=True):
     if D5.d5_active():
         if repair:
             _d5_refuse('current_intent')
+        import d5_readiness as DR
         DR.lease_required(state_dir)
     operation_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
     while True:
@@ -556,7 +556,9 @@ def reconcile(args, plan):
         import d5_host as host_api
         import d5_merge_journal as J
         import d5_protocol_locks as protocol
+        import d5_readiness as DR
         import d5_registry as registry
+        import d5_submission as DS
         ready = DR.require(args.state_dir)
         state_dir, root, binding, host, repo_path, scope_binding, repo = authority(args, plan)
         entry = DR.bound(ready, registry.lookup(repo, plan["name"], state_dir))
@@ -829,14 +831,19 @@ def reconcile(args, plan):
     return cmd["advance"]
 
 
-class _MergeBoundary(DS.Boundary):
+class _MergeBoundary:
     """One designated Popen; observations and response waits stay outside START."""
     def __init__(self, state_dir, binding, repo, host, repo_path, cmd, intent):
+        import d5_submission as DS
+        # R6's existing named-adapter contract avoids loading the active
+        # runtime merely to import an inactive or unavailable operator.
+        DS.Boundary.register(_MergeBoundary)
         self.state_dir, self.binding, self.repo = state_dir, binding, repo
         self.host, self.repo_path, self.cmd, self.intent = host, repo_path, cmd, intent
         self.process = None
 
     def read(self, command, allowed=(0,), *, timeout=300):
+        import d5_readiness as DR
         DR.require(self.state_dir)
         # Closed observation vocabulary; no arbitrary commands.
         permitted = [self.cmd[k] for k in ("scope", "view", "target", "checks")]
@@ -872,6 +879,7 @@ class _MergeBoundary(DS.Boundary):
             raise Refusal("target moved after intent publication")
 
     def start(self, operation):
+        import d5_submission as DS
         self.process = subprocess.Popen(self.cmd["merge"], stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env={k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"})
@@ -928,6 +936,9 @@ def _active_entry_lease(args):
         _d5_merge_entry(args)
     try:
         directory = Path(args.state_dir)
+        if not directory.is_dir():
+            raise Refusal("existing coordinator state directory required")
+        import d5_readiness as DR
         preliminary = DR._validated(DR._read(directory / DR.MARKER))
         DR._require(preliminary["state_dir"] == str(directory.resolve()), "state directory mismatch")
         DR._require((directory / "lease.lock").is_file(), "existing coordinator lock required")
