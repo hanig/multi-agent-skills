@@ -46,6 +46,9 @@ class SurfaceFixture:
     """
     def __init__(self, directory, swarm=S, operator=M):
         self.directory, self.s, self.m = Path(directory), swarm, operator
+        # No executable is needed before these captures' first trapped effect.
+        self.tools = self.directory / "tools"
+        self.tools.mkdir()
         self.state_dir = self.directory / "state"
         self.state_dir.mkdir()
         self.attempt = self.directory / "runs/u/a1"
@@ -174,6 +177,9 @@ class SurfaceFixture:
 
     def observe(self, tool, name, active):
         with ExitStack() as stack:
+            # Replace PATH for every entry; inherited schedulers change even
+            # the inactive first-effect prefix through executable discovery.
+            stack.enter_context(mock.patch.dict(os.environ, {"PATH": str(self.tools)}))
             call = self.case(stack, tool, name)
             before = self.tree()
             output = io.StringIO()
@@ -237,6 +243,22 @@ class TestActiveSurface(unittest.TestCase):
             with self.subTest(entry=key):
                 tool, name = key.split(".")
                 self.assertEqual(self.capture(tool, name, False), expected)
+
+    def test_m6_inherited_scheduler_path_matches_recorded_base(self):
+        captures = json.loads(FIXTURE.read_text())["captures"]
+        with tempfile.TemporaryDirectory() as inherited:
+            for name in ("sinfo", "squeue", "sbatch"):
+                executable = Path(inherited) / name
+                executable.write_text("#!/bin/sh\nexit 97\n")
+                executable.chmod(0o755)
+            inherited_path = inherited + os.pathsep + os.environ.get("PATH", "")
+            with mock.patch.dict(os.environ, {"PATH": inherited_path}):
+                self.assertEqual(shutil.which("sinfo"), str(Path(inherited) / "sinfo"))
+                for key, expected in captures.items():
+                    with self.subTest(entry=key):
+                        tool, name = key.split(".")
+                        self.assertEqual(self.capture(tool, name, False), expected)
+                        self.assertEqual(os.environ["PATH"], inherited_path)
 
     def test_premature_activation_direct_entries_before_first_effect(self):
         for tool, names in (("swarm", S_ENTRIES), ("operator", M_ENTRIES)):
