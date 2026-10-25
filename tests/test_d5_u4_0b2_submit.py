@@ -171,6 +171,29 @@ class TestSuccessorGate(unittest.TestCase):
         self.intent()
         self.refusal_preserves('unresolved merge intent')
 
+    def misnamed_source(self, kind):
+        path, value = self.intent()
+        other = 'f' * 64
+        if kind == 'abandonment':
+            path.unlink()
+            renamed = path.with_name('merge-abandonment-' + other + '.json')
+            renamed.write_text(json.dumps(dict(schema_version=1, operation_id=value['operation_id'],
+                intent=value, approver='fixture', reason='closed', observed_at='2026-10-24T00:00:00',
+                observed_pr=dict(headRefOid='a' * 40, baseRefName='main', number=1, state='OPEN'))))
+        else:
+            suffix = '.json' if kind == 'intent' else '.cancellation-pending'
+            path.rename(path.with_name('merge-unit-' + other + suffix))
+        self.refusal_preserves('merge intent filename mismatch')
+
+    def test_gate_refuses_renamed_unresolved_intent_before_mutation(self):
+        self.misnamed_source('intent')
+
+    def test_gate_refuses_renamed_pending_intent_before_mutation(self):
+        self.misnamed_source('pending')
+
+    def test_gate_refuses_renamed_abandonment_before_mutation(self):
+        self.misnamed_source('abandonment')
+
     def test_gate_never_repairs_pending_intent(self):
         path, value = self.intent()
         pending = path.with_suffix('.cancellation-pending')
