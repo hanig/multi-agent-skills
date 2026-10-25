@@ -204,6 +204,10 @@ class OperatorCase(unittest.TestCase):
                   (('custody', 'session_id'), ''), (('scope', 'plans'), 'p'),
                   (('correlation', 'request_id'), 'wrong'),
                   (('installation', 'schema_version'), True)]
+        request = json.loads(bytes.fromhex(original['d5']['binding']['correlation']['intent']))
+        cases += [(('correlation', 'intent'), J.encoded(r).hex()) for r in
+                  [dict(schema_version=1, phase='merge_requested')] +
+                  [{k: v for k, v in request.items() if k != omitted} for omitted in request]]
         for path, value in cases:
             with self.subTest(path=path, value=value):
                 row, rec = copy.deepcopy(original), copy.deepcopy(receipt)
@@ -237,6 +241,13 @@ class OperatorCase(unittest.TestCase):
 
 class TestInactiveAndPremature(unittest.TestCase):
     def test_inactive_capture_on_recorded_base_with_inherited_sinfo(self):
+        case = SurfaceFixture.case
+        def isolated(fixture, *args):
+            call = case(fixture, *args)
+            def checked():
+                self.assertIsNone(shutil.which('sinfo'))
+                return call()
+            return checked
         data = json.loads(FIXTURE.read_text())
         self.assertEqual(data['base'], BASE)
         self.assertEqual(set(data['captures']), {'main', 'reconcile', 'admit_merge'})
@@ -244,7 +255,8 @@ class TestInactiveAndPremature(unittest.TestCase):
             fake = Path(inherited) / 'sinfo'
             fake.write_text('#!/bin/sh\nexit 97\n')
             fake.chmod(0o755)
-            with mock.patch.dict(os.environ, {'PATH': inherited}):
+            with mock.patch.dict(os.environ, {'PATH': inherited}), \
+                    mock.patch.object(SurfaceFixture, 'case', isolated):
                 self.assertEqual(shutil.which('sinfo'), str(fake))
                 for name, expected in data['captures'].items():
                     with self.subTest(entry=name), tempfile.TemporaryDirectory() as root:

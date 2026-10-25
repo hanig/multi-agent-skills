@@ -572,6 +572,8 @@ def _d5_journal_binding(intent, ready, repo):
     A._keys(correlation, {"request_id", "intent"}, "merge correlation")
     A._require(correlation["request_id"] == intent["operation_id"], "merge operation", "mismatch")
     original = json.loads(bytes.fromhex(correlation["intent"]))
+    A._keys(original, {"schema_version", "operation_id", "binding", "root", "phase",
+                       "preconditions", "target_before_request"}, "merge request")
     A._require(type(original["schema_version"]) is int and original["schema_version"] == 1
                and original["phase"] == "merge_requested", "merge request", "invalid schema/phase")
     keys = set(original) - {"phase"}
