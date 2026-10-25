@@ -22,6 +22,7 @@ import d5_merge_journal as J
 import d5_readiness as readiness
 import merge_unit as M
 import swarm_state as state
+from swarm_types import OutboxError
 
 FIXTURES = Path(__file__).parent / 'fixtures/d5'
 BASE = '46423308a6a30bc4a2b96fa6f728ca8072e4fb12'
@@ -189,9 +190,17 @@ class TestMergeProvider(unittest.TestCase):
     def test_c_regeneration_in_gap(self):
         def change():
             # Fault injection: participating transfer is DRAIN-fenced. The
-            # second validation must still reject a changed stored generation.
+            # merged store transition permits a successor only after death;
+            # do not rewrite custody or relax its relinquished-holder refusal.
             t.store.relinquish(self.c.directory, 151, 'native', t.ANCHOR)
-            t.store.claim(self.c.directory, 152, t.MANDATE, 'native', t.ANCHOR, lambda _: 'alive')
+            with self.assertRaisesRegex(t.authority.AuthorityError, 'custody relinquished'):
+                t.store.claim(self.c.directory, 152, t.MANDATE, 'native', t.ANCHOR, lambda _: 'alive')
+            liveness = mock.Mock(return_value='dead')
+            successor = t.store.claim(self.c.directory, 152, t.MANDATE, 'successor',
+                                      t.host.ProcessIdentity(43, 9000002), liveness)
+            liveness.assert_called_once_with(t.ANCHOR)
+            self.eq(successor['custody']['generation'], 2)
+            self.eq(t.store.read(self.c.directory)['custody'], successor['custody'])
         self.gap(change)
 
     def test_d_lease_loss_keeps_bound_bytes_and_releases_drain(self):
@@ -315,7 +324,7 @@ class TestMergeProvider(unittest.TestCase):
             self.eq(capability.complete(result.outcome), result.outcome)
             self.eq(self.journal_bytes(), before)
             self.receipts.write_text(json.dumps(dict(merged=True, attested=True)) + '\n')
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(OutboxError, 'merge receipt journal cannot be read in full'):
                 capability.complete(result.outcome)
 
     def test_missing_or_mismatched_readback_never_records(self):
