@@ -122,33 +122,56 @@ def discover(root=ROOT):
     return {key: sorted(value) for key, value in sorted(found.items())}
 
 
+def literal_strings(node, bindings):
+    """Conservative static strings, including conditional lists and flag joins."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id, set())
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return set().union(*(literal_strings(n, bindings) for n in node.elts))
+    if isinstance(node, ast.IfExp):
+        return literal_strings(node.body, bindings) | literal_strings(node.orelse, bindings)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return {a + b for a in literal_strings(node.left, bindings)
+                for b in literal_strings(node.right, bindings)}
+    return set()
+
+
 def parser_tokens(path):
-    """Literal argparse flags and subcommands, including literal loop families."""
-    tree = tree_for(path)
-    if tree is None:
-        return []
+    """Static selector census; follows the operator's delegated parsers too."""
+    paths = [path]
+    if path.name == "linear_sync.py":
+        paths += [path.with_name(name) for name in ("linear_file.py", "linear_issue.py")]
     tokens = set()
-    loops = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.For) and isinstance(node.target, ast.Name):
-            try:
-                value = ast.literal_eval(node.iter)
-            except (ValueError, TypeError):
+    for source in paths:
+        tree = tree_for(source)
+        if tree is None:
+            continue
+        bindings = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.For):
+                if isinstance(node.target, ast.Name):
+                    bindings.setdefault(node.target.id, set()).update(literal_strings(node.iter, {}))
+                elif isinstance(node.target, ast.Tuple) and isinstance(node.iter, (ast.Tuple, ast.List)):
+                    for row in node.iter.elts:
+                        if isinstance(row, (ast.Tuple, ast.List)):
+                            for target, value in zip(node.target.elts, row.elts):
+                                if isinstance(target, ast.Name):
+                                    bindings.setdefault(target.id, set()).update(literal_strings(value, {}))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
                 continue
-            if isinstance(value, (tuple, list)) and all(isinstance(x, str) for x in value):
-                loops.setdefault(node.target.id, set()).update(value)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        name = getattr(node.func, "attr", "")
-        if name not in ("add_parser", "add_argument"):
-            continue
-        for arg in node.args:
-            values = ([arg.value] if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                      else loops.get(arg.id, ()) if isinstance(arg, ast.Name) else ())
-            for value in values:
-                if name == "add_parser" or value.startswith("-"):
-                    tokens.add(value)
+            name = getattr(node.func, "attr", "")
+            if name not in ("add_parser", "add_argument"):
+                continue
+            for arg in node.args:
+                for value in literal_strings(arg, bindings):
+                    if name == "add_parser" or value.startswith("-"):
+                        tokens.add(value)
+            for keyword in node.keywords:
+                if keyword.arg == "choices":
+                    tokens.update(literal_strings(keyword.value, bindings))
     return sorted(tokens)
 
 
@@ -239,6 +262,9 @@ class TestD5Inventory(unittest.TestCase):
             self.assertIn(record["root"], roots)
             represented.add(record["root"])
             self.assertIn(record["disposition"], ("admitted", "refused"))
+            self.assertIsInstance(record["mode"], list)
+            self.assertTrue(record["mode"])
+            self.assertTrue(all(isinstance(m, str) and m for m in record["mode"]))
             self.assertIs(type(record["new"]), bool)
             for field in ("mode", "guard", "proof", "placement", "branches"):
                 self.assertTrue(record[field], record["id"])
@@ -269,6 +295,61 @@ class TestD5Inventory(unittest.TestCase):
 
     def test_bidirectional_reconciliation(self):
         assert_reconciliation(self, self.data, self.manifest)
+
+
+    def test_delegated_and_constructed_selectors(self):
+        project = ROOT / "skills/hanig-project/scripts/linear_sync.py"
+        self.assertTrue({"file", "issue", "new", "edit", "replay", "--adopt-checked",
+                         "--add-blocked-by", "--remove-blocks", "--out", "--audit"}
+                        <= set(parser_tokens(project)))
+        committee = ROOT / "skills/hanig-review-gate/scripts/committee.py"
+        self.assertTrue({"synthesize", "tiebreak"} <= set(parser_tokens(committee)))
+        self.assertEqual(parser_tokens(ROOT / "scripts/docs_index.py"), ["--root", "write"])
+
+    def test_selector_and_finding_references(self):
+        data = self.data
+        records = {r["id"]: r for r in data["records"]}
+        expected = {r["id"] for r in data["roots"] if r["parser_tokens"]}
+        self.assertEqual(set(data["selector_records"]), expected)
+        for root in data["roots"]:
+            if root["id"] not in expected:
+                continue
+            selectors = data["selector_records"][root["id"]]
+            self.assertEqual(selectors["tokens"], root["parser_tokens"])
+            self.assertEqual(set(selectors["records"]),
+                             {r["id"] for r in data["records"] if r["root"] == root["id"]})
+        self.assertEqual(set(data["finding_records"]), {f[0] for f in data["findings"]})
+        for refs in data["finding_records"].values():
+            self.assertTrue(refs)
+            self.assertTrue(set(refs) <= set(records))
+        self.assertTrue(data["supported_envelope"].startswith("Supported envelope and accepted limits\n"))
+        self.assertEqual(data["discovery"]["root_count"], len(data["roots"]))
+        for part in data["partition"]:
+            self.assertLessEqual(part["max_diff_bytes"], 55000)
+
+    def test_summary_is_bounded_and_names_findings(self):
+        path = FIXTURE.with_suffix(".md")
+        self.assertLessEqual(len(path.read_bytes()), 6000)
+        summary = path.read_text()
+        for finding, refs in self.data["finding_records"].items():
+            self.assertIn(finding, summary)
+            for ref in refs:
+                self.assertIn(ref, summary)
+
+    def test_drop_a_root_mutation(self):
+        # Exercise the same equality consumed by the production census test.
+        from copy import deepcopy
+        mutated = deepcopy(self.data)
+        mutated["roots"].pop()
+        with self.assertRaises(AssertionError):
+            assert_census(self, mutated, discover())
+
+    def test_drop_a_boundary_mutation(self):
+        from copy import deepcopy
+        mutated = deepcopy(self.data)
+        mutated["boundaries"].pop(next(iter(mutated["boundaries"])))
+        with self.assertRaises(AssertionError):
+            assert_reconciliation(self, mutated, self.manifest)
 
 
 if __name__ == "__main__":
