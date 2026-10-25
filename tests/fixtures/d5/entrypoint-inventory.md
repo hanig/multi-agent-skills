@@ -19,6 +19,8 @@ every effect in its group. Parser selectors include delegated definitions.
 - **F7** — Manifest is a historical classification: b7/b8 reachable inactive but bypassed by active merge return; audit query POST is not b9 mutation; review b14 explicitly admitted. No production containment conclusion follows from this inventory. Records: `r31.0`, `r31.2`, `r38.0`, `r47.0`.
 - **F8** — probe.sh performs external curl HEAD requests; model_family exposes snapshot writes. Neither route is covered by a containing-root D5 guard. Propose refusal before effects. Records: `r06.0`, `r44.1`.
 
+- **F9** — Additional auxiliary roots and direct helper APIs need profile coverage: unguarded writes/launches, admitted output destinations and installation-only access. Existing downstream refusals still need root-specific proof. Records: `r00.0`, `r01.0`, `r02.0`, `r04.0`, `r05.0`, `r07.0`, `r10.1`, `r12.0`, `r14.0`, `r15.0`, `r16.0`, `r17.0`, `r19.0`, `r21.0`, `r22.0`, `r27.0`, `r28.0`, `r30.0`, `r35.0`, `r36.1`, `r41.0`, `r42.0`, `r46.0`, `r49.1`, `r51.1`, `r53.1`, `r54.1`, `r59.1`, `r61.1`, `r64.1`, `r39.0`.
+
 ## Proposed partition
 
 Each implementation unit is capped at 55,000 diff bytes. Proof remains with
