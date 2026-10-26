@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = 'eb90c2c50081291c43e7177bcd3edfc2197fe61e'
+BASE = '9f9cbaf74d2154262a1f1664c26573f1ef0c9d80'
 FIXTURES = ROOT / 'tests/fixtures/d5'
 GATE = ROOT / 'skills/hanig-review-gate/scripts'
 SWARM = ROOT / 'skills/hanig-swarm/scripts'
@@ -269,6 +269,58 @@ class TestGateGuards(unittest.TestCase):
                     self.assertFalse(marker.exists())
             finally:
                 os.chdir(old)
+
+
+class TestMergeAdmission(unittest.TestCase):
+    def test_production_merge_launch_is_not_admitted(self):
+        import merge_unit as M
+        self.assertIs(M.DMA.merge_launch_admitted(), False)
+
+    def test_active_entries_refuse_before_any_effect_without_forced_admission(self):
+        from tests.test_d5_registry import TestD5Registry
+        from tests.fixtures.d5.ready import ready
+        from tests.test_d5_u4_1_active_surface import SurfaceFixture
+        from tests.test_d5_u4_2_request_authority import tree_bytes
+        import merge_unit as M
+        import d5_readiness as DR
+        import d5_registry as registry
+        for installed in (False, True):
+            with self.subTest(installed=installed), ExitStack() as stack:
+                case = TestD5Registry()
+                case.setUp()
+                stack.callback(case.doCleanups)
+                if installed:
+                    ready(case, case.repo, 'p', case.state)
+                tmp = stack.enter_context(tempfile.TemporaryDirectory())
+                fixture = SurfaceFixture(tmp)
+                fixture.args.state_dir = str(case.state)
+                fixture.margv[2] = str(case.state)
+                before = tree_bytes(case.state)
+                def lease_entry():
+                    with M._active_entry_lease(fixture.args):
+                        self.fail('entered active lease')
+                calls = [lambda: M._d5_merge_entry(fixture.args), lease_entry,
+                         lambda: M.reconcile(fixture.args, fixture.plan)]
+                probes = []
+                for owner, name in ((registry, 'lookup'), (M, 'authority'),
+                        (M, 'current_intent'), (M, 'commands'), (M, 'read_object'),
+                        (DR, 'require'), (DR, 'prepared_state'), (DR, 'installer_lease'),
+                        (R.urllib.request, 'urlopen')):
+                    probes.append(stack.enter_context(mock.patch.object(owner, name,
+                        side_effect=AssertionError('unexpected ' + name))))
+                stack.enter_context(mock.patch.object(M.D5, 'd5_active', return_value=True))
+                output = io.StringIO()
+                with no_effects() as effects, redirect_stderr(output):
+                    for call in calls:
+                        with self.assertRaisesRegex(M.Refusal, 'U4.9.*executable binding'):
+                            call()
+                    self.assertEqual(M.main(fixture.margv), 1)
+                    self.assertIn('U4.9', output.getvalue())
+                    self.assertIn('executable binding', output.getvalue())
+                    self.assertEqual(effects, ([], []))
+                for probe in probes:
+                    probe.assert_not_called()
+                self.assertEqual(tree_bytes(case.state), before)
 
 
 class TestMergeChild(unittest.TestCase):
