@@ -1,5 +1,5 @@
 {
-"base":"eb90c2c50081291c43e7177bcd3edfc2197fe61e",
+"base":"9f9cbaf74d2154262a1f1664c26573f1ef0c9d80",
 "captures":{
 "unit/allocate":{"commands":[["git","-C","<fixture>","rev-parse","--show-toplevel"]],"launches":["subprocess.run"],"outcome":["AssertionError","unexpected subprocess.run"],"output":"","protected_unchanged":true,"transports":[],"writes":[]},
 "unit/bind":{"commands":[],"launches":[],"outcome":["AssertionError","unexpected write_text"],"output":"","protected_unchanged":true,"transports":[],"writes":["write_text"]},
