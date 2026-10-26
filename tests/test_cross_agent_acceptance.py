@@ -111,7 +111,7 @@ class HermeticRoots(unittest.TestCase):
                 report = self.report()
                 selected = discovery.select_target(report)
                 self.assertEqual(selected["agent"], agent)
-                self.assertEqual(selected["state"], "configured")
+                self.assertEqual(report["agents"][agent]["state"], "configured")
                 self.assertEqual(selected["destination"]["physical_path"],
                                  str((config / "skills").resolve()))
                 self.assertEqual(report["agents"][agent]["evidence"]["config_directories"],
@@ -126,7 +126,7 @@ class HermeticRoots(unittest.TestCase):
         self.assertEqual(plan["selected"][2]["covered_by"], ["claude"])
         self.assertEqual(plan["selected"][3]["covered_by"], ["codex"])
         self.assertEqual(plan["selected"][4]["covered_by"], ["codex"])
-        self.assertEqual(plan["selected"][5]["covered_by"], [])
+        self.assertIsNone(plan["selected"][5]["covered_by"])
         # The compatibility helper refuses to pick one of three physical writes
         # by accident, but automatic multi-target installation uses the plan.
         selected = discovery.select_target(report)

@@ -378,7 +378,7 @@ class TestPublicCli(unittest.TestCase):
     def test_no_automatic_agent_is_actionable_and_writes_nothing(self):
         result, home = self._run("--dry-run")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--agent claude|codex|opencode|pi", result.stderr)
+        self.assertIn("--agent " + "|".join(installer.SUPPORTED_AGENTS), result.stderr)
         self.assertFalse(home.exists())
 
     def test_shared_adapter_destination_is_preflighted_once_per_skill(self):
