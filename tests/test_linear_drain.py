@@ -757,6 +757,24 @@ class TestIncrementalDrain(DrainCase):
         self.assertEqual([r['key'] for r in self.receipts()], ['later'])
         self.assertEqual(self.writes('DrainState'), [])
 
+    def test_unreadable_history_withholds_older_state_and_receipt(self):
+        later = self.intent('later', 'close', at='2026-10-05T12:00:00Z')
+        self.seed(later); self.legacy(later)
+        self.fake.issues['1']['state']['type'] = 'completed'
+        self.intent('earlier', 'start')
+        self.fake.omit_listing = True
+        cid = LS.comment_id('workspace', 'project', '1', 'later')
+        dispatch = self.fake.dispatch
+        def unavailable(q, v):
+            if 'query IntentComment(' in q and v['id'] == cid:
+                raise OSError('synthetic historical read unavailable')
+            return dispatch(q, v)
+        with mock.patch.object(self.fake, 'dispatch', unavailable):
+            self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual(self.writes('DrainState'), [])
+        self.assertEqual([r['key'] for r in self.receipts()], ['later'])
+
     def test_full_request_count_scales_with_receipted_history(self):
         for count, requests in ((1, 14), (50, 211)):
             self.request_count(count, True)
