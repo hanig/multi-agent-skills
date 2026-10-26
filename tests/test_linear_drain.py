@@ -746,6 +746,17 @@ class TestIncrementalDrain(DrainCase):
         self.assertIn('2 issue references skipped (already receipted)', self.stdout)
         self.assertEqual(len(self.fake.calls), 1)
 
+    def test_missing_listed_history_preserves_state_order(self):
+        later = self.intent('later', 'close', at='2026-10-05T12:00:00Z')
+        self.seed(later); self.legacy(later)
+        self.fake.issues['1']['state']['type'] = 'completed'
+        self.intent('earlier', 'start')
+        self.fake.omit_listing = True
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual([r['key'] for r in self.receipts()], ['later'])
+        self.assertEqual(self.writes('DrainState'), [])
+
     def test_full_request_count_scales_with_receipted_history(self):
         for count, requests in ((1, 14), (50, 211)):
             self.request_count(count, True)

@@ -576,11 +576,9 @@ python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" audit \
   --binding .hanig/linear-binding.json --out AUDIT
 ```
 
-Drain incrementally as needed, for example after each merge; only issues with
-pending intents are resolved, confirmed and reconciled. Use `--full` about once
-a day to correct drift on already-receipted issues. The skipped count names
-local issue references: aliases cannot be deduplicated without remote reads.
-The binding audit still detects drift.
+Drain incrementally as needed, for example after each merge. Use `--full` about
+once a day to correct drift on already-receipted issues. Only pending issues
+incur issue reads by default.
 
 `--draft tickets.json` supports named plans; nameless plans use the binding
 and intent tracker identifiers. Reconciliation is eventual across hosts,

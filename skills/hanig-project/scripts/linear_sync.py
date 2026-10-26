@@ -757,6 +757,8 @@ def read_comment(client, cid):
 def confirm_comment(client, intent, workspace, project, issue, create, listed=None):
     cid = comment_id(workspace, project, issue, intent['key'])
     comment = read_comment(client, cid) if listed is None else listed.get(cid)
+    if listed is not None and comment is None and not create:
+        comment = read_comment(client, cid)  # Preserve state order.
     create_error = None
     if comment is None and create:
         try:
