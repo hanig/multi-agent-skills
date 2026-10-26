@@ -27,6 +27,7 @@ import time
 from urllib.parse import quote, urlsplit
 
 import skill_paths
+import d5_merge_admission as DMA
 
 _ORCHESTRATE_DIR = os.environ.get("HANIG_ORCHESTRATE_DIR") or Path(__file__).parents[1]
 _SWARM_DIR = skill_paths.sibling_skill_root(
@@ -53,13 +54,21 @@ def _d5_refuse(route):
         raise Refusal("D5 active: {} is outside the supported merge profile".format(route))
 
 
+def _d5_merge_launch_entry():
+    if D5.d5_active() and not DMA.merge_launch_admitted():
+        raise Refusal("D5 active: merge launch is not admitted; U4.9 must supply "
+                      "an operator-authorized executable binding and enforce its "
+                      "integrity boundary before U4.9/U8 admit merge launch")
+
+
 def _d5_merge_entry(args):
     """Select the first active profile without entering legacy preparation.
 
-    U4.3 owns its authority binding and in-process receipt recording. Until
-    that binding exists, even the supported synchronous merge must stop here.
+    U4.3 owns authority binding and in-process receipt recording. U4.9/U8
+    must separately admit merge launch after executable binding review.
     There is deliberately no legacy fallback or runtime opt-out.
     """
+    _d5_merge_launch_entry()
     if D5.d5_active():
         if (args.verify_integration or args.abandon_intent
                 or args.retrieve_remote_evidence or args.remote_recovery_attestation):
@@ -1087,6 +1096,7 @@ class _MergeBoundary:
 @contextmanager
 def _active_entry_lease(args):
     """Read-only installation preflight before acquiring the existing lease."""
+    _d5_merge_launch_entry()
     if (args.verify_integration or args.abandon_intent or args.retrieve_remote_evidence
             or args.remote_recovery_attestation):
         _d5_merge_entry(args)
