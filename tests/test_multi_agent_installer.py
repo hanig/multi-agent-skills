@@ -68,7 +68,7 @@ class TestSelectionBeforeWrites(unittest.TestCase):
 
     def test_unknown_and_contradictory_selection_fail_before_plan(self):
         with self.assertRaisesRegex(installer.InstallRequestError, "unknown agent"):
-            installer.parse_options(["--agent", "cursor"])
+            installer.parse_options(["--agent", "not-an-agent"])
         with self.assertRaisesRegex(installer.InstallRequestError, "cannot be combined"):
             installer.parse_options(["--prefix", "/tmp/prefix", "--agent", "claude"])
         with self.assertRaisesRegex(installer.InstallRequestError, "only valid"):
