@@ -4,8 +4,10 @@ Intent state is no-replay/recovery state, never successful-completion authority.
 Only a matching durable receipt validated on readback establishes completion.
 Trusted single-host writers, stable lock identities; no process attribution.
 """
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 
 from d5_completion import Provider
@@ -193,8 +195,38 @@ class MergeProvider(Provider):
 PROVIDER = MergeProvider()
 
 
+@contextmanager
+def recovery_drain(state_dir):
+    """Own a nonblocking exclusive DRAIN for the completion-only operator.
+
+    ARC-3762-OD1: the original submit owner must have exited after an
+    exceptional unwind. Never borrow, upgrade, unlock or close its holder.
+    Reuse R1's safe opener, ordering, tracking and close-only cleanup; the
+    coordinator lease precedes this independent acquisition. No new lock or
+    release protocol, and no readiness/installation substitution.
+    """
+    _require(registry.d5_active(), "inactive")
+    ready = readiness.require(state_dir)
+    locks = protocol.locks
+    _require(not locks._held(), "recovery requires independent DRAIN before START")
+    with locks.pin(ready["record_dir"]) as record:
+        record._order(0)
+        fd = record._open(0)
+        with locks._cleanup(os.close, fd):
+            try:
+                locks.fcntl.flock(fd, locks.fcntl.LOCK_EX | locks.fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise AuthorityError("D5 merge recovery: DRAIN is held; wait for the owner to exit") from exc
+            with record._track(0, False, fd):
+                yield
+
+
 def recover(state_dir, intent, outcome):
-    """Completion-only for the same installed generation; never submit/retry."""
+    """Complete under caller DRAIN; the operator uses recovery_drain after exit.
+
+    This provider capability neither releases an original R6 holder nor
+    authorizes another submission or installation.
+    """
     _require(type(intent.get("d5")) is dict, "legacy intent cannot authorize active recovery")
     handle = Handle(intent["operation_id"], str(Path(state_dir).resolve()),
                     encoded(intent["d5"]["binding"]))

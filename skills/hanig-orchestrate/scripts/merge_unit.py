@@ -615,7 +615,6 @@ def reconcile(args, plan):
         import d5_authority_store as store
         import d5_host as host_api
         import d5_merge_journal as J
-        import d5_protocol_locks as protocol
         import d5_readiness as DR
         import d5_registry as registry
         import d5_submission as DS
@@ -640,7 +639,7 @@ def reconcile(args, plan):
                 raise Refusal("earlier merge request has an unresolved outcome; refusing a second merge call")
             _d5_journal_binding(intent, ready, binding["repo"])
             # Recovery observes/completes the original request without dispatch.
-            with protocol.pin(entry["record_dir"]) as pinned, pinned.drain():
+            with J.recovery_drain(state_dir):
                 outcome = J.recover(state_dir, intent, boundary.completion(pr))
             return _d5_result_receipt(state_dir, binding, root, operation_id, outcome, binding["repo"])
         if pr["state"] != "OPEN":
@@ -1366,4 +1365,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # The closed provider checks the canonical module's boundary type. Keep
+    # script execution and completion-only recovery on that same identity.
+    from merge_unit import main
     sys.exit(main())
