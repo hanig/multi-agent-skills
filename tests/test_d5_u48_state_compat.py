@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -67,6 +68,45 @@ def surface_capture():
     return values
 
 
+def installation_capture(module=R):
+    """Eligible inactive promotion: real registry, lease, writes and traversal."""
+    c = legacy.TestMergeUnit()
+    c.setUp()
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, c.env))
+            stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=False))
+            stack.enter_context(mock.patch.object(R.registry.CP, '_external_base',
+                                                 return_value=c.directory / 'external'))
+            entry = ready(c, c.repo, c.plan['name'], c.state_dir, promote=False)
+            before = tree_bytes(c.state_dir)
+            writes, launches = [], []
+            write, popen = module.store.write_bytes, subprocess.Popen
+
+            def writing(path, raw):
+                writes.append([path.name, json.loads(raw)])
+                return write(path, raw)
+
+            def launching(argv, *args, **kwargs):
+                launches.append(argv)
+                return popen(argv, *args, **kwargs)
+
+            with mock.patch.object(module.store, 'write_bytes', writing), \
+                    mock.patch.object(subprocess, 'Popen', launching):
+                value = module.promote(c.repo, c.plan['name'], c.state_dir)
+                module.successor_gate(entry)
+            after = tree_bytes(c.state_dir)
+            result = dict(writes=writes, launches=launches,
+                changed=sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k)))
+            encoded = json.dumps(result, sort_keys=True)
+            for key in ('registration_id', 'generation', 'repo_key', 'state_key', 'record_key'):
+                encoded = encoded.replace(json.dumps(value[key]), json.dumps('<' + key + '>'))
+            return json.loads(encoded.replace(value['record_dir'], '<record>')
+                              .replace(str(c.directory), '<fixture>'))
+    finally:
+        c.doCleanups()
+
+
 class TestInactive(unittest.TestCase):
     def test_base_and_inactive_effects_with_inherited_sinfo(self):
         data = json.loads(FIXTURE.read_text())
@@ -85,6 +125,11 @@ class TestInactive(unittest.TestCase):
         data = json.loads(FIXTURE.read_text())
         self.assertEqual(data['base'], BASE)
         self.assertEqual(inactive_script_capture(), data['operator'])
+
+    def test_inactive_eligible_installer_effects(self):
+        data = json.loads(FIXTURE.read_text())
+        self.assertEqual(data['base'], BASE)
+        self.assertEqual(installation_capture(), data['installation'])
 
 
 class TestPreparedState(unittest.TestCase):

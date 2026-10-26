@@ -1,5 +1,104 @@
 {
   "base": "d48e6324aae6ace2a296152b4d6365a509d51aea",
+  "installation": {
+    "changed": [
+      "d5-readiness.json"
+    ],
+    "launches": [
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "--version"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--path-format=absolute",
+        "--show-toplevel"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--show-toplevel"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--show-toplevel"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "worktree",
+        "list",
+        "--porcelain"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--show-toplevel"
+      ]
+    ],
+    "writes": [
+      [
+        "installation.json",
+        {
+          "generation": "<generation>",
+          "plan_id": "merge-test",
+          "profile": "synchronous-merge-v1",
+          "record_dir": "<record>",
+          "record_key": "<record_key>",
+          "registration_id": "<registration_id>",
+          "repo_key": "<repo_key>",
+          "schema_version": 1,
+          "state_dir": "<fixture>/state",
+          "state_key": "<state_key>"
+        }
+      ],
+      [
+        "d5-readiness.json",
+        {
+          "generation": "<generation>",
+          "plan_id": "merge-test",
+          "profile": "synchronous-merge-v1",
+          "record_dir": "<record>",
+          "record_key": "<record_key>",
+          "registration_id": "<registration_id>",
+          "repo_key": "<repo_key>",
+          "schema_version": 1,
+          "state_dir": "<fixture>/state",
+          "state_key": "<state_key>"
+        }
+      ]
+    ]
+  },
   "migration": {
     "args": {
       "root": "<project>/runs",
