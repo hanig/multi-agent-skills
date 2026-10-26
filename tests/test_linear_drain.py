@@ -153,12 +153,24 @@ class DrainCase(AuditCase):
     def legacy(self, intent, directory=None):
         DC.contract.record_receipt(directory or self.state, intent['key'], intent.get('tracker', 'ARC-1'))
 
-    def drain(self, *directories, draft=False, dry=False, full=False):
+    def drain(self, *directories, draft=False, dry=False, full=None):
         args = ['drain', '--draft' if draft else '--binding', str(self.draft if draft else self.binding)]
         for directory in directories or (self.state,):
             args.extend(['--state-dir', str(directory)])
         if dry:
             args.append('--dry-run')
+        # These inherited tests exercise historical reads or receipt-only drift.
+        if full is None:
+            full = self._testMethodName in {
+                'test_drain_batches_repeated_initial_references',
+                'test_comment_identity_markers_and_rejected_create',
+                'test_lagging_readback_retry_no_duplicate',
+                'test_receipted_history_repair_audit_and_failure',
+                'test_membership_and_identity_rechecked_and_state_missing',
+                'test_all_receipted_comment_read_failure_is_unknown',
+                'test_listing_disagrees_with_confirmed_comment',
+                'test_key_containment_real_receipt_child_and_errors',
+            }
         if full:
             args.append('--full')
         return self.cli(*args)
@@ -223,7 +235,7 @@ class TestDrain(DrainCase):
     def test_drain_batches_repeated_initial_references(self):
         for n in range(5):
             self.intent('note-%d' % n, 'note')
-        self.assertEqual(self.drain(full=True), 0, self.stdout + self.stderr)
+        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
         self.assertEqual(sum('query OperationIdentifiers' in q for q, _ in self.fake.calls), 1)
         self.assertEqual(sum('query DrainIssue' in q for q, _ in self.fake.calls), 2)
         self.assertEqual(len(self.receipts()), 5)
@@ -303,12 +315,12 @@ class TestDrain(DrainCase):
                     comment['body'] = comment['body'].replace(old, new)
                 if change not in ('evidence', 'order'):
                     self.assertIsNone(LS.genuine_comment(comment, 'workspace', 'project', '1'))
-                self.assertEqual(self.drain(full=True), 3)
+                self.assertEqual(self.drain(), 3)
                 self.assertEqual(self.receipts(), [])
                 self.assertEqual(self.fake.mutations, [])
         self.fake.comments.clear()
         self.fake.reject_after_create = True
-        self.assertEqual(self.drain(full=True), 0, self.stdout)
+        self.assertEqual(self.drain(), 0, self.stdout)
         self.assertEqual(len(self.fake.comments), 1)
 
     def test_rejected_comment_create_preserves_original_error(self):
@@ -503,15 +515,15 @@ class TestDrain(DrainCase):
         self.intent()
         self.fake.hide_comments = True
         self.fake.omit_listing = True
-        self.assertEqual(self.drain(full=True), 3)
+        self.assertEqual(self.drain(), 3)
         self.assertEqual(self.receipts(), [])
         self.assertEqual(self.writes('DrainState'), [])
         self.fake.hide_comments = False
         self.fake.lag_state = True
-        self.assertEqual(self.drain(full=True), 3)
+        self.assertEqual(self.drain(), 3)
         self.assertEqual(self.receipts(), [])
         self.fake.lag_state = False
-        self.assertEqual(self.drain(full=True), 0, self.stdout)
+        self.assertEqual(self.drain(), 0, self.stdout)
         self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
         self.assertEqual(len(self.writes('DrainState')), 1)
         self.assertEqual(len(self.receipts()), 1)
@@ -579,7 +591,7 @@ class TestDrain(DrainCase):
         before = (self.state / DC.RECEIPTS).read_bytes()
         self.assertEqual(self.audit(), 1)
         self.assertEqual(self.checks['intent_order'], 'DRIFT')
-        self.assertEqual(self.drain(full=True), 0, self.stdout)
+        self.assertEqual(self.drain(), 0, self.stdout)
         self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
         self.assertEqual(self.audit(), 0)
         self.assertEqual(self.checks['intent_order'], 'CLEAN')
@@ -587,11 +599,15 @@ class TestDrain(DrainCase):
         self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
         self.fake.issues['1']['state']['type'] = 'started'
         self.fake.mutation_failure = 'DrainState'
-        self.assertEqual(self.drain(full=True), 3)
+        self.assertEqual(self.drain(), 3)
         self.assertIn('reconciliation', self.stdout)
         self.fake.mutation_failure = None
         self.fake.comments.pop(LS.comment_id('workspace', 'project', '1', 'old'))
-        self.assertEqual(self.drain(full=True), 0)
+        self.fake.mutations.clear()
+        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'started')
+        self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
+        self.assertEqual(self.fake.mutations, [])
         self.assertIn('ARC-1: uncovered history', self.stdout)
         self.assertEqual(self.writes('IntentCommentCreate'), [])
 
@@ -646,7 +662,7 @@ class TestDrain(DrainCase):
         for path in self.state.iterdir():
             self.assertNotIn(KEY, path.read_text())
         self.fake.fail = 'DrainIssue'
-        self.assertEqual(self.drain(full=True), 3)
+        self.assertEqual(self.drain(), 3)
         self.assertNotIn(KEY, self.stdout + self.stderr)
         with mock.patch.object(API, 'load_key', return_value=None):
             self.assertEqual(self.drain(), 2)
@@ -758,22 +774,52 @@ class TestIncrementalDrain(DrainCase):
         self.assertEqual(self.writes('DrainState'), [])
 
     def test_unreadable_history_withholds_older_state_and_receipt(self):
-        later = self.intent('later', 'close', at='2026-10-05T12:00:00Z')
-        self.seed(later); self.legacy(later)
+        for mode in ('incremental', 'full', 'base-equivalent'):
+            for fault in ('error', 'absent', 'invalid'):
+                with self.subTest(mode=mode, fault=fault):
+                    self.history_retry(mode, fault)
+
+    def history_retry(self, mode, fault):
+        # Legacy draft + full uses base-equivalent per-intent and state reads.
+        draft = mode == 'base-equivalent'
+        self.draft_file()
+        directory = self.root / (mode + fault)
+        self.fake.comments.clear(); self.fake.mutations.clear()
         self.fake.issues['1']['state']['type'] = 'completed'
-        self.intent('earlier', 'start')
+        later = self.intent('later', 'close', at='2026-10-05T12:00:00Z',
+                            project='sample', directory=directory)
+        comment = self.seed(later); self.legacy(later, directory)
+        self.intent('earlier', 'start', project='sample', directory=directory)
+        self.intent('note', 'note', project='sample', directory=directory)
+        before = (directory / DC.RECEIPTS).read_bytes()
         self.fake.omit_listing = True
-        cid = LS.comment_id('workspace', 'project', '1', 'later')
         dispatch = self.fake.dispatch
         def unavailable(q, v):
-            if 'query IntentComment(' in q and v['id'] == cid:
-                raise OSError('synthetic historical read unavailable')
+            if 'query IntentComment(' in q and v['id'] == comment['id']:
+                if fault == 'error':
+                    raise OSError('synthetic historical read unavailable')
+                return {'comments': {'nodes': [] if fault == 'absent' else
+                                     [dict(comment, body='invalid')]}}
             return dispatch(q, v)
+        def drain():
+            return self.drain(directory, full=mode != 'incremental', draft=draft)
         with mock.patch.object(self.fake, 'dispatch', unavailable):
-            self.assertEqual(self.drain(), 3)
+            self.assertEqual(drain(), 3, self.stdout)
         self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
         self.assertEqual(self.writes('DrainState'), [])
-        self.assertEqual([r['key'] for r in self.receipts()], ['later'])
+        self.assertEqual([r['key'] for r in self.receipts(directory)], ['later'])
+        self.assertEqual((directory / DC.RECEIPTS).read_bytes(), before)
+        # Force visible drift: the healthy retry must still select this issue.
+        self.fake.issues['1']['state']['type'] = 'started'
+        self.fake.omit_listing = False
+        self.fake.calls.clear()
+        self.assertEqual(drain(), 0, self.stdout)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual([r['key'] for r in self.receipts(directory)], ['later', 'note'])
+        self.assertEqual(len(self.writes('DrainState')), 1)
+        self.assertIn('superseded by later', self.stdout)
+        self.assertEqual(sum('query DrainIssue' in q for q, _ in self.fake.calls),
+                         1 if mode == 'incremental' else 2)
 
     def test_full_request_count_scales_with_receipted_history(self):
         for count, requests in ((1, 14), (50, 211)):
@@ -922,20 +968,20 @@ class TestDrainGuards(DrainCase):
                             result['issue'][field] = 'other' if field == 'id' else {'id': 'other'}
                     return result
                 with mock.patch.object(self.fake, 'dispatch', side_effect=move):
-                    self.assertEqual(self.drain(full=True), 3)
+                    self.assertEqual(self.drain(), 3)
                 self.assertEqual(self.receipts(), [])
                 self.assertEqual(len(self.writes('DrainState')), 0 if when == 1 else 1)
         self.fake.states = []
         self.fake.issues['1']['state']['type'] = 'unstarted'
         self.fake.mutations.clear()
-        self.assertEqual(self.drain(full=True), 3)
+        self.assertEqual(self.drain(), 3)
         self.assertIn('no started state', self.stdout)
         self.assertEqual(self.writes('DrainState'), [])
 
     def test_all_receipted_comment_read_failure_is_unknown(self):
         intent = self.intent(); self.seed(intent); self.legacy(intent)
         self.fake.fail = 'query IntentComment('
-        self.assertEqual(self.drain(full=True), 3)
+        self.assertEqual(self.drain(), 3)
         self.assertIn('comment read UNKNOWN', self.stdout)
         self.assertNotIn('uncovered history', self.stdout)
         self.assertEqual(self.writes('IntentCommentCreate'), [])
@@ -957,7 +1003,7 @@ class TestDrainGuards(DrainCase):
                     comment['body'] = comment['body'].replace('2026-10-05', '2026-10-06')
             return data
         with mock.patch.object(self.fake, 'dispatch', side_effect=edited):
-            self.assertEqual(self.drain(full=True), 3)
+            self.assertEqual(self.drain(), 3)
         self.assertEqual(self.writes('DrainState'), [])
         self.assertEqual(self.receipts(), [])
         self.assertIn('listed comment disagrees', self.stdout)
