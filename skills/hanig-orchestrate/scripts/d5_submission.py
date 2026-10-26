@@ -22,6 +22,10 @@ Do not release it, unlock it or last-close its descriptor from another thread,
 a signal handler or a callback during the call. lease_required and holds_lease
 detect a lease already lost; they do not fence a later release. U4.3's lease
 continuity guarantee depends on this precondition, not a release/submit fence.
+ARC-3762-OD1 adds a NEW caller restriction for the OD7 merge operator: after
+any submit that does not release, exit the process. Never recover, retry or
+submit again in that live process. Only fresh-process completion recovery is
+admitted; an in-process caller of main/submit that stays alive is excluded.
 flock ownership follows the open file description. An independently opened
 descriptor cannot unlock it; a child inheriting the description, or a process
 receiving an alias, can. The merge child receives no lease or DRAIN descriptor.
