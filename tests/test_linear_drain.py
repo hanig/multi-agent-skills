@@ -1100,6 +1100,189 @@ class TestIncrementalDrain(DrainCase):
         print('live-shaped drain: 280 intents / 120 issues / 2 pending: %d requests; supplied base 652' % calls)
 
 
+class TestSettledDrain(DrainCase):
+    def settled_pair(self, iid='1', directory=None):
+        old = self.intent('old-' + iid, tracker='ARC-' + iid, directory=directory)
+        later = self.intent('later-' + iid, 'close', at='2026-10-05T11:00:00Z',
+                            tracker='ARC-' + iid, directory=directory)
+        self.legacy(later, directory)
+        self.fake.issues[iid]['state']['type'] = 'completed'
+        return old, later
+
+    def selected(self):
+        return [v['id'] for q, v in self.fake.calls if 'query IntentComments' in q]
+
+    def test_constant_cost_in_superseded_issues(self):
+        counts = []
+        for count in (1, 50):
+            directory = self.root / ('settled-' + str(count))
+            for n in range(2, count + 2):
+                self.fake.add(str(n))
+                self.settled_pair(str(n), directory)
+            self.intent('pending-' + str(count), 'note', directory=directory)
+            before = {p.name: p.read_bytes() for p in directory.iterdir()}
+            self.fake.calls.clear()
+            self.assertEqual(self.drain(directory), 0, self.stdout)
+            counts.append(len(self.fake.calls))
+            self.assertEqual(self.selected(), ['1'])
+            self.assertEqual(self.stdout.splitlines()[-1],
+                             '1 acknowledged, 0 superseded, 0 failures, %d issues skipped' % count)
+            self.assertEqual((directory / DC.OUTBOX).read_bytes(), before[DC.OUTBOX])
+            self.assertEqual(len(self.receipts(directory)), count + 1)
+            self.assertEqual({p.name for p in directory.iterdir()}, set(before) | {DC.RECONCILIATIONS})
+            self.assertEqual(len((directory / DC.RECONCILIATIONS).read_text().splitlines()), 1)
+            snapshot = {p.name: p.read_bytes() for p in directory.iterdir()}
+            self.fake.calls.clear()
+            self.assertEqual(self.drain(directory), 0, self.stdout)
+            self.assertEqual(len(self.fake.calls), 1)  # binding identity only
+            self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, snapshot)
+        self.assertEqual(counts, [8, 8])
+        print('settled K=1/K=50 requests: %s' % counts)
+
+    def test_settled_and_pending_process_whole_issue(self):
+        old, later = self.settled_pair()
+        pending = self.intent('pending', 'note', at='2026-10-05T12:00:00Z')
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.selected(), ['1'])
+        self.assertEqual({c['body'] for c in self.fake.comments.values()},
+                         {LS.comment_body(old), LS.comment_body(pending)})
+        self.assertEqual({r['key'] for r in self.receipts()}, {later['key'], pending['key']})
+        self.assertEqual(self.stdout.splitlines()[-1],
+                         '1 acknowledged, 1 superseded, 0 failures, 0 issues skipped')
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+
+    def test_wrong_line_order_selects(self):
+        later = self.intent('later', 'close', at='2026-10-05T11:00:00Z')
+        self.legacy(later)
+        self.intent('old')
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.selected(), ['1'])
+        self.assertIn('1 superseded', self.stdout)
+
+    def test_wrong_intent_order_selects(self):
+        for kind in ('timestamp', 'sequence', 'key', 'equal'):
+            with self.subTest(kind=kind):
+                directory = self.root / kind
+                self.fake.comments.clear()
+                old = self.intent('z', at='2026-10-05T11:00:00Z', directory=directory,
+                                  **({'seq': 2} if kind == 'sequence' else {}))
+                later = self.intent('a', 'close', directory=directory,
+                                    at='2026-10-05T10:00:00Z' if kind == 'timestamp'
+                                    else '2026-10-05T11:00:00Z',
+                                    **({'seq': 1} if kind == 'sequence' else {}))
+                self.legacy(later, directory)
+                if kind == 'equal':
+                    self.seed(old)
+                self.fake.calls.clear()
+                # Distinct valid keys break ties in real intent_order. Inject
+                # equality at its boundary to pin the strict comparison too.
+                order = LS.intent_order
+                with mock.patch.object(LS, 'intent_order', side_effect=(
+                        (lambda *a: order(old['at'], old['key'])) if kind == 'equal' else order)):
+                    self.assertEqual(self.drain(directory), 0, self.stdout)
+                self.assertEqual(self.selected(), ['1'])
+
+    def test_unreceipted_later_does_not_settle(self):
+        self.intent('old')
+        self.intent('later', 'close', at='2026-10-05T11:00:00Z')
+        collected = []
+        collect = LS.collect_intents
+        def capture(*args):
+            entries = collect(*args)
+            collected.extend(entries)
+            return entries
+        # Selection alone cannot expose this mutation: the later unreceipted
+        # intent also selects the issue. Observe the actual selection entries.
+        with mock.patch.object(LS, 'collect_intents', side_effect=capture):
+            self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.selected(), ['1'])
+        self.assertEqual({e['intent']['key']: e['settled'] for e in collected},
+                         {'old': False, 'later': False})
+
+    def test_different_reference_spelling_does_not_settle(self):
+        self.intent('old')
+        later = self.intent('later', 'close', at='2026-10-05T11:00:00Z', tracker='1')
+        self.legacy(later)
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.selected(), ['1'])
+        self.assertIn('1 superseded, 0 failures, 1 issues skipped', self.stdout)
+
+    def test_different_directory_does_not_settle(self):
+        self.intent('old')
+        other = self.root / 'other'
+        self.legacy(self.intent('padding', 'note', tracker='ARC-2', directory=other), other)
+        later = self.intent('later', 'close', at='2026-10-05T11:00:00Z', directory=other)
+        self.legacy(later, other)
+        self.assertEqual(self.drain(self.state, other), 0, self.stdout)
+        self.assertEqual(self.selected(), ['1'])
+        self.assertIn('1 superseded', self.stdout)
+
+    def test_full_repairs_missing_superseded_comment(self):
+        old, later = self.settled_pair()
+        before = {p.name: p.read_bytes() for p in self.state.iterdir()}
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.selected(), [])
+        self.assertEqual(self.fake.comments, {})
+        self.assertEqual(self.drain(full=True), 0, self.stdout)
+        self.assertEqual(self.selected(), ['1'])
+        self.assertEqual([c['body'] for c in self.fake.comments.values()], [LS.comment_body(old)])
+        self.assertEqual({p.name: p.read_bytes() for p in self.state.iterdir()}, before)
+        self.assertEqual(self.stdout.splitlines()[-1],
+                         '0 acknowledged, 1 superseded, 0 failures, 0 issues skipped')
+
+    def test_nonstate_entries_do_not_settle(self):
+        for old_op, later_op in (('note', 'close'), ('start', 'note')):
+            with self.subTest(old=old_op, later=later_op):
+                directory = self.root / old_op
+                self.intent('old-' + old_op, old_op, directory=directory)
+                later = self.intent('later-' + old_op, later_op, at='2026-10-05T11:00:00Z',
+                                    directory=directory)
+                self.legacy(later, directory)
+                self.fake.calls.clear()
+                self.assertEqual(self.drain(directory), 0, self.stdout)
+                self.assertEqual(self.selected(), ['1'])
+
+    def test_duplicate_keys_refuse_whole_directory_once(self):
+        self.intent('unrelated')
+        duplicate = self.intent('duplicate')
+        with (self.state / DC.OUTBOX).open('a') as handle:
+            handle.write('null\n' + json.dumps(duplicate) + '\n')
+        good = self.root / 'healthy'
+        self.fake.add('2')
+        self.intent('healthy', 'note', tracker='ARC-2', directory=good)
+        for full in (False, True):
+            self.fake.calls.clear()
+            self.assertEqual(self.drain(self.state, good, full=full), 3, self.stdout)
+            self.assertNotIn('1', self.selected())
+            self.assertFalse(any('OperationIdentifiers' in q and 1 in v['filter']['number']['in']
+                                 for q, v in self.fake.calls))
+            self.assertEqual(self.receipts(), [])
+            self.assertEqual(self.stdout.count('unacknowledged/UNKNOWN'), 1)
+            self.assertIn('duplicate idempotency key', self.stdout)
+            self.assertIn('1 failures', self.stdout)
+        self.assertEqual([r['key'] for r in self.receipts(good)], ['healthy'])
+
+    def test_efficiency2_shaped_request_count(self):
+        # 118 issues with superseded starts and receipted closes, two pending.
+        for n in range(1, 121):
+            iid = str(n)
+            self.fake.add(iid)
+            if n <= 118:
+                old, later = self.settled_pair(iid)
+                self.seed(old, iid)
+                self.seed(later, iid)
+            else:
+                self.intent('pending-' + iid, 'note', tracker='ARC-' + iid)
+        self.fake.calls.clear()
+        self.assertEqual(self.drain(), 0, self.stdout)
+        calls = len(self.fake.calls)
+        print('efficiency2-shaped: 238 intents / 120 issues / 2 pending: %d requests' % calls)
+        self.assertEqual(calls, 15)
+        self.assertEqual(set(self.selected()), {'119', '120'})
+        self.assertEqual(len(self.receipts()), 120)
+        self.assertIn('118 issues skipped', self.stdout)
+
+
 class TestMergeDrain(DrainCase):
     def test_exit_neutral_unavailable_and_sequence(self):
         self.plan.write_text('{}')

@@ -843,6 +843,8 @@ def collect_intents(directories, contract, report):
         except Exception as exc:
             report('%s: %s' % (directory, exc))
             continue
+        directory_entries, directory_problems, keys = [], [], set()
+        duplicate = None
         for number, line in enumerate(lines, 1):
             if not line.strip():
                 continue
@@ -853,6 +855,11 @@ def collect_intents(directories, contract, report):
                 problems = contract.validate_intent(intent)
                 if problems:
                     raise ValueError('; '.join(problems))
+                key = intent['envelope']['idempotency_key']
+                if key in keys:
+                    duplicate = 'outbox has duplicate idempotency key %r' % key
+                    break
+                keys.add(key)
                 label += ' key=' + intent['key']
                 if intent['verb'] == 'close':
                     evidence = intent.get('evidence')
@@ -878,10 +885,17 @@ def collect_intents(directories, contract, report):
                 grade = status.get(intent['key'], (contract.contract.UNACKNOWLEDGED, []))[0]
                 if grade == contract.contract.CONFLICT:
                     raise ValueError('conflicting acknowledgments')
-                entries.append({'intent': intent, 'directory': directory, 'label': label, 'order': order,
+                directory_entries.append({'intent': intent, 'directory': directory, 'line': number,
+                                'label': label, 'order': order,
                                 'receipted': grade != contract.contract.UNACKNOWLEDGED})
             except Exception as exc:
-                report('%s: %s' % (label, exc))
+                directory_problems.append('%s: %s' % (label, exc))
+        if duplicate is not None:
+            report('%s: %s' % (directory, duplicate))
+            continue
+        entries.extend(directory_entries)
+        for problem in directory_problems:
+            report(problem)
     return sorted(entries, key=lambda e: e['order'])
 
 
@@ -1032,11 +1046,21 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
         except Exception as exc:
             entry['error'] = str(exc)
             fail(entry['label'] + ': ' + str(exc))
-    # Select locally, before resolving references: receipted-only issues have
-    # no per-issue requests. Resolve independently so one bad reference cannot
-    # couple otherwise healthy siblings.
-    references = dict.fromkeys(e['ref'] for e in entries if 'error' not in e
-                               and (args.full or not e['receipted']))
+    # Settlement is local to an exact reference in one append-only outbox.
+    # Both line and intent order must advance; no receipt is written for E.
+    valid = [e for e in entries if 'error' not in e]
+    later_states = {}
+    for entry in valid:
+        if entry['receipted'] and entry['intent']['verb'] in STATE_TYPE:
+            later_states.setdefault((entry['directory'], entry['ref']), []).append(entry)
+    for entry in valid:
+        entry['settled'] = (not entry['receipted'] and entry['intent']['verb'] in STATE_TYPE
+                            and any(later['line'] > entry['line'] and later['order'] > entry['order']
+                                    for later in later_states.get((entry['directory'], entry['ref']), [])))
+    # Resolve independently so one bad reference cannot couple healthy siblings.
+    references = dict.fromkeys(e['ref'] for e in valid
+                               if args.full or (not e['receipted'] and not e['settled']))
+    skipped = len({e['ref'] for e in valid} - references.keys())
     groups = {}
     for ref in references:
         try:
@@ -1092,7 +1116,8 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
                 say('acknowledged ' + entry['label'])
             except Exception as exc:
                 fail(entry['label'] + ': ' + str(exc))
-    say('%d acknowledged, %d superseded, %d failures' % (len(acknowledged), len(superseded), len(failures)))
+    say('%d acknowledged, %d superseded, %d failures, %d issues skipped' %
+        (len(acknowledged), len(superseded), len(failures), skipped))
     return 3 if failures else 0
 
 
