@@ -428,5 +428,68 @@ class TestLinearObservations(unittest.TestCase):
         self.assertEqual(sentinel.read_bytes(), before)
 
 
+class TestFinalReviewAuditRegressions(unittest.TestCase):
+    """Unfixed OD5 final-review counterexamples, retained for recovery."""
+
+    def setUp(self):
+        from tests.test_linear_audit import AuditCase, LS
+        self.case = AuditCase()
+        self.case.setUp()
+        self.addCleanup(self.case.doCleanups)
+        self.linear = LS
+        self.operations = self.case.root / 'current' / 'operations'
+
+    def active(self):
+        import importlib.machinery
+        original = importlib.machinery.SourceFileLoader.exec_module
+
+        def load(loader, module):
+            original(loader, module)
+            if module.__name__ == '_linear_d5_activation':
+                module.d5_active = lambda: True
+
+        stack = ExitStack()
+        stack.enter_context(mock.patch.dict(os.environ, {
+            'HANIG_LINEAR_OPS_DIR': str(self.operations)}))
+        stack.enter_context(mock.patch.object(
+            importlib.machinery.SourceFileLoader, 'exec_module', load))
+        stack.enter_context(mock.patch.object(R.urllib.request, 'urlopen',
+            side_effect=AssertionError('unexpected network')))
+        return stack
+
+    def test_safe_reports_ignore_unrelated_marker_names(self):
+        case = self.case
+        for marker in ('lease.lock', 'swarm-state.json'):
+            with self.subTest(marker=marker), self.active():
+                reports = case.root / ('reports-' + marker)
+                reports.mkdir()
+                target = reports / 'audit.json'
+                argv = ('audit', '--binding', str(case.binding), '--out', str(target))
+                self.assertEqual(case.cli(*argv), 0, case.stderr)
+                target.unlink()
+                unrelated = reports / marker
+                unrelated.write_text('Unrelated fixture data, not coordinator state.\n')
+                before = unrelated.read_bytes()
+                case.fake.calls.clear()
+                rc = case.cli(*argv)
+                self.assertEqual(unrelated.read_bytes(), before)
+                self.assertEqual((rc, target.exists(), bool(case.fake.calls)),
+                                 (0, True, True), case.stderr)
+
+    def test_audit_output_cannot_overwrite_another_operation_root(self):
+        case = self.case
+        old = case.root / 'old' / 'operations'
+        with mock.patch.dict(os.environ, {'HANIG_LINEAR_OPS_DIR': str(old)}):
+            directory = self.linear.TA.operation_directory('workspace', 'project')
+            directory.mkdir(parents=True)
+            target = directory / 'existing-operation.json'
+            target.write_text('{"protected":"operation-journal"}\n')
+        before = target.read_bytes()
+        with self.active():
+            rc = case.cli('audit', '--binding', str(case.binding), '--out', str(target))
+        self.assertEqual((rc != 0, target.read_bytes() == before, not case.fake.calls),
+                         (True, True, True), 'unsafe output must refuse before effects')
+
+
 if __name__ == '__main__':
     unittest.main()
