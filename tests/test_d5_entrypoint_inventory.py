@@ -33,10 +33,12 @@ def candidates(root, paths):
                     continue
                 test = node.test
                 terms = [test.left] + test.comparators
-                if (any(isinstance(n, ast.Name) and n.id == '__name__' for n in terms)
-                        and any(isinstance(n, ast.Constant) and n.value == '__main__' for n in terms)
-                        and any(isinstance(op, ast.Eq) for op in test.ops)):
-                    found.add(name)
+                for left, op, right in zip(terms, test.ops, terms[1:]):
+                    pair = (left, right)
+                    if (isinstance(op, ast.Eq)
+                            and any(isinstance(n, ast.Name) and n.id == '__name__' for n in pair)
+                            and any(isinstance(n, ast.Constant) and n.value == '__main__' for n in pair)):
+                        found.add(name)
     return found
 
 
@@ -51,6 +53,21 @@ def check_inventory(root, paths, manifest):
 
 
 class TestEntrypointInventory(unittest.TestCase):
+    def test_comparison_operator_belongs_to_the_main_name_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'import_only.py'
+            manifest = {'entrypoints': [], 'denied_entrypoints': []}
+            for expression in ('"__main__" != __name__ == "tests.fixtures.d5.import_only"',
+                               '__name__ != "__main__" == "__main__"'):
+                path.write_text('if ' + expression + ':\n    IMPORTED = True\n')
+                path.chmod(0o644)
+                check_inventory(tmp, [path.name], manifest)
+            for expression in ('__name__ == "__main__"', '"__main__" == __name__',
+                               '__name__ == "__main__" == "__main__"'):
+                path.write_text('if ' + expression + ':\n    pass\n')
+                with self.assertRaisesRegex(AssertionError, path.name):
+                    check_inventory(tmp, [path.name], manifest)
+
     def test_tracked_entrypoints_recorded(self):
         manifest = json.loads(MANIFEST.read_text())['u47_containment']
         check_inventory(ROOT, tracked(ROOT), manifest)

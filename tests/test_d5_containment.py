@@ -55,6 +55,52 @@ def pin_copies(root):
 
 
 class TestActivationCopies(unittest.TestCase):
+    def test_activation_resolution_refuses_without_writing_bytecode(self):
+        import importlib.machinery
+        project = ROOT / 'skills/hanig-project/scripts'
+        with mock.patch.object(sys, 'path', [str(project), str(SWARM)] + sys.path):
+            import linear_sync
+            import unit
+            import remote_verify
+        original = importlib.machinery.SourceFileLoader.exec_module
+        for tool in ('linear', 'unit', 'remote', 'review'):
+            for disabled in (False, True):
+                with self.subTest(tool=tool, disabled=disabled), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    scripts = root / 'scripts'
+                    scripts.mkdir()
+                    source = scripts / 'd5_activation.py'
+                    source.write_bytes((SWARM / 'd5_activation.py').read_bytes())
+                    loaded = []
+                    def activated(loader, module):
+                        original(loader, module)
+                        if module.__name__ in ('_linear_d5_activation', '_gate_d5_activation', 'd5_activation'):
+                            loaded.append(Path(loader.path))
+                            module.d5_active = lambda: True
+                    with ExitStack() as stack:
+                        stack.enter_context(mock.patch.dict(sys.modules))
+                        sys.modules.pop('d5_activation', None)
+                        stack.enter_context(mock.patch.object(sys, 'path', [str(scripts)] + sys.path))
+                        stack.enter_context(mock.patch.object(sys, 'dont_write_bytecode', disabled))
+                        stack.enter_context(mock.patch.object(importlib.machinery.SourceFileLoader, 'exec_module', activated))
+                        stack.enter_context(mock.patch.object(linear_sync.skill_paths, 'sibling_skill_root', return_value=root))
+                        stack.enter_context(mock.patch.object(R, 'HERE', scripts))
+                        stack.enter_context(mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(root / 'protected')}))
+                        stack.enter_context(mock.patch.object(sys, 'argv', ['remote_verify.py', '--worker', str(root / 'stage')]))
+                        stack.enter_context(redirect_stderr(io.StringIO()))
+                        call = {
+                            'linear': lambda: linear_sync._d5_entry(type('Args', (), {'command': 'drain'})()),
+                            'unit': lambda: unit._d5_dispatch(type('Args', (), {'cmd': 'check'})()),
+                            'remote': remote_verify.main,
+                            'review': R.d5_gate_entry,
+                        }[tool]
+                        with self.assertRaises((ValueError, SystemExit)):
+                            call()
+                        self.assertEqual(sys.dont_write_bytecode, disabled)
+                    self.assertEqual(loaded, [source])
+                    self.assertEqual(list(root.rglob('*.pyc')), [])
+                    self.assertFalse((root / 'stage').exists())
+
     def test_expected_copies_match_canonical_bytes(self):
         pin_copies(ROOT)
 
