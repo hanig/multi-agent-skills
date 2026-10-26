@@ -723,7 +723,7 @@ class TestIncrementalDrain(DrainCase):
         self.assertEqual(self.drain(directory, full=full), 0, self.stdout + self.stderr)
         self.assertTrue((directory / DC.RECEIPTS).read_bytes().startswith(before))
         self.assertEqual(len(self.receipts(directory)), count + 1)
-        self.assertIn('%d issues skipped' % (0 if full else count), self.stdout)
+        self.assertIn('%d issue references skipped' % (0 if full else count), self.stdout)
         return directory
 
     def test_incremental_request_count_independent_of_receipted_history(self):
@@ -738,6 +738,13 @@ class TestIncrementalDrain(DrainCase):
             self.fake.calls.clear()
             self.assertEqual(self.drain(directory), 0)
             self.assertEqual(len(self.fake.calls), 1)  # Binding only.
+
+    def test_skipped_aliases_are_reported_as_references(self):
+        for ref in ('1', 'ARC-1'):
+            self.legacy(self.intent(ref, 'note', tracker=ref))
+        self.assertEqual(self.drain(), 0)
+        self.assertIn('2 issue references skipped (already receipted)', self.stdout)
+        self.assertEqual(len(self.fake.calls), 1)
 
     def test_full_request_count_scales_with_receipted_history(self):
         for count, requests in ((1, 14), (50, 211)):
@@ -777,7 +784,7 @@ class TestIncrementalDrain(DrainCase):
         self.assertEqual(sum('query IntentComment(' in q for q, _ in self.fake.calls), 1)
         self.assertFalse(any('DrainIssue' in q for q, _ in self.fake.calls))
         self.assertEqual({r['key'] for r in self.receipts(directory)}, {'old', 'new'})
-        self.assertIn('0 issues skipped', self.stdout)
+        self.assertIn('0 issue references skipped', self.stdout)
 
 
 class TestDrainGuards(DrainCase):
