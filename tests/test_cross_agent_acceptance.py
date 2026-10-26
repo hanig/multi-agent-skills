@@ -27,8 +27,9 @@ sys.modules[SPEC.name] = discovery
 SPEC.loader.exec_module(discovery)
 sys.path.insert(0, str(ROOT))
 from lib import skill_lifecycle as lifecycle  # noqa: E402
+from lib.skill_installer import SUPPORTED_AGENTS  # noqa: E402
 
-AGENTS = ("claude", "codex", "opencode", "pi")
+AGENTS = SUPPORTED_AGENTS
 
 
 class HermeticRoots(unittest.TestCase):
@@ -67,7 +68,9 @@ class HermeticRoots(unittest.TestCase):
                 self.assertFalse(root["exists"], f"test unexpectedly created {path}")
 
     def report(self, available=(), **env):
-        paths = {name: str(self.base / "fake-bin" / name) for name in available}
+        executables = {name: discovery.ADAPTERS[name]["executable"] for name in available}
+        paths = {executable: str(self.base / "fake-bin" / executable)
+                 for executable in executables.values()}
 
         def which(name):
             return paths.get(name)
@@ -75,23 +78,46 @@ class HermeticRoots(unittest.TestCase):
         def probe(path, timeout):
             name = Path(path).name
             versions = {"claude": "2.1.261", "codex": "0.153.4",
-                        "opencode": "1.18.29", "pi": "0.73.1"}
+                        "opencode": "1.18.29", "pi": "0.73.1",
+                        "cursor-agent": "0.0.1", "grok": "0.0.1"}
             return True, versions[name]
 
         report = discovery.discover(self.env(**env), which=which, probe=probe)
         self.assertEqual(report["schema_version"], 2)
         self.assertEqual(tuple(report["agents"]), AGENTS)
         self.assert_confined(report)
+        for agent in report["agents"].values():
+            for config in agent["evidence"]["config_directories"]:
+                self.assertTrue(Path(config["path"]).resolve().is_relative_to(
+                    self.base.resolve()), f"unconfined config: {config['path']}")
         return report
 
     def test_one_agent_automatic_selection_is_hermetic(self):
-        report = self.report(("codex",))
-        selected = discovery.select_target(report)
-        self.assertEqual(selected["status"], "selected")
-        self.assertEqual(selected["mode"], "automatic")
-        self.assertEqual(selected["agent"], "codex")
-        self.assertTrue(selected["destination"]["physical_path"].startswith(
-            str(self.base.resolve())))
+        for agent in AGENTS:
+            with self.subTest(agent=agent):
+                report = self.report((agent,))
+                selected = discovery.select_target(report)
+                self.assertEqual(selected["status"], "selected")
+                self.assertEqual(selected["mode"], "automatic")
+                self.assertEqual(selected["agent"], agent)
+                self.assertTrue(selected["destination"]["physical_path"].startswith(
+                    str(self.base.resolve())))
+
+    def test_configured_new_agents_use_disposable_native_roots(self):
+        for agent in ("cursor", "grok"):
+            config = self.home / ("." + agent)
+            config.mkdir()
+            try:
+                report = self.report()
+                selected = discovery.select_target(report)
+                self.assertEqual(selected["agent"], agent)
+                self.assertEqual(selected["state"], "configured")
+                self.assertEqual(selected["destination"]["physical_path"],
+                                 str((config / "skills").resolve()))
+                self.assertEqual(report["agents"][agent]["evidence"]["config_directories"],
+                                 [{"path": str(config), "exists": True}])
+            finally:
+                config.rmdir()
 
     def test_all_agents_are_selected_without_duplicate_shared_writes(self):
         report = self.report(AGENTS)
@@ -99,26 +125,31 @@ class HermeticRoots(unittest.TestCase):
         self.assertEqual([item["agent"] for item in plan["selected"]], list(AGENTS))
         self.assertEqual(plan["selected"][2]["covered_by"], ["claude"])
         self.assertEqual(plan["selected"][3]["covered_by"], ["codex"])
-        # The compatibility helper refuses to pick one of two physical writes
+        self.assertEqual(plan["selected"][4]["covered_by"], ["codex"])
+        self.assertEqual(plan["selected"][5]["covered_by"], [])
+        # The compatibility helper refuses to pick one of three physical writes
         # by accident, but automatic multi-target installation uses the plan.
         selected = discovery.select_target(report)
         self.assertEqual(selected["status"], "requires_explicit_target")
-        self.assertEqual(selected["eligible_agents"], ["claude", "codex"])
+        self.assertEqual(selected["eligible_agents"], ["claude", "codex", "grok"])
 
     def test_no_agent_requires_an_explicit_target(self):
         report = self.report()
         selected = discovery.select_target(report)
         self.assertEqual(selected["status"], "requires_explicit_target")
         self.assertEqual(selected["eligible_agents"], [])
-        self.assertEqual(report["agents"]["claude"]["state"], "absent")
+        for agent in AGENTS:
+            self.assertEqual(report["agents"][agent]["state"], "absent")
 
     def test_explicit_absent_target_is_a_safe_bootstrap_route(self):
         report = self.report()
-        selected = discovery.select_target(report, "pi")
-        self.assertEqual(selected["status"], "selected")
-        self.assertEqual(selected["mode"], "explicit")
-        self.assertEqual(selected["agent"], "pi")
-        self.assertEqual(report["agents"]["pi"]["verification"], "unverified")
+        for agent in AGENTS:
+            with self.subTest(agent=agent):
+                selected = discovery.select_target(report, agent)
+                self.assertEqual(selected["status"], "selected")
+                self.assertEqual(selected["mode"], "explicit")
+                self.assertEqual(selected["agent"], agent)
+                self.assertEqual(report["agents"][agent]["verification"], "unverified")
 
     def test_custom_paths_do_not_escape_the_disposable_roots(self):
         custom = self.base / "custom-agent-root"
@@ -194,18 +225,20 @@ class LifecycleAcceptance(unittest.TestCase):
             source_version=version,
         )
 
-    def test_copy_installs_all_four_and_runs_without_source_or_claude_tree(self):
+    def test_copy_installs_all_agents_and_runs_without_source_or_claude_tree(self):
         source = self.source()
         roots = {
             "claude": self.home / ".claude" / "skills",
             "codex": self.home / ".agents" / "skills",
             "opencode": self.home / ".config" / "opencode" / "skills",
             "pi": self.home / ".pi" / "agent" / "skills",
+            "cursor": self.home / ".cursor" / "skills",
+            "grok": self.home / ".grok" / "skills",
         }
         targets = [self.target(source, agent, destination=roots[agent] / source.name,
                                consumers=(agent,)) for agent in AGENTS]
         installed = lifecycle.install(targets)
-        self.assertEqual([item.status for item in installed], ["installed"] * 4)
+        self.assertEqual([item.status for item in installed], ["installed"] * len(AGENTS))
         for target in targets:
             record = lifecycle.read_provenance(target.destination)
             self.assertEqual(record.mode, "copy")

@@ -30,6 +30,8 @@ practical adapters are intentionally small:
 | Codex | Use Codex's discovered `SKILL.md` and `AGENTS.md`/repository instructions. | Use the session's available file, shell, and connector tools; do not translate another host's tool name into a presumed Codex tool. |
 | OpenCode | Use its configured skill sources and discovered `AGENTS.md` instructions. | Respect the active agent's configured permission rules; an unavailable tool is unavailable, not an invitation to weaken a rule. |
 | Pi | Use Pi's configured skills and its loaded `AGENTS.md` or `CLAUDE.md` project context. | Use Pi's actual tools and approval flow, and keep an unavailable service as pending work. |
+| Cursor | Installer target at `~/.cursor/skills`, with documented `~/.agents/skills` consumption; local installation only. | Native discovery/invocation and collision semantics remain unverified; use only the active host's tools and permissions. |
+| Grok Build | Installer target at `~/.grok/skills`; possible Claude/shared-root consumption is unverified. | Native discovery/invocation and collision semantics remain unverified; installation supplies no tool or credential access. |
 
 `MEMORY.md` is ordinary project state, not Claude-only state. Any host may
 read it, and `hanig-portable-handoff` may refresh only its factual marked block

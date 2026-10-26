@@ -298,7 +298,7 @@ def select_agents(targets: Iterable[AgentTarget], options: InstallOptions) -> tu
     if not selected:
         raise InstallRequestError(
             "no supported agents were detected; install an agent or choose an "
-            "explicit target with --agent claude|codex|opencode|pi"
+            "explicit target with --agent " + "|".join(SUPPORTED_AGENTS)
         )
     return selected, skipped
 
