@@ -1060,6 +1060,7 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
                 fail(entry['label'] + ': comment read UNKNOWN: ' + str(exc))
         # Incomplete history cannot authorize any state change or receipt.
         if any(e.get('error') for e in group):
+            fail('%s: receipt withheld; issue history is unresolved' % issue['identifier'])
             continue
         try:
             latest, after = reconcile_issue(reader, workspace, project, team, issue, group, args.dry_run, listed)
