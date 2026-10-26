@@ -8,6 +8,7 @@ import argparse
 from contextlib import contextmanager
 import datetime as dt
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -1141,6 +1142,7 @@ def main(argv=None):
     args = parse_args(argv)
     key = None  # Validation can refuse before credentials are loaded.
     try:
+        _d5_entry(args)
         if args.command == 'section':
             print(section(args))
             return 0
@@ -1187,6 +1189,36 @@ def main(argv=None):
         print(message, file=sys.stderr)
         replay = args.command == 'replay' or (args.command == 'issue' and args.issue_command == 'replay')
         return 3 if replay else 2
+
+
+def _d5_entry(args):
+    """Resolve the declared swarm sibling; uncertainty never permits effects."""
+    try:
+        root = os.environ.get('HANIG_PROJECT_DIR') or Path(__file__).parents[1]
+        swarm = skill_paths.sibling_skill_root(root, 'hanig-project', 'hanig-swarm')
+        spec = importlib.util.spec_from_file_location('_linear_d5_activation', swarm / 'scripts/d5_activation.py')
+        activation = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(activation)
+        active = activation.d5_active()
+    except Exception as exc:
+        raise ValueError('D5 activation unavailable: ' + type(exc).__name__) from exc
+    if not active:
+        return
+    if args.command not in ('audit', 'section'):
+        raise ValueError('D5 active: linear_sync ' + args.command + ' is refused before first effect')
+    if args.command != 'audit' or not args.out:
+        return
+    out = Path(args.out).resolve()
+    protected = [TA.operation_directory('workspace', 'project').parent.parent.resolve()]
+    if args.state_dir:
+        protected.append(Path(args.state_dir).resolve())
+    # An explicit destination can target another coordinator, not just the
+    # --state-dir being audited. Existing coordinator markers identify it.
+    for parent in (out, *out.parents):
+        if any((parent / marker).exists() for marker in ('swarm-state.json', 'lease.lock')):
+            protected.append(parent)
+    if any(out == root or root in out.parents for root in protected):
+        raise ValueError('D5 active: --out is inside coordinator or operation-journal state')
 
 
 if __name__ == '__main__':
