@@ -1282,6 +1282,20 @@ class TestSettledDrain(DrainCase):
         self.assertEqual(len(self.receipts()), 120)
         self.assertIn('118 issues skipped', self.stdout)
 
+    def test_duplicate_keys_refused_before_drain_order_validation(self):
+        for number, invalid in enumerate(({'at': 'invalid-timestamp'}, {'seq': 0}, {'envelope': {}})):
+            with self.subTest(invalid=invalid):
+                directory = self.root / ('invalid-' + str(number))
+                self.intent('duplicate', directory=directory, **invalid)
+                self.intent('duplicate', directory=directory)
+                self.fake.calls.clear()
+                self.assertEqual(self.drain(directory), 3, self.stdout)
+                self.assertEqual(self.selected(), [])
+                self.assertEqual(len(self.fake.calls), 1)  # binding only
+                self.assertEqual(self.stdout.count('unacknowledged/UNKNOWN'), 1)
+                self.assertIn('duplicate idempotency key', self.stdout)
+                self.assertEqual(self.receipts(directory), [])
+
 
 class TestMergeDrain(DrainCase):
     def test_exit_neutral_unavailable_and_sequence(self):
