@@ -69,7 +69,7 @@ class OperatorCase(unittest.TestCase):
         # A stale audit label would be corrected by the inactive path. Active
         # success must leave this state, its epoch, and all outbox files alone.
         self.state = f.c.state_dir / M.S.STATE_FILE
-        self.state.write_text(json.dumps(dict(units=dict(u=dict(state='READY_FOR_PR',
+        self.state.write_text(json.dumps(dict(schema_version=1, units=dict(u=dict(state='READY_FOR_PR',
             merge_receipt=dict(merged=True, integration_status='integration-unverified'))))))
 
     def invoke(self):

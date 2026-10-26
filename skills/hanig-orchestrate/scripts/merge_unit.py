@@ -68,6 +68,7 @@ def _d5_merge_entry(args):
         try:
             import d5_readiness as DR
             DR.require(args.state_dir)
+            DR.prepared_state(args.state_dir)
         except ValueError as exc:
             raise Refusal("D5 active: " + str(exc)) from exc
 
@@ -158,6 +159,10 @@ def forge_route(remote):
 
 
 def authority(args, plan):
+    if D5.d5_active():
+        import d5_readiness as DR
+        DR.require(args.state_dir)
+        DR.prepared_state(args.state_dir)
     epoch, error = S._read_state_epoch(args.state_dir)
     if error:
         raise Refusal(error)
@@ -556,6 +561,12 @@ def _d5_journal_binding(intent, ready, repo):
     import d5_authority as A
     import d5_merge_journal as J
     import d5_readiness as DR
+    metadata = intent.get("d5")
+    if not isinstance(metadata, dict) or metadata.get("state") not in ("Bound", "Attempted", "Recorded"):
+        raise Refusal("D5 active: historical merge intent has no admission")
+    phase = "receipt_recorded" if metadata["state"] == "Recorded" else "merge_requested"
+    if intent.get("phase") != phase:
+        raise Refusal("D5 active: incompatible admitted intent phase")
     bound = intent["d5"]["binding"]
     A._keys(bound, {"record_id", "custody", "kind", "scope", "correlation", "installation"}, "merge binding")
     A._require(type(bound["record_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", bound["record_id"]),
@@ -620,8 +631,13 @@ def reconcile(args, plan):
         import d5_submission as DS
         ready = DR.require(args.state_dir)
         state_dir, root, binding, host, repo_path, scope_binding, repo = authority(args, plan)
-        entry = DR.bound(ready, registry.lookup(repo, plan["name"], state_dir))
         operation_id, intent_path, intent = current_intent(state_dir, binding, root, repair=False)
+        # Historical traversal is also the installer's audit reader. It does
+        # not confer admission: reject incompatible retained requests before
+        # registration probes, scope commands, fetches or forge effects.
+        if intent is not None:
+            _d5_journal_binding(intent, ready, binding["repo"])
+        entry = DR.bound(ready, registry.lookup(repo, plan["name"], state_dir))
         if args.dry_run:
             print("DRY RUN: D5 synchronous merge; no forge calls, writes or advancement.")
             return None
@@ -637,7 +653,6 @@ def reconcile(args, plan):
         if intent is not None:
             if pr["state"] != "MERGED":
                 raise Refusal("earlier merge request has an unresolved outcome; refusing a second merge call")
-            _d5_journal_binding(intent, ready, binding["repo"])
             # Recovery observes/completes the original request without dispatch.
             with J.recovery_drain(state_dir):
                 outcome = J.recover(state_dir, intent, boundary.completion(pr))

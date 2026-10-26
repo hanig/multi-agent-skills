@@ -25,6 +25,10 @@ INSTALLATION = "installation.json"
 PROFILE = "synchronous-merge-v1"
 BINDING = ("registration_id", "plan_id", "state_dir", "record_dir",
            "repo_key", "state_key", "record_key")
+# First activation accepts only quiescent schema-1 snapshots. DONE remains
+# historical state, never a D5 admission. An absent snapshot is installation
+# scaffolding only; the merge operator still requires recorded authority.
+PREPARED_UNIT_STATES = (None, "READY_FOR_PR", "DONE", "ABANDONED", "SUPERSEDED")
 
 
 def _reset_installers():
@@ -65,6 +69,37 @@ def _read(path):
         return json.loads(path.read_bytes(), object_pairs_hook=registry._pairs)
     except (OSError, ValueError, RecursionError) as exc:
         raise registry.AuthorityError("D5 readiness: missing or malformed installation state") from exc
+
+
+def prepared_state(state_dir):
+    """Read eligibility without normalization, migration, subprocesses or writes.
+
+    Prepare legacy state while inactive before installation: retire an inline
+    epoch by the ordinary save path, settle live attempts, and clear dry-run
+    placeholders by ordinary advancement. Never rewrite these here. Missing
+    clocks and historical receipts remain unchanged audit data; they confer
+    no admission. Read-only status may still inspect ineligible legacy state.
+    """
+    directory = _state_directory(state_dir)
+    _require(directory.is_dir(), "prepared state directory must exist")
+    path = directory / state.STATE_FILE
+    if not os.path.lexists(path):
+        return None
+    value = _read(path)
+    _require(type(value) is dict and type(value.get("schema_version")) is int
+             and value["schema_version"] == 1 and type(value.get("units")) is dict
+             and "epoch" not in value, "incompatible prepared state schema or inline epoch")
+    for uid, unit in value["units"].items():
+        _require(type(uid) is str and bool(uid) and type(unit) is dict
+                 and "state" in unit and unit["state"] in PREPARED_UNIT_STATES,
+                 "incompatible prepared state unit; settle while inactive")
+        job = unit.get("job_id")
+        _require(job is None or (type(job) is str and not job.startswith("dry-")),
+                 "incompatible prepared state job; clear placeholders while inactive")
+        _require(unit["state"] is not None or
+                 (unit.get("attempt_dir") is None and job is None),
+                 "incompatible prepared state unjudged attempt")
+    return value
 
 
 def _validated(value):
@@ -155,6 +190,7 @@ def successor_gate(entry):
     import d5_effect_log as ledger
     import merge_unit
     directory = lease_required(entry["state_dir"])
+    prepared_state(directory)
     record_dir = Path(entry["record_dir"])
     if os.path.lexists(record_dir / ledger.DIRECTORY):
         with ledger._access(record_dir) as (record, fd):
@@ -234,6 +270,9 @@ def publish_installation(entry):
 
 def promote(checkout, plan_id, state_dir):
     """Installer-only publication; never issue a grant, claim custody or dispatch."""
+    # Refuse even before creating a coordinator lock. Recheck under the lease
+    # in successor_gate before withdrawing an existing installation.
+    prepared_state(state_dir)
     with installer_lease(state_dir) as directory:
         entry = registry.lookup(checkout, plan_id, directory)
         _require(entry is not None, "not registered; stage first")
