@@ -126,7 +126,8 @@ def d5_gate_entry():
     if os.environ.get("HOME", pwd.getpwuid(os.getuid()).pw_dir) != pwd.getpwuid(os.getuid()).pw_dir:
         overrides.append("HOME")
     if overrides:
-        config_error("D5 active: gate-local root overrides refused: " + ", ".join(overrides))
+        config_error("D5 active: gate-local root overrides refused: " + ", ".join(overrides)
+                     + ". Drop these overrides to use the fixed default roots.")
 
 
 def require_revision(value):
@@ -135,7 +136,8 @@ def require_revision(value):
         return
     endpoints = range_endpoints(value)
     if any(ref.startswith("-") for ref in ([value] + list(endpoints[1:] if endpoints else ()))):
-        config_error("Git revision/range must not begin with '-'")
+        config_error("Git revision/range must not begin with '-'. "
+                     "Pass a commit/ref or a range with non-option endpoints.")
 
 
 def change_identity(target="origin/main", plan_name=None, unit=None):
