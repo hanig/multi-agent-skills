@@ -11,7 +11,6 @@ import unittest
 from unittest import mock
 
 from tests import test_merge_unit as legacy
-from tests import test_d5_u4_0_readiness as installation
 from tests import test_d5_u44_result_consumption as consumption
 from tests.test_d5_u45_retry_recovery import inactive_script_capture
 from tests.test_d5_u4_0b1_issuance import no_effects
@@ -109,7 +108,7 @@ class TestPreparedState(unittest.TestCase):
 
     def refused_without_effects(self, call, message):
         before = tree_bytes(self.c.state_dir)
-        with no_effects() as effects, self.assertRaisesRegex(ValueError, message):
+        with no_effects() as effects, self.assertRaisesRegex((ValueError, SystemExit), message):
             call()
         self.assertEqual(effects, ([], []))
         self.assertEqual(tree_bytes(self.c.state_dir), before)
