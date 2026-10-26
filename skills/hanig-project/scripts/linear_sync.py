@@ -1246,7 +1246,9 @@ def main(argv=None):
 
 def _d5_entry(args):
     """Resolve the declared swarm sibling; uncertainty never permits effects."""
+    previous_bytecode_setting = sys.dont_write_bytecode
     try:
+        sys.dont_write_bytecode = True
         root = os.environ.get('HANIG_PROJECT_DIR') or Path(__file__).parents[1]
         swarm = skill_paths.sibling_skill_root(root, 'hanig-project', 'hanig-swarm')
         spec = importlib.util.spec_from_file_location('_linear_d5_activation', swarm / 'scripts/d5_activation.py')
@@ -1255,6 +1257,8 @@ def _d5_entry(args):
         active = activation.d5_active()
     except Exception as exc:
         raise ValueError('D5 activation unavailable: ' + type(exc).__name__) from exc
+    finally:
+        sys.dont_write_bytecode = previous_bytecode_setting
     if not active:
         return
     if args.command not in ('audit', 'section'):

@@ -108,13 +108,17 @@ ROUND_LOCK_WAIT_SECONDS = 5
 
 def d5_gate_active():
     """Use the pinned gate-local activation copy; absence never admits work."""
+    previous_bytecode_setting = sys.dont_write_bytecode
     try:
+        sys.dont_write_bytecode = True
         spec = importlib.util.spec_from_file_location('_gate_d5_activation', HERE / 'd5_activation.py')
         activation = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(activation)
         return activation.d5_active()
     except Exception as exc:
         config_error("D5 activation unavailable: " + type(exc).__name__)
+    finally:
+        sys.dont_write_bytecode = previous_bytecode_setting
 
 
 def d5_gate_entry():
