@@ -571,10 +571,18 @@ The operator drains tracker intents before auditing current state:
 
 ```sh
 python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" drain \
-  --binding .hanig/linear-binding.json --state-dir STATE [--state-dir OTHER_STATE] [--dry-run]
+  --binding .hanig/linear-binding.json --state-dir STATE [--state-dir OTHER_STATE] [--dry-run] [--full]
 python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" audit \
   --binding .hanig/linear-binding.json --out AUDIT
 ```
+
+Drain incrementally as often as needed, for example after each merge. Only
+issues with pending intents are resolved, confirmed and reconciled; already
+receipted issues are counted as skipped. Run the same command with `--full`
+about once a day to correct drift on already-receipted issues. The full sweep
+resolves, confirms and reconciles every issue. New receipts require comment
+read-back and state evidence from this run; state mutations require another
+state read-back. The binding audit continues to detect drift.
 
 `--draft tickets.json` supports named plans; nameless plans use the binding
 and intent tracker identifiers. Reconciliation is eventual across hosts,
