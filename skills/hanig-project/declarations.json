@@ -435,7 +435,7 @@
     },
     {
       "id": "outbox.receipt",
-      "normative_text": "Run linear_sync.py drain with a binding or draft and every relevant state directory, then run audit. The drain posts idempotent namespaced comments, reconciles each issue once to its latest-ordered state intent, and records receipts only after read-back. Earlier state intents remain superseded; existing receipts are historical observations, separate from current audited state. An absent receipt means unacknowledged, never that the issue was not filed. False acknowledgment is worse than missing acknowledgment.",
+      "normative_text": "Run incremental linear_sync.py drain after merges with a binding or draft and every relevant state directory, then audit; run drain --full daily for receipted-issue drift. Prepare local intents and a complete remote listing before effects; ignore rejected history comments. Structural listing failure withholds effects and receipts per issue. Use prepared history; receipt only after confirmed effects. Earlier states remain superseded. Receipts are historical; absent means unacknowledged, never not filed. Binding audit is unchanged.",
       "references": [
         "references/tracker-sync.md"
       ]
