@@ -23,6 +23,11 @@ spec.loader.exec_module(installer)
 
 
 class TestSelectionBeforeWrites(unittest.TestCase):
+    def test_no_targets_diagnostic_lists_every_installer_target(self):
+        with self.assertRaises(installer.InstallRequestError) as raised:
+            installer.build_plan((), installer.parse_options([]))
+        self.assertIn("--agent " + "|".join(installer.SUPPORTED_AGENTS), str(raised.exception))
+
     def targets(self):
         return installer.normalize_agents([
             {"id": "claude", "detected": True, "verification": "verified",
@@ -68,7 +73,7 @@ class TestSelectionBeforeWrites(unittest.TestCase):
 
     def test_unknown_and_contradictory_selection_fail_before_plan(self):
         with self.assertRaisesRegex(installer.InstallRequestError, "unknown agent"):
-            installer.parse_options(["--agent", "cursor"])
+            installer.parse_options(["--agent", "not-an-agent"])
         with self.assertRaisesRegex(installer.InstallRequestError, "cannot be combined"):
             installer.parse_options(["--prefix", "/tmp/prefix", "--agent", "claude"])
         with self.assertRaisesRegex(installer.InstallRequestError, "only valid"):
@@ -168,7 +173,8 @@ class TestSelectionBeforeWrites(unittest.TestCase):
     def test_stale_excluded_agent_is_not_rendered_as_certified(self):
         discovery = installer._load_discovery(ROOT)
         versions = {name: spec["verified_versions"][0]
-                    for name, spec in discovery.adapters().items()}
+                    for name, spec in discovery.adapters().items()
+                    if spec["verified_versions"]}
         with tempfile.TemporaryDirectory() as raw:
             paths = {name: "/fixtures/" + name for name in ("claude", "codex")}
             report = discovery.discover(
@@ -189,7 +195,8 @@ class TestPublicCli(unittest.TestCase):
         bin_dir = root / "bin"
         bin_dir.mkdir()
         versions = {"claude": "2.1.261", "codex": "0.153.4",
-                    "opencode": "1.18.29", "pi": "0.73.1"}
+                    "opencode": "1.18.29", "pi": "0.73.1",
+                    "cursor-agent": "0.0.1", "grok": "0.0.1"}
         for agent in agents:
             program = bin_dir / agent
             program.write_text("#!/bin/sh\necho %s\n" % versions[agent])
@@ -201,11 +208,13 @@ class TestPublicCli(unittest.TestCase):
         interpreter.chmod(0o755)
         return bin_dir
 
-    def _run(self, *args, agents=(), extra_env=None):
+    def _run(self, *args, agents=(), extra_env=None, configured=()):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         base = Path(temp.name)
         home = base / "home with spaces"
+        for agent in configured:
+            (home / ("." + agent)).mkdir(parents=True)
         temp_dir = base / "tmp"
         temp_dir.mkdir()
         binaries = self._fake_agents(base, *agents)
@@ -219,6 +228,26 @@ class TestPublicCli(unittest.TestCase):
         result = subprocess.run(["sh", str(ROOT / "install.sh"), *args], cwd=ROOT,
                                 env=env, text=True, capture_output=True)
         return result, home
+
+    def test_cursor_grok_public_dry_run_native_targets_and_warnings(self):
+        for agent, executable in (("cursor", "cursor-agent"), ("grok", "grok")):
+            for mode in ("explicit", "configured", "present"):
+                with self.subTest(agent=agent, mode=mode):
+                    flags = ("--agent", agent) if mode == "explicit" else ()
+                    result, home = self._run(
+                        "--dry-run", "--json", *flags,
+                        agents=(executable,) if mode == "present" else (),
+                        configured=(agent,) if mode == "configured" else ())
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    data = json.loads(result.stdout)
+                    self.assertEqual([target["agent"] for target in data["targets"]], [agent])
+                    target = data["targets"][0]
+                    self.assertEqual(target["root"], str((home / ("." + agent) / "skills").resolve()))
+                    self.assertEqual(target["status"], {"explicit": "absent", "configured": "configured",
+                                                        "present": "executable_found"}[mode])
+                    self.assertEqual(target["verification"], "unverified")
+                    self.assertIn("not adapter-certified", result.stderr)
+                    self.assertFalse((home / ("." + agent) / "skills").exists())
 
     def test_inherited_agent_roots_do_not_escape_disposable_home(self):
         overrides = {
@@ -349,7 +378,7 @@ class TestPublicCli(unittest.TestCase):
     def test_no_automatic_agent_is_actionable_and_writes_nothing(self):
         result, home = self._run("--dry-run")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--agent claude|codex|opencode|pi", result.stderr)
+        self.assertIn("--agent " + "|".join(installer.SUPPORTED_AGENTS), result.stderr)
         self.assertFalse(home.exists())
 
     def test_shared_adapter_destination_is_preflighted_once_per_skill(self):
@@ -558,7 +587,7 @@ class TestLiveCertificationPlan(unittest.TestCase):
                 mock.patch.object(discovery, "date", wraps=date) as clock:
             clock.today.return_value = date(2026, 10, 26)
             report = discovery.discover(
-                {"HOME": raw, "PATH": ""}, which=lambda name: "/fixtures/" + name,
+                {"HOME": raw, "PATH": ""}, which=lambda name: "/fixtures/" + name if name in self.LIVE_VERSIONS else None,
                 probe=lambda path, timeout: (True, self.LIVE_VERSIONS[Path(path).name]))
             targets = installer.normalize_agents([
                 dict(record, id=name, destinations=[record["roots"][0]["physical_path"]])
@@ -589,11 +618,12 @@ class TestLiveCertificationPlan(unittest.TestCase):
                 mock.patch.object(discovery, "date", wraps=date) as clock:
             clock.today.return_value = date(2026, 10, 6)
             report = discovery.discover(
-                {"HOME": raw, "PATH": ""}, which=lambda name: "/fixtures/" + name,
+                {"HOME": raw, "PATH": ""}, which=lambda name: "/fixtures/" + name if name in self.LIVE_VERSIONS else None,
                 probe=lambda path, timeout: (True, self.LIVE_VERSIONS[Path(path).name]))
             targets = installer.normalize_agents([
                 dict(record, id=name, destinations=[record["roots"][0]["physical_path"]])
-                for name, record in report["agents"].items()], as_of=date(2026, 10, 6))
+                for name, record in report["agents"].items() if name in self.LIVE_VERSIONS],
+                as_of=date(2026, 10, 6))
         self.assertEqual(len(targets), 4)
         for target in targets:
             self.assertTrue(target.discovery_verified)

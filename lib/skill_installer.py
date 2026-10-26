@@ -29,7 +29,7 @@ if str(_CHECKOUT_ROOT) not in sys.path:
     sys.path.insert(0, str(_CHECKOUT_ROOT))
 
 
-SUPPORTED_AGENTS = ("claude", "codex", "opencode", "pi")
+SUPPORTED_AGENTS = ("claude", "codex", "opencode", "pi", "cursor", "grok")
 WORKFLOW_DEPENDENCIES = {
     "hanig-project": ("hanig-swarm",),
     "hanig-orchestrate": (
@@ -113,10 +113,12 @@ class InstallPlan:
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="install.sh",
-        description="Install skills for supported local coding agents.",
+        description=("Install skills for local coding agents. Automatic selection uses "
+                     "executable probes; Cursor and Grok also qualify from config "
+                     "directories. Selection does not certify compatibility."),
     )
     p.add_argument("--agent", action="append", default=[], metavar="NAME",
-                   help="install for NAME; repeatable (claude, codex, opencode, pi)")
+                   help="install for NAME; repeatable (" + ", ".join(SUPPORTED_AGENTS) + ")")
     p.add_argument("--exclude-agent", action="append", default=[], metavar="NAME",
                    help="skip a detected NAME; only valid in automatic mode")
     p.add_argument("--prefix", metavar="DIR",
@@ -296,7 +298,7 @@ def select_agents(targets: Iterable[AgentTarget], options: InstallOptions) -> tu
     if not selected:
         raise InstallRequestError(
             "no supported agents were detected; install an agent or choose an "
-            "explicit target with --agent claude|codex|opencode|pi"
+            "explicit target with --agent " + "|".join(SUPPORTED_AGENTS)
         )
     return selected, skipped
 
@@ -306,7 +308,7 @@ def _uncertified_target_warning(target: AgentTarget, *, automatic: bool) -> str:
     if automatic:
         version = target.version or "unknown version"
         return (
-            f"{target.name} {version} was selected from executable presence, but "
+            f"{target.name} {version} was selected from host presence, but "
             "this version is not adapter-certified; selection is not a "
             "native-compatibility or invocation pass"
         )
@@ -372,9 +374,9 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
             for item in selection["skipped"]
         )
         raise InstallRequestError(
-            "no agent completed or exceeded a bounded version probe; observed "
+            "no eligible executable or Cursor/Grok config found; observed "
             f"states: {observed or 'none'}; repair a failed probe or choose an "
-            "explicit bootstrap target with --agent claude|codex|opencode|pi"
+            "explicit bootstrap target with --agent " + "|".join(SUPPORTED_AGENTS)
         )
     selected: list[AgentTarget] = []
     warnings = list(selection.get("certification_warnings", ()))
