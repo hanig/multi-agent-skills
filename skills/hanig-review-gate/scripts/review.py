@@ -603,11 +603,11 @@ def _require_git_free_test_root(path):
 
 def _attached_worktrees(place):
     """All ordinary worktrees attached to the repository containing place."""
-    top = git_out("rev-parse", "--show-toplevel", cwd=str(place)).strip()
+    top = git_out("-C", str(place), "rev-parse", "--show-toplevel").strip()
     if not top:
         return set()
     found = {_resolved(top)}
-    raw = git_out("worktree", "list", "--porcelain", cwd=top)
+    raw = git_out("-C", top, "worktree", "list", "--porcelain")
     for line in raw.splitlines():
         if line.startswith("worktree "):
             found.add(_resolved(line[len("worktree "):]))
@@ -1685,7 +1685,7 @@ def is_confirmed(f):
 
 # --- input gathering --------------------------------------------------------
 
-def git_out(*args, cwd=None):
+def git_out(*args):
     """Never raises. errors="replace" matters: a non-UTF-8 byte in a tracked
     file makes strict decoding throw UnicodeDecodeError out of the gate before
     it can print anything. contract.py has guarded this since round 4."""
@@ -1699,7 +1699,7 @@ def git_out(*args, cwd=None):
             args = (args[0], "--no-ext-diff", "--no-textconv", *args[1:])
         pr = subprocess.Popen(["git", *args], stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, encoding="utf-8",
-                              errors="replace", start_new_session=True, cwd=cwd)
+                              errors="replace", start_new_session=True)
         out, _ = pr.communicate(timeout=120)
         return out or "" if pr.returncode == 0 else ""
     except subprocess.TimeoutExpired:
