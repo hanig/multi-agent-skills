@@ -843,6 +843,18 @@ def sha256_file(path, limit_bytes=None):
 
 
 # ==========================================================================
+def _d5_dispatch(args):
+    """Refuse all three direct CLI subcommands before their first effect."""
+    try:
+        import d5_activation
+        active = d5_activation.d5_active()
+    except Exception as exc:
+        sys.exit("D5 activation unavailable: " + type(exc).__name__)
+    if active:
+        sys.exit("D5 active: unit " + args.cmd + " is refused before first effect")
+    return args.fn(args)
+
+
 # The unit contract. Everything above this line is lifted verbatim from
 # contract.py and must not be edited here; everything below is new.
 # ==========================================================================
@@ -1625,7 +1637,7 @@ def main():
     c.set_defaults(fn=cmd_check)
 
     args = ap.parse_args()
-    sys.exit(args.fn(args))
+    sys.exit(_d5_dispatch(args))
 
 
 if __name__ == "__main__":
