@@ -163,7 +163,6 @@ ADAPTERS: dict[str, dict[str, Any]] = {
     "cursor": {
         "identity": "Cursor",
         "executable": "cursor-agent",
-        "invocation": ["cursor-agent", "--version"],
         "certifications": [],
         "sources": ["https://www.cursor.com/docs/context/skills"],
         "source_verification": {"release": "unverified", "root_policy": "documented",
@@ -180,7 +179,6 @@ ADAPTERS: dict[str, dict[str, Any]] = {
     "grok": {
         "identity": "Grok Build",
         "executable": "grok",
-        "invocation": ["grok", "--version"],
         "certifications": [],
         "sources": ["https://docs.x.ai/build/features/skills-plugins-marketplaces"],
         "source_verification": {"release": "unverified", "root_policy": "documented",
@@ -735,11 +733,9 @@ def select_targets(
         agent_warnings = []
         if record["verification"] != "verified" or assessment["certification_record"] is None:
             if mode == "automatic":
-                basis = ("configuration directory" if record["state"] == "configured"
-                         else "executable presence")
                 version = record.get("version") or "unknown version"
                 agent_warnings.append(
-                    f"{agent} {version} was selected from {basis}, but "
+                    f"{agent} {version} was selected from host presence, but "
                     "this version is not adapter-certified; selection is not a "
                     "native-compatibility or invocation pass")
             else:

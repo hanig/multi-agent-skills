@@ -298,7 +298,7 @@ def select_agents(targets: Iterable[AgentTarget], options: InstallOptions) -> tu
     if not selected:
         raise InstallRequestError(
             "no supported agents were detected; install an agent or choose an "
-            "explicit target with --agent " + "|".join(SUPPORTED_AGENTS)
+            "explicit target with --agent claude|codex|opencode|pi"
         )
     return selected, skipped
 
@@ -306,18 +306,15 @@ def select_agents(targets: Iterable[AgentTarget], options: InstallOptions) -> tu
 def _uncertified_target_warning(target: AgentTarget, *, automatic: bool) -> str:
     """Describe why a selected target is not a compatibility certification."""
     if automatic:
-        basis = ("configuration directory" if target.state == "configured"
-                 else "executable presence")
         version = target.version or "unknown version"
         return (
-            f"{target.name} {version} was selected from {basis}, but "
+            f"{target.name} {version} was selected from host presence, but "
             "this version is not adapter-certified; selection is not a "
             "native-compatibility or invocation pass"
         )
     return (
         f"{target.name} was selected explicitly with discovery state "
-        f"{target.state}; this version is not adapter-certified; "
-        "bootstrap destination planning proceeded, but "
+        f"{target.state}; bootstrap destination planning proceeded, but "
         "presence, native compatibility, and invocation remain unverified "
         "(skip is not pass)"
     )
@@ -377,7 +374,7 @@ def build_discovery_plan(report: Mapping[str, Any], selection: Mapping[str, Any]
             for item in selection["skipped"]
         )
         raise InstallRequestError(
-            "no eligible agent found from executable probes or Cursor/Grok config; observed "
+            "no eligible executable or Cursor/Grok config found; observed "
             f"states: {observed or 'none'}; repair a failed probe or choose an "
             "explicit bootstrap target with --agent " + "|".join(SUPPORTED_AGENTS)
         )

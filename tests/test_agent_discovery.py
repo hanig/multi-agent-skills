@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT / "skills" / "hanig-project" / "scripts"))
 import agent_discovery as discovery  # noqa: E402
 
 
-VERSIONS = {name: spec["verified_versions"][0] for name, spec in discovery.adapters().items()}
+VERSIONS = {name: spec["verified_versions"][0] for name, spec in discovery.adapters().items()
+            if spec["verified_versions"]}
 # Real process startup is not the property under test. Give it headroom on a
 # shared host; short production deadlines are covered separately below.
 REAL_PROBE_SECONDS = 60
@@ -104,6 +105,18 @@ def real_discovery(env):
 
 
 class TestAgentDiscovery(unittest.TestCase):
+    def test_existing_agents_configured_still_not_selected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            for relative in (".claude", ".codex", ".config/opencode", ".pi/agent", ".agents"):
+                (home / relative).mkdir(parents=True)
+            report = discovery.discover(fixture_env(home), finder({}), probe_for({}))
+            for agent in ("claude", "codex", "opencode", "pi"):
+                self.assertEqual(report["agents"][agent]["state"], "configured")
+            self.assertEqual(discovery.select_targets(report)["selected"], [])
+            self.assertEqual(report["agents"]["cursor"]["state"], "absent")
+            self.assertEqual(report["agents"]["grok"]["state"], "absent")
+
     def test_schema_and_one_runnable_agent_select_automatically(self):
         with tempfile.TemporaryDirectory() as raw:
             report = discovery.discover(fixture_env(raw), finder({"claude": "/fixtures/claude"}),
@@ -115,12 +128,12 @@ class TestAgentDiscovery(unittest.TestCase):
 
     def test_all_four_are_detected_and_covered_agents_are_selected_owners(self):
         with tempfile.TemporaryDirectory() as raw:
-            paths = {agent: "/fixtures/" + agent for agent in discovery.adapters()}
+            paths = {agent: "/fixtures/" + agent for agent in VERSIONS}
             report = discovery.discover(fixture_env(raw), finder(paths), probe_for(VERSIONS))
-        self.assertEqual(set(report["agents"]), {"claude", "codex", "opencode", "pi"})
+        self.assertEqual(set(report["agents"]), {"claude", "codex", "opencode", "pi", "cursor", "grok"})
         plan = discovery.select_targets(report)
         self.assertEqual({item["agent"] for item in plan["selected"]}, set(VERSIONS))
-        self.assertEqual([item["agent"] for item in plan["skipped"]], [])
+        self.assertEqual([item["agent"] for item in plan["skipped"]], ["cursor", "grok"])
         self.assertEqual({item["agent"] for item in plan["selected"] if item["covered_by"]}, {"opencode", "pi"})
         self.assertTrue(plan["competing_visibility"])
         destinations = {item["destination"]["id"]: item for item in plan["destinations"]}
@@ -190,7 +203,8 @@ class TestAgentDiscovery(unittest.TestCase):
         self.assertEqual(discovery.select_target(unknown, "codex")["mode"], "explicit")
 
     def test_adapter_certification_expiry_respects_review_deadlines(self):
-        for agent, spec in discovery.adapters().items():
+        for agent in VERSIONS:
+            spec = discovery.adapters()[agent]
             with self.subTest(agent=agent):
                 deadline = discovery.verification_review_due(spec)
                 self.assertNotIn(agent, discovery.stale_adapter_certifications(deadline))
@@ -315,6 +329,8 @@ class TestAgentDiscovery(unittest.TestCase):
             {"agent": "codex", "reason": "absent", "certification": "unverified"},
             {"agent": "opencode", "reason": "absent", "certification": "unverified"},
             {"agent": "pi", "reason": "probe_failed", "certification": "unverified"},
+            {"agent": "cursor", "reason": "absent", "certification": "unverified"},
+            {"agent": "grok", "reason": "absent", "certification": "unverified"},
         ])
 
     def test_default_deadlines_are_derived_from_each_adapter_measurement(self):
@@ -536,7 +552,8 @@ class TestDatedLiveCertifications(unittest.TestCase):
                 (date(2026, 10, 26), ["claude", "codex", "opencode", "pi"])):
             with self.subTest(observed=observed):
                 self.assertEqual(discovery.stale_adapter_certifications(observed), expected)
-        for agent, spec in discovery.adapters().items():
+        for agent in VERSIONS:
+            spec = discovery.adapters()[agent]
             with self.subTest(agent=agent):
                 self.assertEqual(discovery.verification_review_due(spec),
                                  date(2026, 10, 25) if agent == "opencode"
