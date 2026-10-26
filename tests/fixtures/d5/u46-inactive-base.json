@@ -1,0 +1,32 @@
+{
+  "base": "d48e6324aae6ace2a296152b4d6365a509d51aea",
+  "cancel_before_request": {
+    "result": null,
+    "launches": [],
+    "writes": [
+      "merge-unit-fixture.cancellation-pending",
+      "merge-unit-fixture.json",
+      "merge-unit-fixture.cancellation-committed"
+    ],
+    "files": {
+      "merge-unit-fixture.cancellation-committed": {
+        "cancellation": {
+          "observed_at": "<time>",
+          "observed_target": null,
+          "reason": "target read failed"
+        },
+        "operation_id": "fixture",
+        "phase": "cancelled_before_request"
+      },
+      "merge-unit-fixture.json": {
+        "cancellation": {
+          "observed_at": "<time>",
+          "observed_target": null,
+          "reason": "target read failed"
+        },
+        "operation_id": "fixture",
+        "phase": "cancelled_before_request"
+      }
+    }
+  }
+}

@@ -538,6 +538,10 @@ def cancel_before_request(intent_path, intent, observed, reason):
     fsync succeeds, so repair can distinguish committed cleanup from rollback.
     Keep the marker: pending removal may itself be lost in a later crash.
     """
+    # Active submissions use R6's authoritative no-effect classification.
+    # This legacy cancellation marker cannot resolve a D5 request or release
+    # its lifetime holder, even when the local merge process has exited.
+    _d5_refuse('cancel_before_request')
     rollback_path = intent_path.with_suffix(".cancellation-pending")
     durable_write(rollback_path, intent)
     resolved = dict(intent, phase="cancelled_before_request", cancellation={
