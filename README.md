@@ -1160,7 +1160,14 @@ is in [`docs/cross-agent-acceptance.md`](docs/cross-agent-acceptance.md).
 ```
 
 With no selector, the installer targets agents whose bounded `--version` probe
-succeeds or is slow. Exact-version certification is reported separately;
+succeeds or is slow. Cursor (`cursor-agent`) and Grok Build (`grok`) also qualify
+from `~/.cursor` or `~/.grok` alone, allowing an IDE/config-only host to install.
+Explicit `--agent cursor` and `--agent grok` plan `~/.cursor/skills` and
+`~/.grok/skills`; Cursor can also be covered by an already selected shared
+`~/.agents/skills` destination. Both new adapters remain uncertified; their
+same-name collision and symlink semantics are unverified, as is Grok
+consumption of Claude/shared roots. See [discovery details](docs/agent-discovery.md).
+Exact-version certification is reported separately;
 unexercised or stale releases remain `unverified`, with warnings on stderr even
 with `--json`. Selection alone is not a compatibility or invocation pass.
 `--agent` is repeatable and is the right choice for a deliberate subset or a

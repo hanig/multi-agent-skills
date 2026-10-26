@@ -24,7 +24,7 @@ from lib import skill_lifecycle as lifecycle  # noqa: E402
 
 # These tests exercise diagnostic content, not production latency limits.
 # Keep real probes, with room for process startup on a shared host. Doctor's
-# outer supervisor must allow all four probes plus their cleanup to finish.
+# outer supervisor must allow every fixture probe plus its cleanup to finish.
 REAL_PROBE_SECONDS = 60
 REAL_REAP_SECONDS = 5
 DOCTOR_SECONDS = 360

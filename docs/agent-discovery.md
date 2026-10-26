@@ -84,8 +84,10 @@ binary is eligible even if no skill directory exists yet.
 
 `select_targets(report, agents=(), exclude_agents=())` considers every detected
 agent by default. Automatic mode selects successful and slow executable probes,
-independently of certification, and reports absent, configured, and failed-probe
-agents in `skipped`. Unverified or expired versions still receive destinations
+independently of certification. Cursor and Grok also qualify when their own
+config directory (`~/.cursor` or `~/.grok`) exists without a CLI. The other
+agents retain executable-based selection. Absent and failed-probe agents are
+skipped; a shared skill directory alone does not establish Cursor/Grok presence. Unverified or expired versions still receive destinations
 and certification warnings. An explicit `agents` sequence supports
 offline/bootstrap installation.
 It plans destinations in the fixed adapter declaration order, so reversing
@@ -113,6 +115,8 @@ so a symlink alias is one destination rather than two writes.
 | Codex CLI | `$HOME/.agents/skills` is the current shared/preferred root. `${CODEX_HOME:-$HOME/.codex}/skills` remains a loader-supported legacy root. | `codex --version` (version probe only) | [0.153.4 manifest](https://registry.npmjs.org/@openai/codex/0.153.4), [current loader](https://github.com/openai/codex/blob/main/codex-rs/core-skills/src/loader.rs) |
 | OpenCode | `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills` and the loader-supported `$HOME/.opencode/skills`; `OPENCODE_CONFIG_DIR/skills` is an additional (not replacing) config-directory source. Its Claude-compatible root is fixed `$HOME/.claude/skills`, not `CLAUDE_CONFIG_DIR`. | `opencode --version` (version probe only) | [1.18.29 manifest](https://registry.npmjs.org/opencode-ai/1.18.29), [1.18.29 loader](https://github.com/anomalyco/opencode/blob/v1.18.29/packages/opencode/src/skill/index.ts) |
 | Pi | `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills`; the override replaces Pi's user config root. Its automatic shared root is `$HOME/.agents/skills`. The native harness accepts the old `@mariozechner` and current `@earendil-works` package scopes. | `pi --version` (version probe only) | [validated 0.73.1 manifest](https://registry.npmjs.org/@mariozechner/pi-coding-agent/0.73.1), [current renamed package](https://registry.npmjs.org/@earendil-works/pi-coding-agent), [0.73.1 skills source](https://github.com/badlogic/pi-mono/blob/v0.73.1/packages/coding-agent/docs/skills.md) |
+| Cursor | `$HOME/.cursor/skills` is preferred; `$HOME/.agents/skills` is also consumed. Config evidence: `$HOME/.cursor`. | `cursor-agent --version` | [Cursor Agent Skills](https://www.cursor.com/docs/context/skills); native invocation and probe timing unverified |
+| Grok Build | `$HOME/.grok/skills` is preferred. Config evidence: `$HOME/.grok`. | `grok --version` | [xAI skills docs](https://docs.x.ai/build/features/skills-plugins-marketplaces); native invocation and probe timing unverified |
 
 `CODEX_HOME` is intentionally not used to relocate `$HOME/.agents/skills`.
 The latter is a user-home shared root; the former is Codex's legacy config
@@ -129,10 +133,12 @@ show before copying a second copy of the same skill:
 | Destination root | Known consumers | Same-name/symlink result |
 | --- | --- | --- |
 | Claude user root | Claude; OpenCode only when it is the fixed `$HOME/.claude` path | Claude's collision and symlink semantics are not documented in the verified source set: `unverified`. |
-| `.agents` user root | Codex, OpenCode, Pi | Codex's collision and symlink semantics are `unverified`; OpenCode uses last registered name; Pi deduplicates canonical-path aliases. |
+| `.agents` user root | Codex, OpenCode, Pi, Cursor | Codex's collision and symlink semantics are `unverified`; OpenCode uses last registered name; Pi deduplicates canonical-path aliases; Cursor same-name and symlink semantics are `unverified`. |
 | Codex legacy root | Codex | Codex collision and symlink semantics are `unverified`. Pi can consume it only if a user separately lists it in Pi settings, which this read-only contract does not infer. |
 | OpenCode native/custom roots | OpenCode | A duplicate name replaces the earlier registered item (the loader emits a warning); target-symlink equivalence remains `unverified`. |
 | Pi native root | Pi | Pi's documented source ordering makes later sources win; its current changelog records canonical-path symlink deduplication. |
+| Cursor native root | Cursor | Same-name collision and symlink semantics are `unverified`. |
+| Grok native root | Grok | Same-name collision and symlink semantics are `unverified`. Possible Claude/shared-root consumption is unverified evidence, not a consumer edge. |
 
 OpenCode's fixed-home Claude and `.agents` compatibility stores, and Pi's
 `.agents` store, are represented as actual roots even though they are not every

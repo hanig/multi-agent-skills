@@ -23,6 +23,11 @@ spec.loader.exec_module(installer)
 
 
 class TestSelectionBeforeWrites(unittest.TestCase):
+    def test_no_targets_diagnostic_lists_every_installer_target(self):
+        with self.assertRaises(installer.InstallRequestError) as raised:
+            installer.build_plan((), installer.parse_options([]))
+        self.assertIn("--agent " + "|".join(installer.SUPPORTED_AGENTS), str(raised.exception))
+
     def targets(self):
         return installer.normalize_agents([
             {"id": "claude", "detected": True, "verification": "verified",
