@@ -73,7 +73,7 @@ class TestRecovery(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.dict(os.environ, c.env))
         self.stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
-        self.stack.enter_context(mock.patch.object(M.DMA, 'merge_launch_admitted', return_value=True))
+        self.stack.enter_context(mock.patch.object(M, 'merge_launch_admitted', return_value=True))
         self.stack.enter_context(mock.patch.object(t.registry, 'd5_active', return_value=True))
         self.stack.enter_context(mock.patch.object(t.registry.CP, '_external_base', return_value=c.directory / 'external'))
         self.stack.enter_context(mock.patch.object(t.host, 'session_anchor', return_value=('native', t.ANCHOR)))
