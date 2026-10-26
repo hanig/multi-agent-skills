@@ -880,6 +880,24 @@ class TestIncrementalDrain(DrainCase):
         self.assertEqual({r['key'] for r in self.receipts()}, {'old-note', 'new-start'})
         self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
 
+    def test_edited_receipted_comment_does_not_block_start(self):
+        for full in (False, True):
+            for op in ('note', 'start'):
+                with self.subTest(full=full, op=op):
+                    self.state = self.root / ('edited-%s-%s' % (full, op))
+                    self.fake.comments.clear(); self.fake.mutations.clear()
+                    self.fake.issues['1']['state']['type'] = 'unstarted'
+                    old = self.intent('old', op)
+                    self.legacy(old)
+                    self.seed(old, body='<!-- hanig:broken -->')
+                    self.seed(dict(old, key='unknown'), body=None)
+                    self.intent('new-start', at='2026-10-05T11:00:00Z')
+                    self.assertEqual(self.drain(full=full), 0, self.stdout)
+                    self.assertEqual(self.fake.issues['1']['state']['type'], 'started')
+                    self.assertEqual({r['key'] for r in self.receipts()}, {'old', 'new-start'})
+                    self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
+                    self.assertEqual(len(self.writes('DrainState')), 1)
+
     def test_latest_pending_state_compares_by_key(self):
         old = self.intent('old-start')
         self.seed(old); self.legacy(old)
@@ -962,9 +980,7 @@ class TestIncrementalDrain(DrainCase):
                             raise RuntimeError('read failed' if fault == 'exception' else '')
                         if fault == 'unfinished':
                             return {'issue': {'comments': connection([], True, None)}}
-                        c = copy.deepcopy(self.fake.comments[cid])
-                        c['body'] = None if fault == 'absent' else 17
-                        return {'issue': {'comments': connection([c])}}
+                        return {'issue': None} if fault == 'absent' else {'issue': {'comments': {}}}
                     return dispatch(q, v)
                 with mock.patch.object(self.fake, 'dispatch', broken):
                     self.assertEqual(self.drain(), 3, self.stdout)

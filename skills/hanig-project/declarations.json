@@ -435,7 +435,7 @@
     },
     {
       "id": "outbox.receipt",
-      "normative_text": "Run incremental linear_sync.py drain after merges with a binding or draft and every relevant state directory, then audit; run drain --full daily to repair receipted-issue drift. Select pending issues only, or every issue with --full. Before effects, prepare local intents plus a complete comment listing for remote history. Missing receipted comments do not block; invalid comments or incomplete listings withhold that issue's effects and receipts, not siblings. Use prepared history without re-reading it; receipt only after all effects are confirmed. Earlier state intents remain superseded. Receipts are historical observations; absent means unacknowledged, never not filed. Binding audit is unchanged.",
+      "normative_text": "Run incremental linear_sync.py drain after merges with a binding or draft and every relevant state directory, then audit; run drain --full daily for receipted-issue drift. Prepare local intents and a complete remote listing before effects; ignore rejected history comments. Structural listing failure withholds effects and receipts per issue. Use prepared history; receipt only after confirmed effects. Earlier states remain superseded. Receipts are historical; absent means unacknowledged, never not filed. Binding audit is unchanged.",
       "references": [
         "references/tracker-sync.md"
       ]

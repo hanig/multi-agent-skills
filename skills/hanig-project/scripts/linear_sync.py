@@ -921,7 +921,7 @@ def prepare_issue(reader, workspace, project, issue, entries):
         if (not isinstance(comment.get('body'), str) or
                 not isinstance(comment.get('issue'), dict) or
                 not isinstance(comment['issue'].get('id'), str) or not comment['issue']['id']):
-            raise ValueError('invalid comment in listing')
+            continue  # Invalid individual comments carry no remote history.
         parsed = genuine_comment(comment, workspace, project, issue['id'])
         if parsed and parsed['key'] not in local:
             history.append(parsed)
@@ -932,7 +932,7 @@ def prepare_issue(reader, workspace, project, issue, entries):
         intent = entry['intent']
         cid = comment_id(workspace, project, issue['id'], intent['key'])
         comment = listed.get(cid)
-        if comment is None and entry['receipted']:
+        if entry['receipted']:
             history.append(local[intent['key']])
             continue
         if comment is None:

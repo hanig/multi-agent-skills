@@ -580,8 +580,8 @@ Drain is incremental by default: run it after merges. Fully receipted issues
 incur no issue requests. Run `drain --full` daily to repair drift on those issues.
 It preserves full selection and healthy-path reconciliation, with an intentional
 fail-closed correction: prepare local intents plus a complete comment listing
-before effects. Missing receipted comments do not block; invalid comments or
-incomplete listings withhold effects and receipts on that issue alone. Effects
+before effects. Missing or edited receipted comments do not block. Only structural listing
+failures withhold preparation effects and receipts on that issue alone. Effects
 use prepared history without re-reading it; receipts follow confirmed effects.
 Binding audit detection is unchanged.
 
