@@ -428,7 +428,7 @@
       "merge_unit._active_entry_lease",
       "merge_unit._d5_merge_entry"
     ],
-    "predicate": "d5_merge_admission.merge_launch_admitted(): False; no runtime override",
+    "predicate": "merge_unit.merge_launch_admitted(): False; no runtime override",
     "owners": [
       "U4.9",
       "U8"

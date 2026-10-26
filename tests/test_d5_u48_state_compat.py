@@ -144,7 +144,7 @@ class TestPreparedState(unittest.TestCase):
                                                  return_value=self.c.directory / 'external'))
         self.entry = ready(self, self.c.repo, self.c.plan['name'], self.c.state_dir)
         self.stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
-        self.stack.enter_context(mock.patch.object(M.DMA, 'merge_launch_admitted', return_value=True))
+        self.stack.enter_context(mock.patch.object(M, 'merge_launch_admitted', return_value=True))
         self.args = argparse.Namespace(state_dir=str(self.c.state_dir), root=str(self.c.root),
             unit='u', pr=7, verify_integration=False, abandon_intent=None,
             retrieve_remote_evidence=False, remote_recovery_attestation=None)
