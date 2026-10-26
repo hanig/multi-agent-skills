@@ -153,12 +153,14 @@ class DrainCase(AuditCase):
     def legacy(self, intent, directory=None):
         DC.contract.record_receipt(directory or self.state, intent['key'], intent.get('tracker', 'ARC-1'))
 
-    def drain(self, *directories, draft=False, dry=False):
+    def drain(self, *directories, draft=False, dry=False, full=False):
         args = ['drain', '--draft' if draft else '--binding', str(self.draft if draft else self.binding)]
         for directory in directories or (self.state,):
             args.extend(['--state-dir', str(directory)])
         if dry:
             args.append('--dry-run')
+        if full:
+            args.append('--full')
         return self.cli(*args)
 
     def receipts(self, directory=None):
@@ -577,7 +579,7 @@ class TestDrain(DrainCase):
         before = (self.state / DC.RECEIPTS).read_bytes()
         self.assertEqual(self.audit(), 1)
         self.assertEqual(self.checks['intent_order'], 'DRIFT')
-        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.drain(full=True), 0, self.stdout)
         self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
         self.assertEqual(self.audit(), 0)
         self.assertEqual(self.checks['intent_order'], 'CLEAN')
@@ -585,12 +587,15 @@ class TestDrain(DrainCase):
         self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
         self.fake.issues['1']['state']['type'] = 'started'
         self.fake.mutation_failure = 'DrainState'
-        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.drain(full=True), 3)
         self.assertIn('reconciliation', self.stdout)
         self.fake.mutation_failure = None
         self.fake.comments.pop(LS.comment_id('workspace', 'project', '1', 'old'))
-        self.assertEqual(self.drain(), 0)
-        self.assertIn('ARC-1: uncovered history', self.stdout)
+        self.fake.mutations.clear()
+        self.assertEqual(self.drain(full=True), 3)
+        self.assertIn('uncovered history', self.stdout)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
         self.assertEqual(self.writes('IntentCommentCreate'), [])
 
     def test_lock_same_project_different_binding_no_writes(self):
@@ -644,7 +649,7 @@ class TestDrain(DrainCase):
         for path in self.state.iterdir():
             self.assertNotIn(KEY, path.read_text())
         self.fake.fail = 'DrainIssue'
-        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.drain(full=True), 3)
         self.assertNotIn(KEY, self.stdout + self.stderr)
         with mock.patch.object(API, 'load_key', return_value=None):
             self.assertEqual(self.drain(), 2)
@@ -817,10 +822,10 @@ class TestDrainGuards(DrainCase):
 
     def test_all_receipted_comment_read_failure_is_unknown(self):
         intent = self.intent(); self.seed(intent); self.legacy(intent)
+        self.fake.omit_listing = True
         self.fake.fail = 'query IntentComment('
-        self.assertEqual(self.drain(), 3)
-        self.assertIn('comment read UNKNOWN', self.stdout)
-        self.assertNotIn('uncovered history', self.stdout)
+        self.assertEqual(self.drain(full=True), 3)
+        self.assertIn('receipt withheld', self.stdout)
         self.assertEqual(self.writes('IntentCommentCreate'), [])
 
     def test_incomplete_listing_with_note_withholds_receipt(self):
@@ -831,7 +836,7 @@ class TestDrainGuards(DrainCase):
         self.assertEqual(self.writes('DrainState'), [])
 
     def test_listing_disagrees_with_confirmed_comment(self):
-        self.intent()
+        self.seed(self.intent())
         actual = self.fake.dispatch
         def edited(q, v):
             data = actual(q, v)
@@ -852,6 +857,208 @@ class TestDrainGuards(DrainCase):
         self.assertEqual(self.drain(dry=True), 3)
         self.assertIn('markers disagree', self.stdout)
         self.assertEqual(self.fake.mutations, [])
+
+
+class TestIncrementalDrain(DrainCase):
+    def history_case(self):
+        old = self.intent('old-close', 'close', at='2026-10-05T11:00:00Z')
+        self.seed(old)
+        self.legacy(old)
+        self.intent('pending-start', 'start')
+        self.intent('pending-note', 'note')
+        self.fake.issues['1']['state']['type'] = 'completed'
+        self.fake.omit_listing = True
+        return LS.comment_id('workspace', 'project', '1', old['key'])
+
+    def test_missing_receipted_close_read_failure_and_retry(self):
+        cid = self.history_case()
+        dispatch = self.fake.dispatch
+        def broken(q, v):
+            if 'query IntentComment(' in q and v['id'] == cid:
+                raise OSError('historical read failed')
+            return dispatch(q, v)
+        before = (self.state / DC.RECEIPTS).read_bytes()
+        with mock.patch.object(self.fake, 'dispatch', broken):
+            self.assertEqual(self.drain(), 3, self.stdout)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual({r['key'] for r in self.receipts()}, {'old-close', 'pending-note'})
+        self.assertIn('pending-start: superseded by old-close', self.stdout)
+
+    def test_effect_uses_prepared_history_and_retry_stays_eligible(self):
+        cid = self.history_case()
+        dispatch = self.fake.dispatch
+        historical_reads = []
+        def later_fault(q, v):
+            if 'query IntentComments' in q or ('query IntentComment(' in q and v['id'] == cid):
+                historical_reads.append(q)
+                if self.fake.mutations:
+                    raise OSError('historical access after effects')
+            if 'query DrainIssue' in q and self.fake.mutations:
+                raise OSError('effect read-back unavailable')
+            return dispatch(q, v)
+        before = (self.state / DC.RECEIPTS).read_bytes()
+        with mock.patch.object(self.fake, 'dispatch', later_fault):
+            self.assertEqual(self.drain(), 3, self.stdout)
+        self.assertEqual(len(historical_reads), 2)  # one listing, one missing-ID fallback
+        self.assertEqual(len(self.writes('IntentCommentCreate')), 2)
+        self.assertEqual(self.writes('DrainState'), [])
+        self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual({r['key'] for r in self.receipts()}, {'old-close', 'pending-note'})
+        self.assertEqual(len(self.writes('IntentCommentCreate')), 2)
+
+    def test_no_second_historical_access_after_preparation(self):
+        cid = self.history_case()
+        dispatch = self.fake.dispatch
+        seen = set()
+        def once(q, v):
+            if 'query IntentComments' in q or ('query IntentComment(' in q and v['id'] == cid):
+                if q in seen:
+                    raise OSError('later historical read fails')
+                seen.add(q)
+            return dispatch(q, v)
+        with mock.patch.object(self.fake, 'dispatch', once):
+            self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual({r['key'] for r in self.receipts()}, {'old-close', 'pending-note'})
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.writes('DrainState'), [])
+
+    def test_preparation_faults_have_no_effects(self):
+        cid = self.history_case()
+        dispatch = self.fake.dispatch
+        before = (self.state / DC.RECEIPTS).read_bytes()
+        for fault in ('absent', 'invalid', 'exception', 'unfinished', 'empty'):
+            with self.subTest(fault=fault):
+                def broken(q, v):
+                    if 'query IntentComments' in q and fault in ('unfinished', 'empty'):
+                        if fault == 'empty':
+                            raise RuntimeError()
+                        return {'issue': {'comments': connection([], True, None)}}
+                    if 'query IntentComment(' in q and v['id'] == cid:
+                        if fault == 'exception':
+                            raise RuntimeError('read failed')
+                        if fault == 'absent':
+                            return {'comments': {'nodes': []}}
+                        if fault == 'invalid':
+                            c = copy.deepcopy(self.fake.comments[cid])
+                            c['body'] = 'edited'
+                            return {'comments': {'nodes': [c]}}
+                    return dispatch(q, v)
+                with mock.patch.object(self.fake, 'dispatch', broken):
+                    self.assertEqual(self.drain(), 3, self.stdout)
+                self.assertEqual(self.fake.mutations, [])
+                self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
+                self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual(self.drain(), 0, self.stdout)
+
+    def test_empty_exception_withholds_receipts(self):
+        self.intent()
+        dispatch = self.fake.dispatch
+        def broken(q, v):
+            if 'query IntentComments' in q:
+                raise RuntimeError()
+            return dispatch(q, v)
+        with mock.patch.object(self.fake, 'dispatch', broken):
+            self.assertEqual(self.drain(), 3, self.stdout)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(self.receipts(), [])
+        self.assertIn('LinearError', self.stdout)
+        # The transport wraps exceptions; also exercise a genuinely empty
+        # exception from history acquisition before that wrapper.
+        real = LS.prepare_issue
+        def empty(*args):
+            with mock.patch.object(LS.Reader, 'pages_of', side_effect=RuntimeError()):
+                return real(*args)
+        with mock.patch.object(LS, 'prepare_issue', empty):
+            self.assertEqual(self.drain(), 3, self.stdout)
+        self.assertIn('RuntimeError', self.stdout)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(self.receipts(), [])
+        self.assertEqual(self.drain(), 0, self.stdout)
+
+    def test_persistent_fault_isolated_in_incremental_and_full(self):
+        self.fake.add('2')
+        dispatch = self.fake.dispatch
+        def broken(q, v):
+            if 'query IntentComments' in q and v['id'] == '2':
+                raise OSError('issue B unavailable')
+            return dispatch(q, v)
+        for full in (False, True):
+            for order in (('2', '1'), ('1', '2')):
+                with self.subTest(full=full, order=order):
+                    directory = self.root / ('isolation-%s-%s' % (full, order[0]))
+                    for iid in order:
+                        self.intent('issue-' + iid, 'note', tracker='ARC-' + iid, directory=directory)
+                    with mock.patch.object(self.fake, 'dispatch', broken):
+                        for _ in range(2):
+                            self.assertEqual(self.drain(directory, full=full), 3, self.stdout)
+                            self.assertEqual([r['key'] for r in self.receipts(directory)], ['issue-1'])
+                    self.assertFalse(any(c['issue']['id'] == '2' for c in self.fake.comments.values()))
+        self.assertTrue(any(c['issue']['id'] == '1' for c in self.fake.comments.values()))
+
+    def test_receipted_alias_is_included_in_pending_issue_history(self):
+        cid = self.history_case()
+        entries = [json.loads(line) for line in (self.state / DC.OUTBOX).read_text().splitlines()]
+        entries[0]['tracker'] = '1'
+        (self.state / DC.OUTBOX).write_text(''.join(json.dumps(e) + '\n' for e in entries))
+        self.fake.comments.pop(cid)
+        self.assertEqual(self.drain(), 3, self.stdout)
+        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual([r['key'] for r in self.receipts()], ['old-close'])
+
+    def test_request_counts_independent_of_receipted_issues(self):
+        counts = []
+        for count in (1, 50):
+            directory = self.root / ('count-' + str(count))
+            for n in range(2, count + 2):
+                iid = str(n)
+                self.fake.add(iid)
+                intent = self.intent('history-' + iid, 'note', tracker='ARC-' + iid, directory=directory)
+                self.seed(intent, iid)
+                self.legacy(intent, directory)
+            self.intent('pending-' + str(count), 'note', directory=directory)
+            self.fake.calls.clear()
+            self.assertEqual(self.drain(directory), 0, self.stdout)
+            counts.append(len(self.fake.calls))
+            # Binding reads may remain; no request may select historical issues.
+            for q, v in self.fake.calls:
+                if 'query IntentComments' in q or 'query DrainIssue' in q:
+                    self.assertEqual(v['id'], '1')
+                if 'query OperationIdentifiers' in q:
+                    self.assertEqual(v['filter']['number']['in'], [1])
+        self.assertEqual(counts[0], counts[1])
+        print('incremental K=1/K=50 requests: %s' % counts)
+        self.fake.calls.clear()
+        self.assertEqual(self.drain(directory), 0, self.stdout)
+        self.assertFalse(any('IntentComment' in q or 'DrainIssue' in q or 'OperationIdentifiers' in q
+                             for q, _ in self.fake.calls))
+
+    def test_live_shaped_request_count(self):
+        # 278 receipted intents over 118 issues, plus two pending issues.
+        for n in range(1, 121):
+            iid = str(n)
+            self.fake.add(iid)
+            number = (3 if n <= 42 else 2) if n <= 118 else 1
+            for j in range(number):
+                intent = self.intent('issue-%s-%s' % (iid, j), 'note', tracker='ARC-' + iid)
+                if n <= 118:
+                    self.seed(intent, iid)
+                    self.legacy(intent)
+        self.fake.calls.clear()
+        self.assertEqual(self.drain(), 0, self.stdout)
+        calls = len(self.fake.calls)
+        self.assertEqual(len((self.state / DC.OUTBOX).read_text().splitlines()), 280)
+        self.assertEqual(len(self.receipts()), 280)
+        self.assertEqual(sum('query IntentComments' in q for q, _ in self.fake.calls), 2)
+        self.assertLessEqual(calls, 20)
+        print('live-shaped drain: 280 intents / 120 issues / 2 pending: %d requests; supplied base 652' % calls)
 
 
 class TestMergeDrain(DrainCase):

@@ -754,7 +754,9 @@ def read_comment(client, cid):
 
 def confirm_comment(client, intent, workspace, project, issue, create):
     cid = comment_id(workspace, project, issue, intent['key'])
-    comment = read_comment(client, cid)
+    # Preparation has already established absence. Only read the new comment
+    # back here; historical reads belong exclusively to prepare_issue.
+    comment = None
     create_error = None
     if comment is None and create:
         try:
@@ -905,17 +907,48 @@ def record_drain_receipt(entry, issue, contract):
         raise ValueError('receipt refused: ' + result.stderr)
 
 
-def reconcile_issue(reader, workspace, project, team, issue, entries, dry_run):
-    comments = issue_comments(reader, workspace, project, issue['id'])
-    expected = {e['intent']['key']: intent_markers(e['intent']) for e in entries}
-    for comment in comments:
-        if comment['key'] in expected and comment['markers'] != expected[comment['key']]:
-            raise ValueError('listed comment disagrees with collected intent')
-    comments += [e['confirmed'] for e in entries if 'confirmed' in e]
-    if dry_run:
-        comments += [{'key': e['intent']['key'], 'op': e['intent']['verb'], 'order': e['order']}
-                     for e in entries if not e['receipted'] and not e.get('error')]
+def prepare_issue(reader, workspace, project, issue, entries):
+    """Acquire and validate history once, before any effects on this issue."""
+    q = ('query IntentComments($id: String!, $after: String) { issue(id: $id) { '
+         'comments(first: 100, after: $after) { nodes { %s } %s } } }' % (COMMENT_FIELDS, PAGE))
+    nodes = reader.pages_of(lambda after: reader.client.query(
+        q, {'id': issue['id'], 'after': after})['issue']['comments'])
+    listed = {c['id']: c for c in nodes}
+    history = [parsed for c in nodes
+               for parsed in [genuine_comment(c, workspace, project, issue['id'])] if parsed]
+    pending = []
+    for entry in entries:
+        intent = entry['intent']
+        cid = comment_id(workspace, project, issue['id'], intent['key'])
+        comment = listed.get(cid)
+        if comment is None:
+            comment = read_comment(reader.client, cid)
+        if comment is None:
+            if entry['receipted']:
+                raise ValueError('uncovered history: receipted comment missing')
+            pending.append(entry)
+            continue
+        parsed = genuine_comment(comment, workspace, project, issue['id'])
+        if not parsed or parsed['markers'] != intent_markers(intent):
+            raise ValueError('listed comment disagrees or exact-ID markers disagree')
+        entry['confirmed'] = parsed
+        if cid not in listed:
+            history.append(parsed)
+    planned = history + [{'key': e['intent']['key'], 'op': e['intent']['verb'], 'order': e['order'],
+                          'markers': intent_markers(e['intent'])} for e in pending]
+    return {'history': history, 'pending': pending, 'latest': latest_state(planned)}
+
+
+def reconcile_issue(reader, workspace, project, team, issue, entries, dry_run, prepared):
+    # No historical access here: use the prepared history and the newly
+    # confirmed comments (or planned comments during a dry run).
+    comments = prepared['history'] + [
+        {'key': e['intent']['key'], 'op': e['intent']['verb'], 'order': e['order'],
+         'markers': intent_markers(e['intent'])}
+        if dry_run else e['confirmed'] for e in prepared['pending']]
     latest = latest_state(comments)
+    if latest != prepared['latest']:
+        raise ValueError('confirmed comments disagree with preparation')
     before = read_drain_issue(reader.client, issue['id'])
     if before['id'] != issue['id']:
         raise ValueError('issue identity changed')
@@ -973,7 +1006,6 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
                 if item['unit'] in identifiers:
                     raise ValueError('duplicate unit in draft')
                 identifiers[item['unit']] = item['identifier']
-    references = {}
     for entry in entries:
         intent = entry['intent']
         try:
@@ -988,68 +1020,52 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
             if not ref:
                 raise ValueError('no tracker issue')
             entry['ref'] = ref
-            references[ref] = None
         except Exception as exc:
             entry['error'] = str(exc)
             fail(entry['label'] + ': ' + str(exc))
-    try:
-        references = reader.resolve(references, fields=DRAIN_ISSUE_FIELDS)
-    except Exception as exc:
-        fail('issue references: ' + str(exc))
+    # Select locally, before resolving references: receipted-only issues have
+    # no per-issue requests. Resolve independently so one bad reference cannot
+    # couple otherwise healthy siblings.
+    references = dict.fromkeys(e['ref'] for e in entries if 'error' not in e
+                               and (args.full or not e['receipted']))
     groups = {}
-    for entry in entries:
-        if entry.get('error'):
-            continue
-        intent = entry['intent']
+    for ref in references:
         try:
-            issue = references[entry['ref']]
+            issue = reader.resolve([ref], fields=DRAIN_ISSUE_FIELDS)[ref]
             if issue is None:
-                raise ValueError('unreadable issue: ' + entry['ref'])
+                raise ValueError('unreadable issue: ' + ref)
             check_membership(issue, project, team)
-            group = groups.setdefault(issue['id'], (issue, []))
-            group[1].append(entry)
-            try:
-                confirmed = confirm_comment(reader.client, intent, workspace, project, issue['id'],
-                                            not entry['receipted'] and not args.dry_run)
-                if confirmed:
-                    entry['confirmed'] = confirmed
-                elif entry['receipted']:
-                    say('%s: uncovered history (comment missing); reconciling from existing comments' % issue['identifier'])
-                elif args.dry_run:
-                    say('would post comment for ' + entry['label'])
-            except Exception as exc:
-                if entry['receipted']:
-                    if isinstance(exc, ValueError):
-                        say('%s: uncovered history (%s); reconciling from existing comments' % (issue['identifier'], exc))
-                    else:
-                        fail(entry['label'] + ': comment read UNKNOWN: ' + str(exc))
-                else:
-                    raise
+            groups[issue['id']] = issue
         except Exception as exc:
-            entry['error'] = str(exc)
-            fail(entry['label'] + ': ' + str(exc))
-    for issue, group in groups.values():
+            for entry in entries:
+                if entry.get('ref') == ref:
+                    fail('%s: %s' % (entry['label'], exc))
+    for issue in groups.values():
+        # Include receipted history under either spelling of the resolved issue.
+        group = [e for e in entries if 'error' not in e
+                 and e['ref'] in (issue['id'], issue['identifier'])]
         try:
-            latest, after = reconcile_issue(reader, workspace, project, team, issue, group, args.dry_run)
+            prepared = prepare_issue(reader, workspace, project, issue, group)
+            for entry in prepared['pending']:
+                if args.dry_run:
+                    say('would post comment for ' + entry['label'])
+                else:
+                    entry['confirmed'] = confirm_comment(
+                        reader.client, entry['intent'], workspace, project, issue['id'], True)
+            latest, after = reconcile_issue(reader, workspace, project, team, issue, group,
+                                            args.dry_run, prepared)
             say('%s: %s%s' % (issue['identifier'], 'would reconcile to ' if args.dry_run else 'reconciled to ',
                              STATE_TYPE[latest['op']] if latest else 'existing state (no state intent)'))
         except Exception as exc:
-            fail('%s reconciliation: %s' % (issue['identifier'], exc))
-            latest, after = None, None
-        # A pending state intent that failed leaves this issue's intended
-        # state unresolved, so nothing on the issue is acknowledged this run.
-        unresolved = next((e['label'] for e in group if e.get('error') and not e['receipted']
-                           and e['intent'].get('verb') in STATE_TYPE), None)
+            # Failure is structural, including exceptions with an empty message.
+            # No receipt on this issue until preparation and every effect succeed.
+            fail('%s reconciliation: receipt withheld: %s: %s' %
+                 (issue['identifier'], type(exc).__name__, exc))
+            continue
         for entry in group:
-            if entry['receipted'] or entry.get('error'):
+            if entry['receipted']:
                 continue
             intent = entry['intent']
-            if after is None:
-                fail(entry['label'] + ': reconciliation UNKNOWN')
-                continue
-            if unresolved:
-                fail('%s: receipt withheld; state intent %s on this issue failed' % (entry['label'], unresolved))
-                continue
             if intent['verb'] in STATE_TYPE:
                 if latest and latest['key'] != intent['key']:
                     superseded.append(entry['label'])
@@ -1127,6 +1143,7 @@ def parse_args(argv=None):
     group.add_argument('--draft')
     p.add_argument('--state-dir', action='append', required=True)
     p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--full', action='store_true', help='also reconcile fully receipted issues')
     LI.add_parser(sub)
     LF.add_parser(sub)
     args = parser.parse_args(argv)
