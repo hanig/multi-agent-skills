@@ -246,6 +246,10 @@
     "tests/fixtures/d5/r7_child.py",
     "tests/fixtures/d5/r8_peer.py",
     "tests/fixtures/d5/u44_mutations.py",
+    "tests/fixtures/d5/u45_operator.py",
+    "tests/fixtures/d5/u46_mutations.py",
+    "tests/fixtures/d5/u46_operator.py",
+    "tests/fixtures/d5/u48_mutations.py",
     "tests/fixtures/d5/u4_2c_mutations.py",
     "tests/fixtures/d5/u6_mutations.py",
     "tests/fixtures/installed_pipeline/python_runner.py",
@@ -403,6 +407,13 @@
     "verifiers/changed_tests_stable.py",
     "verifiers/integration_tests.py"
   ],
+  "fixture_denials": {
+    "semantics": "Test-only fixtures, not shipped entry points or admitted production roots; the denial list above retains the drift check for each file.",
+    "tests/fixtures/d5/u45_operator.py": "Launched by tests.test_d5_u45_retry_recovery.TestRecovery.invoke and TestRecovery.test_live_holder_refused_without_writes_then_exit_allows_recovery; probe also used by tests.test_d5_u46_cancellation.",
+    "tests/fixtures/d5/u46_mutations.py": "Test-only mutation runner for tests.test_d5_u46_cancellation; patch is loaded by u46_operator.py in that module's subprocess scenarios.",
+    "tests/fixtures/d5/u46_operator.py": "Launched by tests.test_d5_u46_cancellation.TestCancellation.invoke.",
+    "tests/fixtures/d5/u48_mutations.py": "Test-only mutation runner invoking the CASES methods in tests.test_d5_u48_state_compat."
+  },
   "denial_semantics": "Not admitted by this restricted profile; records no claim of runtime refusal for these files. Only the enumerated roots and selectors above have that claim.",
   "launchers": [],
   "route_evidence": {
