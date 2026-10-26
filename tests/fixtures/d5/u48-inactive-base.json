@@ -1,0 +1,359 @@
+{
+  "base": "d48e6324aae6ace2a296152b4d6365a509d51aea",
+  "installation": {
+    "changed": [
+      "d5-readiness.json"
+    ],
+    "launches": [
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "--version"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--path-format=absolute",
+        "--show-toplevel"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--show-toplevel"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--show-toplevel"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "worktree",
+        "list",
+        "--porcelain"
+      ],
+      [
+        "git",
+        "-C",
+        "<fixture>/repo",
+        "rev-parse",
+        "--show-toplevel"
+      ]
+    ],
+    "writes": [
+      [
+        "installation.json",
+        {
+          "generation": "<generation>",
+          "plan_id": "merge-test",
+          "profile": "synchronous-merge-v1",
+          "record_dir": "<record>",
+          "record_key": "<record_key>",
+          "registration_id": "<registration_id>",
+          "repo_key": "<repo_key>",
+          "schema_version": 1,
+          "state_dir": "<fixture>/state",
+          "state_key": "<state_key>"
+        }
+      ],
+      [
+        "d5-readiness.json",
+        {
+          "generation": "<generation>",
+          "plan_id": "merge-test",
+          "profile": "synchronous-merge-v1",
+          "record_dir": "<record>",
+          "record_key": "<record_key>",
+          "registration_id": "<registration_id>",
+          "repo_key": "<repo_key>",
+          "schema_version": 1,
+          "state_dir": "<fixture>/state",
+          "state_key": "<state_key>"
+        }
+      ]
+    ]
+  },
+  "migration": {
+    "args": {
+      "root": "<project>/runs",
+      "state_dir": "<project>/state"
+    },
+    "marker": {
+      "attempt_paths_rewritten": false,
+      "copied_at": "<time>",
+      "external_root": "<project>/runs",
+      "external_state_dir": "<project>/state",
+      "legacy_root": "<fixture>/.swarm/runs",
+      "legacy_state_dir": "<fixture>/.swarm/state",
+      "runs_copied": true,
+      "schema_version": 1,
+      "source_files_retained": true
+    },
+    "output": "retained artifact\n",
+    "source": {
+      "schema_version": 1,
+      "units": {
+        "u": {
+          "attempt_dir": "<fixture>/.swarm/runs/u/a1",
+          "state": "DONE"
+        }
+      }
+    },
+    "source_output": "retained artifact\n",
+    "state": {
+      "schema_version": 1,
+      "units": {
+        "u": {
+          "attempt_dir": "<fixture>/.swarm/runs/u/a1",
+          "state": "DONE"
+        }
+      }
+    }
+  },
+  "operator": {
+    "calls": [
+      [
+        "pr",
+        "view",
+        "7",
+        "--repo",
+        "github.com/example/project",
+        "--json",
+        "number,url,state,headRefOid,baseRefName,mergeCommit,title"
+      ],
+      [
+        "pr",
+        "checks",
+        "7",
+        "--repo",
+        "github.com/example/project",
+        "--json",
+        "name,state"
+      ],
+      [
+        "api",
+        "--hostname",
+        "github.com",
+        "repos/example/project/git/ref/heads/main"
+      ],
+      [
+        "pr",
+        "view",
+        "7",
+        "--repo",
+        "github.com/example/project",
+        "--json",
+        "number,url,state,headRefOid,baseRefName,mergeCommit,title"
+      ],
+      [
+        "api",
+        "--hostname",
+        "github.com",
+        "repos/example/project/git/ref/heads/main"
+      ],
+      [
+        "api",
+        "--hostname",
+        "github.com",
+        "repos/example/project/git/ref/heads/main"
+      ],
+      [
+        "pr",
+        "merge",
+        "7",
+        "--repo",
+        "github.com/example/project",
+        "--squash",
+        "--match-head-commit",
+        "<head>",
+        "--subject",
+        "Use the reviewed change (#7)"
+      ],
+      [
+        "pr",
+        "view",
+        "7",
+        "--repo",
+        "github.com/example/project",
+        "--json",
+        "number,url,state,headRefOid,baseRefName,mergeCommit,title"
+      ],
+      [
+        "api",
+        "--hostname",
+        "github.com",
+        "repos/example/project/git/commits/<merge>"
+      ]
+    ],
+    "changed": [
+      "lease.json",
+      "lease.lock",
+      "merge-receipts.jsonl",
+      "merge-unit-<operation>.json",
+      "outbox-seq.json",
+      "outbox.jsonl",
+      "state-epoch.json",
+      "swarm-state.json"
+    ],
+    "code": 0,
+    "error": "",
+    "output": "+ <python> <swarm-scripts>/swarm.py scope-check <fixture>/plan.json --state-dir <fixture>/state --unit u --json\n+ gh pr view 7 --repo github.com/example/project --json number,url,state,headRefOid,baseRefName,mergeCommit,title\n+ gh pr checks 7 --repo github.com/example/project --json name,state\n+ gh api --hostname github.com repos/example/project/git/ref/heads/main\n+ gh pr view 7 --repo github.com/example/project --json number,url,state,headRefOid,baseRefName,mergeCommit,title\n+ gh api --hostname github.com repos/example/project/git/ref/heads/main\n+ gh api --hostname github.com repos/example/project/git/ref/heads/main\n+ gh pr merge 7 --repo github.com/example/project --squash --match-head-commit <head> --subject 'Use the reviewed change (#7)'\n+ gh pr view 7 --repo github.com/example/project --json number,url,state,headRefOid,baseRefName,mergeCommit,title\n+ gh api --hostname github.com repos/example/project/git/commits/<merge>\n+ <python> <swarm-scripts>/swarm.py merge --state-dir <fixture>/state --unit u --pr https://github.com/example/project/pull/7 --head <head> --target main --target-commit <base> --merged-as <merge> --method squash --repo https://github.com/example/project --integration-status candidate-verified\n+ <python> <swarm-scripts>/swarm.py advance <fixture>/plan.json --state-dir <fixture>/state --root <fixture>/runs\n  u: DONE on a merged PR (https://github.com/example/project/pull/7, squash as <merge-short>). The merge itself is attested, not verified; the head it pins was produced by this attempt.\n  u: DONE\n\ndispatched 0 unit(s); coordinator exiting. Advance with:\n  swarm.py advance <fixture>/plan.json --state-dir <fixture>/state --root <fixture>/runs\nMerge receipt recorded and advance ran.\nPending tracker close: key=<outbox-key> no tracker declared; unit=u\nDrain the outbox, then run the tracker audit:\n<python> <skills>/hanig-project/scripts/linear_sync.py drain --binding <fixture>/.hanig/linear-binding.json --state-dir <fixture>/state\nTracker drain: UNAVAILABLE (no binding)\nTracker: UNAVAILABLE (no binding or draft)\n",
+    "receipts": [
+      {
+        "at": "<time>",
+        "attested": true,
+        "by": "<operator>",
+        "head": "<head>",
+        "integration_status": "candidate-verified",
+        "merged": true,
+        "merged_as": "<merge>",
+        "method": "squash",
+        "pr": "https://github.com/example/project/pull/7",
+        "repo": "https://github.com/example/project",
+        "schema_version": 1,
+        "target": "main",
+        "target_commit": "<base>",
+        "unit": "u"
+      }
+    ]
+  },
+  "surface": {
+    "merge.current_intent": {
+      "commands": [],
+      "files_changed": [],
+      "launches": [],
+      "outcome": [
+        "AssertionError",
+        "unexpected os.open"
+      ],
+      "output": [],
+      "tracker_intents": [],
+      "writes": [
+        "os.open"
+      ]
+    },
+    "merge.main": {
+      "commands": [],
+      "files_changed": [],
+      "launches": [],
+      "outcome": [
+        "AssertionError",
+        "unexpected mkdir"
+      ],
+      "output": [],
+      "tracker_intents": [],
+      "writes": [
+        "mkdir"
+      ]
+    },
+    "merge.reconcile": {
+      "commands": [
+        [
+          "<python>",
+          "<checkout>/skills/hanig-swarm/scripts/swarm.py",
+          "scope-check",
+          "<fixture>/plan.json",
+          "--state-dir",
+          "<fixture>/state",
+          "--unit",
+          "u",
+          "--json"
+        ]
+      ],
+      "files_changed": [],
+      "launches": [
+        "subprocess.run"
+      ],
+      "outcome": [
+        "AssertionError",
+        "unexpected subprocess.run"
+      ],
+      "output": [
+        {
+          "argv": [
+            "<python>",
+            "<checkout>/skills/hanig-swarm/scripts/swarm.py",
+            "scope-check",
+            "<fixture>/plan.json",
+            "--state-dir",
+            "<fixture>/state",
+            "--unit",
+            "u",
+            "--json"
+          ],
+          "ending": "\n"
+        }
+      ],
+      "tracker_intents": [],
+      "writes": []
+    },
+    "swarm._prepare_command_paths": {
+      "commands": [],
+      "files_changed": [],
+      "launches": [],
+      "outcome": [
+        "AssertionError",
+        "unexpected mkdir"
+      ],
+      "output": [],
+      "tracker_intents": [],
+      "writes": [
+        "mkdir"
+      ]
+    },
+    "swarm.advance": {
+      "commands": [],
+      "files_changed": [],
+      "launches": [],
+      "outcome": [
+        "AssertionError",
+        "unexpected mkdir"
+      ],
+      "output": [],
+      "tracker_intents": [],
+      "writes": [
+        "mkdir"
+      ]
+    },
+    "swarm.main": {
+      "commands": [],
+      "files_changed": [],
+      "launches": [],
+      "outcome": [
+        "AssertionError",
+        "unexpected mkdir"
+      ],
+      "output": [],
+      "tracker_intents": [],
+      "writes": [
+        "mkdir"
+      ]
+    }
+  }
+}
