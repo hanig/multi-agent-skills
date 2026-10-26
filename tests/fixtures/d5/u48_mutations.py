@@ -32,7 +32,7 @@ def patches(name):
                             "        _d5_refuse('_prepare_command_paths')", '        pass')]
     if name == 'legacy-key-changed':
         return [replacement(tests.M, 'authority',
-            'binding = {"unit": args.unit,', 'binding = {"state_epoch": epoch, "unit": args.unit,')]
+            '    binding = {"unit": args.unit,', '    binding = {"state_epoch": epoch, "unit": args.unit,')]
     if name == 'historical-reinterpreted':
         return [replacement(tests.M, 'reconcile',
             '        if intent is not None:\n            _d5_journal_binding(intent, ready, binding["repo"])',
