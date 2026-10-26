@@ -1100,7 +1100,7 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
                 say('acknowledged ' + entry['label'])
             except Exception as exc:
                 fail(entry['label'] + ': ' + str(exc))
-    say('%d acknowledged, %d superseded, %d failures; %d issues skipped (already receipted)' %
+    say('%d acknowledged, %d superseded, %d failures; %d issue references skipped (already receipted)' %
         (len(acknowledged), len(superseded), len(failures), skipped))
     return 3 if failures else 0
 
