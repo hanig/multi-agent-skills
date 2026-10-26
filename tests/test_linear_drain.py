@@ -153,12 +153,14 @@ class DrainCase(AuditCase):
     def legacy(self, intent, directory=None):
         DC.contract.record_receipt(directory or self.state, intent['key'], intent.get('tracker', 'ARC-1'))
 
-    def drain(self, *directories, draft=False, dry=False):
+    def drain(self, *directories, draft=False, dry=False, full=False):
         args = ['drain', '--draft' if draft else '--binding', str(self.draft if draft else self.binding)]
         for directory in directories or (self.state,):
             args.extend(['--state-dir', str(directory)])
         if dry:
             args.append('--dry-run')
+        if full:
+            args.append('--full')
         return self.cli(*args)
 
     def receipts(self, directory=None):
@@ -221,7 +223,7 @@ class TestDrain(DrainCase):
     def test_drain_batches_repeated_initial_references(self):
         for n in range(5):
             self.intent('note-%d' % n, 'note')
-        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
+        self.assertEqual(self.drain(full=True), 0, self.stdout + self.stderr)
         self.assertEqual(sum('query OperationIdentifiers' in q for q, _ in self.fake.calls), 1)
         self.assertEqual(sum('query DrainIssue' in q for q, _ in self.fake.calls), 2)
         self.assertEqual(len(self.receipts()), 5)
@@ -301,12 +303,12 @@ class TestDrain(DrainCase):
                     comment['body'] = comment['body'].replace(old, new)
                 if change not in ('evidence', 'order'):
                     self.assertIsNone(LS.genuine_comment(comment, 'workspace', 'project', '1'))
-                self.assertEqual(self.drain(), 3)
+                self.assertEqual(self.drain(full=True), 3)
                 self.assertEqual(self.receipts(), [])
                 self.assertEqual(self.fake.mutations, [])
         self.fake.comments.clear()
         self.fake.reject_after_create = True
-        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.drain(full=True), 0, self.stdout)
         self.assertEqual(len(self.fake.comments), 1)
 
     def test_rejected_comment_create_preserves_original_error(self):
@@ -501,15 +503,15 @@ class TestDrain(DrainCase):
         self.intent()
         self.fake.hide_comments = True
         self.fake.omit_listing = True
-        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.drain(full=True), 3)
         self.assertEqual(self.receipts(), [])
         self.assertEqual(self.writes('DrainState'), [])
         self.fake.hide_comments = False
         self.fake.lag_state = True
-        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.drain(full=True), 3)
         self.assertEqual(self.receipts(), [])
         self.fake.lag_state = False
-        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.drain(full=True), 0, self.stdout)
         self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
         self.assertEqual(len(self.writes('DrainState')), 1)
         self.assertEqual(len(self.receipts()), 1)
@@ -577,7 +579,7 @@ class TestDrain(DrainCase):
         before = (self.state / DC.RECEIPTS).read_bytes()
         self.assertEqual(self.audit(), 1)
         self.assertEqual(self.checks['intent_order'], 'DRIFT')
-        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.drain(full=True), 0, self.stdout)
         self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
         self.assertEqual(self.audit(), 0)
         self.assertEqual(self.checks['intent_order'], 'CLEAN')
@@ -585,11 +587,11 @@ class TestDrain(DrainCase):
         self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
         self.fake.issues['1']['state']['type'] = 'started'
         self.fake.mutation_failure = 'DrainState'
-        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.drain(full=True), 3)
         self.assertIn('reconciliation', self.stdout)
         self.fake.mutation_failure = None
         self.fake.comments.pop(LS.comment_id('workspace', 'project', '1', 'old'))
-        self.assertEqual(self.drain(), 0)
+        self.assertEqual(self.drain(full=True), 0)
         self.assertIn('ARC-1: uncovered history', self.stdout)
         self.assertEqual(self.writes('IntentCommentCreate'), [])
 
@@ -644,7 +646,7 @@ class TestDrain(DrainCase):
         for path in self.state.iterdir():
             self.assertNotIn(KEY, path.read_text())
         self.fake.fail = 'DrainIssue'
-        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.drain(full=True), 3)
         self.assertNotIn(KEY, self.stdout + self.stderr)
         with mock.patch.object(API, 'load_key', return_value=None):
             self.assertEqual(self.drain(), 2)
@@ -697,6 +699,127 @@ class TestDrain(DrainCase):
         self.assertEqual(len(self.fake.comments), 1)
         self.assertEqual(self.receipts(), [])
         self.assertIn('receipt refused', self.stdout)
+
+
+class TestIncrementalDrain(DrainCase):
+    def history(self, count, intents=None, directory=None):
+        directory = directory or self.state
+        for n in range(intents if intents is not None else count):
+            iid = str(n % count + 1)
+            self.fake.add(iid)
+            intent = self.intent('old-%d' % n, 'note', tracker='ARC-' + iid,
+                                 directory=directory)
+            self.seed(intent, iid)
+            self.legacy(intent, directory)
+
+    def test_incremental_request_count_independent_of_receipted_history(self):
+        for count in (1, 50):
+            with self.subTest(receipted_issues=count):
+                directory = self.root / ('incremental-%d' % count)
+                self.history(count, directory=directory)
+                self.fake.add('999')
+                self.intent('new', tracker='ARC-999', directory=directory)
+                self.fake.comments.pop(LS.comment_id('workspace', 'project', '999', 'new'), None)
+                before = (directory / DC.RECEIPTS).read_bytes()
+                self.fake.calls.clear()
+                self.assertEqual(self.drain(directory), 0, self.stdout + self.stderr)
+                self.assertEqual(len(self.fake.calls), 8)
+                self.assertIn('%d issues skipped (already receipted)' % count, self.stdout)
+                self.assertTrue((directory / DC.RECEIPTS).read_bytes().startswith(before))
+                self.assertEqual(len(self.receipts(directory)), count + 1)
+                for q, v in self.fake.calls:
+                    if 'OperationIdentifiers' in q:
+                        self.assertEqual(v['filter']['number']['in'], [999])
+                    if 'CommentBatch' in q:
+                        self.assertEqual(v['ids'], ['999'])
+                self.fake.calls.clear()
+                self.assertEqual(self.drain(directory), 0)
+                self.assertEqual(len(self.fake.calls), 1)  # Binding only, no issue reads.
+
+    def test_full_request_count_scales_with_receipted_history(self):
+        for count, requests in ((1, 14), (50, 211)):
+            with self.subTest(receipted_issues=count):
+                directory = self.root / ('full-%d' % count)
+                self.history(count, directory=directory)
+                self.fake.add('999')
+                self.intent('new', tracker='ARC-999', directory=directory)
+                self.fake.comments.pop(LS.comment_id('workspace', 'project', '999', 'new'), None)
+                self.fake.calls.clear()
+                self.assertEqual(self.drain(directory, full=True), 0, self.stdout + self.stderr)
+                self.assertEqual(len(self.fake.calls), requests)
+                self.assertIn('0 issues skipped', self.stdout)
+                self.assertEqual(sum('query IntentComment(' in q for q, _ in self.fake.calls), count + 2)
+
+    def test_efficiency2_shaped_measurement(self):
+        counts = {}
+        for full in (True, False):
+            directory = self.root / ('measurement-' + str(full))
+            self.fake.comments.clear()
+            self.history(118, intents=278, directory=directory)
+            for iid in ('119', '120'):
+                self.fake.add(iid)
+                self.intent('new-' + iid, tracker='ARC-' + iid, directory=directory)
+            self.fake.calls.clear()
+            self.assertEqual(self.drain(directory, full=full), 0, self.stdout + self.stderr)
+            self.assertEqual(len(self.receipts(directory)), 280)
+            counts[full] = len(self.fake.calls)
+        self.assertEqual(counts, {True: 652, False: 13})
+        self.assertGreaterEqual(counts[True] / counts[False], 10)
+        print('efficiency2 fixture: 280 intents, 120 issues, 2 pending; full=%d incremental=%d' %
+              (counts[True], counts[False]))
+
+    def test_pending_sibling_uses_listing_and_resolved_state(self):
+        for alias in ('ARC-1', '1'):
+            with self.subTest(receipted_reference=alias):
+                directory = self.root / ('mixed-' + alias)
+                old = self.intent('old', 'start', tracker=alias, directory=directory)
+                self.seed(old); self.legacy(old, directory)
+                self.fake.issues['1']['state']['type'] = 'started'
+                self.intent('new', 'note', directory=directory)
+                self.fake.comments.pop(LS.comment_id('workspace', 'project', '1', 'new'), None)
+                self.fake.calls.clear()
+                self.assertEqual(self.drain(directory), 0, self.stdout + self.stderr)
+                self.assertEqual(len(self.fake.calls), 5)
+                self.assertEqual(sum('CommentBatch' in q for q, _ in self.fake.calls), 1)
+                self.assertEqual(sum('query IntentComment(' in q for q, _ in self.fake.calls), 1)
+                self.assertFalse(any('DrainIssue' in q for q, _ in self.fake.calls))
+                self.assertEqual({r['key'] for r in self.receipts(directory)}, {'old', 'new'})
+                self.assertIn('0 issues skipped', self.stdout)
+
+    def test_incremental_mutation_requires_state_readback(self):
+        self.intent()
+        self.fake.lag_state = True
+        self.assertEqual(self.drain(), 3, self.stdout + self.stderr)
+        self.assertEqual(self.receipts(), [])
+        self.assertEqual(len(self.writes('DrainState')), 1)
+        self.assertEqual(sum('query DrainIssue' in q for q, _ in self.fake.calls), 1)
+        self.assertIn('state read-back', self.stdout)
+        self.fake.lag_state = False
+        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
+        self.assertEqual(len(self.writes('DrainState')), 1)
+        self.assertEqual(self.receipts()[0]['outcome'], 'confirmed_by_readback')
+
+    def test_incremental_receipt_requires_comment_readback(self):
+        self.intent(op='note')
+        self.fake.hide_comments = True
+        self.assertEqual(self.drain(), 3, self.stdout + self.stderr)
+        self.assertEqual(self.receipts(), [])
+        self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
+        self.assertIn('comment missing or markers disagree', self.stdout)
+        self.fake.hide_comments = False
+        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
+        self.assertEqual(self.receipts()[0]['outcome'], 'confirmed_by_readback')
+
+    def test_incremental_conflicting_listed_comment_is_not_acknowledged(self):
+        intent = self.intent()
+        comment = self.seed(intent)
+        comment['body'] = comment['body'].replace('2026-10-05', '2026-10-06')
+        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.receipts(), [])
+        self.assertEqual(self.fake.mutations, [])
+        self.assertIn('markers disagree', self.stdout)
 
 
 class TestDrainGuards(DrainCase):
@@ -805,20 +928,20 @@ class TestDrainGuards(DrainCase):
                             result['issue'][field] = 'other' if field == 'id' else {'id': 'other'}
                     return result
                 with mock.patch.object(self.fake, 'dispatch', side_effect=move):
-                    self.assertEqual(self.drain(), 3)
+                    self.assertEqual(self.drain(full=True), 3)
                 self.assertEqual(self.receipts(), [])
                 self.assertEqual(len(self.writes('DrainState')), 0 if when == 1 else 1)
         self.fake.states = []
         self.fake.issues['1']['state']['type'] = 'unstarted'
         self.fake.mutations.clear()
-        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.drain(full=True), 3)
         self.assertIn('no started state', self.stdout)
         self.assertEqual(self.writes('DrainState'), [])
 
     def test_all_receipted_comment_read_failure_is_unknown(self):
         intent = self.intent(); self.seed(intent); self.legacy(intent)
         self.fake.fail = 'query IntentComment('
-        self.assertEqual(self.drain(), 3)
+        self.assertEqual(self.drain(full=True), 3)
         self.assertIn('comment read UNKNOWN', self.stdout)
         self.assertNotIn('uncovered history', self.stdout)
         self.assertEqual(self.writes('IntentCommentCreate'), [])
@@ -840,7 +963,7 @@ class TestDrainGuards(DrainCase):
                     comment['body'] = comment['body'].replace('2026-10-05', '2026-10-06')
             return data
         with mock.patch.object(self.fake, 'dispatch', side_effect=edited):
-            self.assertEqual(self.drain(), 3)
+            self.assertEqual(self.drain(full=True), 3)
         self.assertEqual(self.writes('DrainState'), [])
         self.assertEqual(self.receipts(), [])
         self.assertIn('listed comment disagrees', self.stdout)

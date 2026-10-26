@@ -699,21 +699,23 @@ def genuine_comment(comment, workspace, project, issue):
     return {'key': key, 'op': op, 'order': order, 'markers': markers}
 
 
-def issue_comments(reader, workspace, project, issue, initial=None):
+def issue_comments(reader, workspace, project, issue, initial=None, raw=False):
     q = ('query IntentComments($id: String!, $after: String) { issue(id: $id) { '
          'comments(first: 100, after: $after) { nodes { %s } %s } } }' % (COMMENT_FIELDS, PAGE))
     nodes = reader.pages_of(lambda after: initial if after is None and initial is not None else
                             reader.client.query(q, {'id': issue, 'after': after})['issue']['comments'])
+    if raw:
+        return nodes
     return [parsed for c in nodes
             for parsed in [genuine_comment(c, workspace, project, issue)] if parsed]
 
 
-def project_comments(reader, workspace, project, ids):
+def project_comments(reader, workspace, project, ids, raw=False):
     fields = 'id comments(first: 20) { nodes { %s } %s }' % (COMMENT_FIELDS, PAGE)
     result = {}
     for nodes in reader.batches(ids, fields, 'CommentBatch'):
         for node in nodes:
-            result[node['id']] = issue_comments(reader, workspace, project, node['id'], node['comments'])
+            result[node['id']] = issue_comments(reader, workspace, project, node['id'], node['comments'], raw=raw)
     if set(result) != set(ids):
         raise ValueError('incomplete issue comment listing')
     return result
@@ -752,9 +754,9 @@ def read_comment(client, cid):
     return nodes[0] if nodes else None
 
 
-def confirm_comment(client, intent, workspace, project, issue, create):
+def confirm_comment(client, intent, workspace, project, issue, create, listed=None):
     cid = comment_id(workspace, project, issue, intent['key'])
-    comment = read_comment(client, cid)
+    comment = read_comment(client, cid) if listed is None else listed.get(cid)
     create_error = None
     if comment is None and create:
         try:
@@ -778,6 +780,8 @@ def confirm_comment(client, intent, workspace, project, issue, create):
         if create_error is not None:
             raise create_error
         raise ValueError('comment missing or markers disagree on read-back')
+    if listed is not None:
+        listed[cid] = comment
     return parsed
 
 
@@ -905,8 +909,11 @@ def record_drain_receipt(entry, issue, contract):
         raise ValueError('receipt refused: ' + result.stderr)
 
 
-def reconcile_issue(reader, workspace, project, team, issue, entries, dry_run):
-    comments = issue_comments(reader, workspace, project, issue['id'])
+def reconcile_issue(reader, workspace, project, team, issue, entries, dry_run, listed=None):
+    full = listed is None
+    comments = (issue_comments(reader, workspace, project, issue['id']) if full else
+                [parsed for c in listed.values()
+                 for parsed in [genuine_comment(c, workspace, project, issue['id'])] if parsed])
     expected = {e['intent']['key']: intent_markers(e['intent']) for e in entries}
     for comment in comments:
         if comment['key'] in expected and comment['markers'] != expected[comment['key']]:
@@ -916,7 +923,8 @@ def reconcile_issue(reader, workspace, project, team, issue, entries, dry_run):
         comments += [{'key': e['intent']['key'], 'op': e['intent']['verb'], 'order': e['order']}
                      for e in entries if not e['receipted'] and not e.get('error')]
     latest = latest_state(comments)
-    before = read_drain_issue(reader.client, issue['id'])
+    before = read_drain_issue(reader.client, issue['id']) if full else issue
+    mutated = False
     if before['id'] != issue['id']:
         raise ValueError('issue identity changed')
     check_membership(before, project, team)
@@ -935,7 +943,8 @@ def reconcile_issue(reader, workspace, project, team, issue, entries, dry_run):
             reader.client.query('mutation DrainState($id: String!, $state: String!) { '
                                 'issueUpdate(id: $id, input: {stateId: $state}) { success } }',
                                 {'id': issue['id'], 'state': target['id']})
-    after = read_drain_issue(reader.client, issue['id'])
+            mutated = True
+    after = read_drain_issue(reader.client, issue['id']) if full or mutated else before
     check_membership(after, project, team)
     if after['id'] != issue['id'] or (latest and not dry_run and after['state']['type'] != STATE_TYPE[latest['op']]):
         raise ValueError('state read-back does not show latest target')
@@ -992,15 +1001,27 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
         except Exception as exc:
             entry['error'] = str(exc)
             fail(entry['label'] + ': ' + str(exc))
+    all_refs = set(references)
+    if not args.full:
+        references = {e['ref']: None for e in entries
+                      if not e['receipted'] and not e.get('error')}
+    selected_refs = set(references)
     try:
         references = reader.resolve(references, fields=DRAIN_ISSUE_FIELDS)
     except Exception as exc:
         fail('issue references: ' + str(exc))
+    # Include receipted aliases of a pending issue without resolving history.
+    for issue in list(references.values()):
+        if issue is not None:
+            for ref in (issue['id'], issue['identifier']):
+                if ref in all_refs:
+                    references[ref] = issue
+                    selected_refs.add(ref)
+    skipped = len(all_refs - selected_refs)
     groups = {}
     for entry in entries:
-        if entry.get('error'):
+        if entry.get('error') or entry['ref'] not in selected_refs:
             continue
-        intent = entry['intent']
         try:
             issue = references[entry['ref']]
             if issue is None:
@@ -1008,9 +1029,24 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
             check_membership(issue, project, team)
             group = groups.setdefault(issue['id'], (issue, []))
             group[1].append(entry)
+        except Exception as exc:
+            entry['error'] = str(exc)
+            fail(entry['label'] + ': ' + str(exc))
+    listings = {}
+    if not args.full:
+        try:
+            listings = project_comments(reader, workspace, project, groups, raw=True)
+        except Exception as exc:
+            fail('issue comments: ' + str(exc))
+    for issue, group in groups.values():
+        if not args.full and issue['id'] not in listings:
+            continue  # An incomplete listing cannot support a receipt or write.
+        listed = None if args.full else {c['id']: c for c in listings[issue['id']]}
+        for entry in group:
+            intent = entry['intent']
             try:
                 confirmed = confirm_comment(reader.client, intent, workspace, project, issue['id'],
-                                            not entry['receipted'] and not args.dry_run)
+                                            not entry['receipted'] and not args.dry_run, listed)
                 if confirmed:
                     entry['confirmed'] = confirmed
                 elif entry['receipted']:
@@ -1024,13 +1060,10 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
                     else:
                         fail(entry['label'] + ': comment read UNKNOWN: ' + str(exc))
                 else:
-                    raise
-        except Exception as exc:
-            entry['error'] = str(exc)
-            fail(entry['label'] + ': ' + str(exc))
-    for issue, group in groups.values():
+                    entry['error'] = str(exc)
+                    fail(entry['label'] + ': ' + str(exc))
         try:
-            latest, after = reconcile_issue(reader, workspace, project, team, issue, group, args.dry_run)
+            latest, after = reconcile_issue(reader, workspace, project, team, issue, group, args.dry_run, listed)
             say('%s: %s%s' % (issue['identifier'], 'would reconcile to ' if args.dry_run else 'reconciled to ',
                              STATE_TYPE[latest['op']] if latest else 'existing state (no state intent)'))
         except Exception as exc:
@@ -1067,7 +1100,8 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
                 say('acknowledged ' + entry['label'])
             except Exception as exc:
                 fail(entry['label'] + ': ' + str(exc))
-    say('%d acknowledged, %d superseded, %d failures' % (len(acknowledged), len(superseded), len(failures)))
+    say('%d acknowledged, %d superseded, %d failures; %d issues skipped (already receipted)' %
+        (len(acknowledged), len(superseded), len(failures), skipped))
     return 3 if failures else 0
 
 
@@ -1127,6 +1161,7 @@ def parse_args(argv=None):
     group.add_argument('--draft')
     p.add_argument('--state-dir', action='append', required=True)
     p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--full', action='store_true', help='also reconcile already-receipted issues')
     LI.add_parser(sub)
     LF.add_parser(sub)
     args = parser.parse_args(argv)
