@@ -779,7 +779,52 @@ class TestIncrementalDrain(DrainCase):
                 with self.subTest(mode=mode, fault=fault):
                     self.history_retry(mode, fault)
 
-    def history_retry(self, mode, fault):
+    def test_empty_transport_error_withholds_history(self):
+        for mode in ('incremental', 'full', 'base-equivalent'):
+            with self.subTest(mode=mode):
+                self.history_retry(mode, 'error', empty_error=True)
+
+    def test_review_history_fault_withholds_pending_comments(self):
+        # Preserved reviewer counterexample; comment withholding needs adjudication.
+        for mode in ('incremental', 'full', 'base-equivalent'):
+            with self.subTest(mode=mode):
+                self.history_retry(mode, 'error', forbid_comments=True)
+
+    def test_failed_listing_does_not_stall_healthy_issue(self):
+        for full in (True, False):
+            with self.subTest(full=full):
+                directory = self.root / ('listing-' + str(full))
+                self.fake.comments.clear()
+                self.fake.add('2')
+                self.intent('healthy', 'note', directory=directory)
+                pending = self.intent('faulted', 'note', tracker='ARC-2', directory=directory)
+                history = self.seed(dict(pending, key='historical'), '2')
+                dispatch = self.fake.dispatch
+                def broken(q, v):
+                    if 'query IntentComments' in q and v['id'] == '2':
+                        if v.get('after'):
+                            raise OSError('synthetic issue 2 page unavailable')
+                        return {'issue': {'comments': connection([history], True, 'next')}}
+                    return dispatch(q, v)
+                with mock.patch.object(self.fake, 'dispatch', broken):
+                    self.assertEqual(self.drain(directory, full=full), 3)
+                self.assertEqual([r['key'] for r in self.receipts(directory)], ['healthy'])
+
+    def test_review_failed_note_does_not_withhold_healthy_close(self):
+        # Preserved change-of-behavior counterexample; no repair is authorized.
+        self.intent('note', 'note')
+        self.intent('close', 'close', at='2026-10-05T12:00:00Z')
+        confirm = LS.confirm_comment
+        def broken(client, intent, *args):
+            if intent['key'] == 'note':
+                raise OSError('synthetic pending note read failure')
+            return confirm(client, intent, *args)
+        with mock.patch.object(LS, 'confirm_comment', broken):
+            self.assertEqual(self.drain(), 3)
+        self.assertEqual([r['key'] for r in self.receipts()], ['close'])
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+
+    def history_retry(self, mode, fault, empty_error=False, forbid_comments=False):
         # Legacy draft + full uses base-equivalent per-intent and state reads.
         draft = mode == 'base-equivalent'
         self.draft_file()
@@ -797,7 +842,7 @@ class TestIncrementalDrain(DrainCase):
         def unavailable(q, v):
             if 'query IntentComment(' in q and v['id'] == comment['id']:
                 if fault == 'error':
-                    raise OSError('synthetic historical read unavailable')
+                    raise OSError('' if empty_error else 'synthetic historical read unavailable')
                 return {'comments': {'nodes': [] if fault == 'absent' else
                                      [dict(comment, body='invalid')]}}
             return dispatch(q, v)
@@ -805,6 +850,8 @@ class TestIncrementalDrain(DrainCase):
             return self.drain(directory, full=mode != 'incremental', draft=draft)
         with mock.patch.object(self.fake, 'dispatch', unavailable):
             self.assertEqual(drain(), 3, self.stdout)
+        if forbid_comments:
+            self.assertEqual(self.writes('IntentCommentCreate'), [])
         self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
         self.assertEqual(self.writes('DrainState'), [])
         self.assertEqual([r['key'] for r in self.receipts(directory)], ['later'])
