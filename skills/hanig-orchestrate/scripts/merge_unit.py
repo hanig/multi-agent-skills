@@ -942,6 +942,23 @@ def _bounded_observation(command, *, timeout, **options):
                 processes[0].kill()
 
 
+FORGE_AUTH_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def _merge_child_env():
+    """The existing child filter, with only gh's named credentials restored.
+
+    No D5 environment protocol exists. Drop the D5 namespaces and the two
+    host-anchor declarations as defense in depth; never transfer authority.
+    This retains child_environment's published finite-filter limits.
+    """
+    env = CE.child_env()
+    env.update((name, os.environ[name]) for name in FORGE_AUTH_ENV if name in os.environ)
+    return {name: value for name, value in env.items()
+            if not name.startswith(("D5_", "HANIG_D5_"))
+            and name not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PID")}
+
+
 class _MergeBoundary:
     """One designated Popen; observations and response waits stay outside START."""
     _observation_timeout = 60
@@ -968,7 +985,7 @@ class _MergeBoundary:
         result = runner(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, timeout=timeout,
             env=(CE.child_env() if command[:2] == [sys.executable, SWARM]
-                 else {k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"}))
+                 else _merge_child_env()))
         if result.returncode not in allowed:
             raise Refusal("command exited {}: {}{}".format(
                 result.returncode, result.stdout, result.stderr))
@@ -993,9 +1010,17 @@ class _MergeBoundary:
 
     def start(self, operation):
         import d5_submission as DS
-        self.process = subprocess.Popen(self.cmd["merge"], stdin=subprocess.DEVNULL,
+        expected = ["gh", "pr", "merge", str(self.binding["pr"]), "--repo",
+                    self.host + "/" + self.repo_path, "--squash",
+                    "--match-head-commit", self.binding["head"]]
+        command = list(self.cmd["merge"])
+        tail = command[len(expected):]
+        if command[:len(expected)] != expected or (tail and (
+                len(tail) != 2 or tail[0] != "--subject" or not isinstance(tail[1], str))):
+            raise Refusal("D5 merge command is not designated")
+        self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            env={k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"})
+            shell=False, close_fds=True, env=_merge_child_env())
         return DS.Initiation.SUBMITTED
 
     def finish(self):
