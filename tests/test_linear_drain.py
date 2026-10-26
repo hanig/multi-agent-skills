@@ -592,9 +592,9 @@ class TestDrain(DrainCase):
         self.fake.mutation_failure = None
         self.fake.comments.pop(LS.comment_id('workspace', 'project', '1', 'old'))
         self.fake.mutations.clear()
-        self.assertEqual(self.drain(full=True), 3)
-        self.assertIn('uncovered history', self.stdout)
-        self.assertEqual(self.fake.mutations, [])
+        self.assertEqual(self.drain(full=True), 0, self.stdout)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual(len(self.writes('DrainState')), 1)
         self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
         self.assertEqual(self.writes('IntentCommentCreate'), [])
 
@@ -820,12 +820,14 @@ class TestDrainGuards(DrainCase):
         self.assertIn('no started state', self.stdout)
         self.assertEqual(self.writes('DrainState'), [])
 
-    def test_all_receipted_comment_read_failure_is_unknown(self):
+    def test_all_receipted_comment_read_failure_uses_local_state(self):
         intent = self.intent(); self.seed(intent); self.legacy(intent)
         self.fake.omit_listing = True
         self.fake.fail = 'query IntentComment('
-        self.assertEqual(self.drain(full=True), 3)
-        self.assertIn('receipt withheld', self.stdout)
+        before = (self.state / DC.RECEIPTS).read_bytes()
+        self.assertEqual(self.drain(full=True), 0, self.stdout)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'started')
+        self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
         self.assertEqual(self.writes('IntentCommentCreate'), [])
 
     def test_incomplete_listing_with_note_withholds_receipt(self):
@@ -870,6 +872,22 @@ class TestIncrementalDrain(DrainCase):
         self.fake.omit_listing = True
         return LS.comment_id('workspace', 'project', '1', old['key'])
 
+    def test_missing_receipted_note_does_not_block_start(self):
+        self.legacy(self.intent('old-note', 'note'))
+        self.intent('new-start')
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'started')
+        self.assertEqual({r['key'] for r in self.receipts()}, {'old-note', 'new-start'})
+        self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
+
+    def test_latest_pending_state_compares_by_key(self):
+        old = self.intent('old-start')
+        self.seed(old); self.legacy(old)
+        self.intent('new-close', 'close', at='2026-10-05T11:00:00Z')
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual({r['key'] for r in self.receipts()}, {'old-start', 'new-close'})
+
     def test_missing_receipted_close_read_failure_and_retry(self):
         cid = self.history_case()
         dispatch = self.fake.dispatch
@@ -877,40 +895,42 @@ class TestIncrementalDrain(DrainCase):
             if 'query IntentComment(' in q and v['id'] == cid:
                 raise OSError('historical read failed')
             return dispatch(q, v)
-        before = (self.state / DC.RECEIPTS).read_bytes()
         with mock.patch.object(self.fake, 'dispatch', broken):
-            self.assertEqual(self.drain(), 3, self.stdout)
-        self.assertEqual(self.fake.mutations, [])
-        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
-        self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
-        self.assertEqual(self.drain(), 0, self.stdout)
+            self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.writes('DrainState'), [])
         self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
         self.assertEqual({r['key'] for r in self.receipts()}, {'old-close', 'pending-note'})
         self.assertIn('pending-start: superseded by old-close', self.stdout)
-
-    def test_effect_uses_prepared_history_and_retry_stays_eligible(self):
-        cid = self.history_case()
-        dispatch = self.fake.dispatch
-        historical_reads = []
-        def later_fault(q, v):
-            if 'query IntentComments' in q or ('query IntentComment(' in q and v['id'] == cid):
-                historical_reads.append(q)
-                if self.fake.mutations:
-                    raise OSError('historical access after effects')
-            if 'query DrainIssue' in q and self.fake.mutations:
-                raise OSError('effect read-back unavailable')
-            return dispatch(q, v)
-        before = (self.state / DC.RECEIPTS).read_bytes()
-        with mock.patch.object(self.fake, 'dispatch', later_fault):
-            self.assertEqual(self.drain(), 3, self.stdout)
-        self.assertEqual(len(historical_reads), 2)  # one listing, one missing-ID fallback
-        self.assertEqual(len(self.writes('IntentCommentCreate')), 2)
-        self.assertEqual(self.writes('DrainState'), [])
-        self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
         self.assertEqual(self.drain(), 0, self.stdout)
         self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
-        self.assertEqual({r['key'] for r in self.receipts()}, {'old-close', 'pending-note'})
-        self.assertEqual(len(self.writes('IntentCommentCreate')), 2)
+
+    def test_effect_uses_prepared_history_and_retry_stays_eligible(self):
+        for full in (False, True):
+            with self.subTest(full=full):
+                self.state = self.root / ('effect-' + str(full))
+                self.fake.comments.clear(); self.fake.mutations.clear()
+                cid = self.history_case()
+                dispatch = self.fake.dispatch
+                historical_reads = []
+                def later_fault(q, v):
+                    if 'query IntentComments' in q or ('query IntentComment(' in q and v['id'] == cid):
+                        historical_reads.append(q)
+                        if self.fake.mutations:
+                            raise OSError('historical access after effects')
+                    if 'query DrainIssue' in q and self.fake.mutations:
+                        raise OSError('effect read-back unavailable')
+                    return dispatch(q, v)
+                before = (self.state / DC.RECEIPTS).read_bytes()
+                with mock.patch.object(self.fake, 'dispatch', later_fault):
+                    self.assertEqual(self.drain(full=full), 3, self.stdout)
+                self.assertEqual(len(historical_reads), 1)  # local intents need no history fallback
+                self.assertEqual(len(self.writes('IntentCommentCreate')), 2)
+                self.assertEqual(self.writes('DrainState'), [])
+                self.assertEqual((self.state / DC.RECEIPTS).read_bytes(), before)
+                self.assertEqual(self.drain(full=full), 0, self.stdout)
+                self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+                self.assertEqual({r['key'] for r in self.receipts()}, {'old-close', 'pending-note'})
+                self.assertEqual(len(self.writes('IntentCommentCreate')), 2)
 
     def test_no_second_historical_access_after_preparation(self):
         cid = self.history_case()
@@ -924,7 +944,7 @@ class TestIncrementalDrain(DrainCase):
             return dispatch(q, v)
         with mock.patch.object(self.fake, 'dispatch', once):
             self.assertEqual(self.drain(), 0, self.stdout)
-        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(seen), 1)
         self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
         self.assertEqual({r['key'] for r in self.receipts()}, {'old-close', 'pending-note'})
         self.assertEqual(self.drain(), 0, self.stdout)
@@ -937,19 +957,14 @@ class TestIncrementalDrain(DrainCase):
         for fault in ('absent', 'invalid', 'exception', 'unfinished', 'empty'):
             with self.subTest(fault=fault):
                 def broken(q, v):
-                    if 'query IntentComments' in q and fault in ('unfinished', 'empty'):
-                        if fault == 'empty':
-                            raise RuntimeError()
-                        return {'issue': {'comments': connection([], True, None)}}
-                    if 'query IntentComment(' in q and v['id'] == cid:
-                        if fault == 'exception':
-                            raise RuntimeError('read failed')
-                        if fault == 'absent':
-                            return {'comments': {'nodes': []}}
-                        if fault == 'invalid':
-                            c = copy.deepcopy(self.fake.comments[cid])
-                            c['body'] = 'edited'
-                            return {'comments': {'nodes': [c]}}
+                    if 'query IntentComments' in q:
+                        if fault in ('exception', 'empty'):
+                            raise RuntimeError('read failed' if fault == 'exception' else '')
+                        if fault == 'unfinished':
+                            return {'issue': {'comments': connection([], True, None)}}
+                        c = copy.deepcopy(self.fake.comments[cid])
+                        c['body'] = None if fault == 'absent' else 17
+                        return {'issue': {'comments': connection([c])}}
                     return dispatch(q, v)
                 with mock.patch.object(self.fake, 'dispatch', broken):
                     self.assertEqual(self.drain(), 3, self.stdout)
@@ -995,13 +1010,20 @@ class TestIncrementalDrain(DrainCase):
                 with self.subTest(full=full, order=order):
                     directory = self.root / ('isolation-%s-%s' % (full, order[0]))
                     for iid in order:
-                        self.intent('issue-' + iid, 'note', tracker='ARC-' + iid, directory=directory)
+                        self.intent('issue-' + iid, 'start', tracker='ARC-' + iid, directory=directory)
                     with mock.patch.object(self.fake, 'dispatch', broken):
                         for _ in range(2):
                             self.assertEqual(self.drain(directory, full=full), 3, self.stdout)
                             self.assertEqual([r['key'] for r in self.receipts(directory)], ['issue-1'])
                     self.assertFalse(any(c['issue']['id'] == '2' for c in self.fake.comments.values()))
-        self.assertTrue(any(c['issue']['id'] == '1' for c in self.fake.comments.values()))
+                    self.assertEqual({v['id'] for v in self.writes('DrainState')}, {'1'})
+                    self.assertEqual(self.fake.issues['2']['state']['type'], 'unstarted')
+                    self.assertEqual(self.drain(directory, full=full), 0, self.stdout)
+                    self.assertEqual({r['key'] for r in self.receipts(directory)}, {'issue-1', 'issue-2'})
+                    self.assertEqual({i['state']['type'] for i in self.fake.issues.values()}, {'started'})
+                    self.fake.comments.clear(); self.fake.mutations.clear()
+                    for issue in self.fake.issues.values():
+                        issue['state']['type'] = 'unstarted'
 
     def test_receipted_alias_is_included_in_pending_issue_history(self):
         cid = self.history_case()
@@ -1009,9 +1031,10 @@ class TestIncrementalDrain(DrainCase):
         entries[0]['tracker'] = '1'
         (self.state / DC.OUTBOX).write_text(''.join(json.dumps(e) + '\n' for e in entries))
         self.fake.comments.pop(cid)
-        self.assertEqual(self.drain(), 3, self.stdout)
-        self.assertEqual(self.fake.mutations, [])
-        self.assertEqual([r['key'] for r in self.receipts()], ['old-close'])
+        self.assertEqual(self.drain(), 0, self.stdout)
+        self.assertEqual(self.writes('DrainState'), [])
+        self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
+        self.assertEqual({r['key'] for r in self.receipts()}, {'old-close', 'pending-note'})
 
     def test_request_counts_independent_of_receipted_issues(self):
         counts = []

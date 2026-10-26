@@ -913,29 +913,38 @@ def prepare_issue(reader, workspace, project, issue, entries):
          'comments(first: 100, after: $after) { nodes { %s } %s } } }' % (COMMENT_FIELDS, PAGE))
     nodes = reader.pages_of(lambda after: reader.client.query(
         q, {'id': issue['id'], 'after': after})['issue']['comments'])
+    # Local op/order is authoritative even when a receipted comment vanished.
+    local = {e['intent']['key']: {'key': e['intent']['key'], 'op': e['intent']['verb'],
+                                 'order': e['order']} for e in entries}
+    history = []
+    for comment in nodes:
+        if (not isinstance(comment.get('body'), str) or
+                not isinstance(comment.get('issue'), dict) or
+                not isinstance(comment['issue'].get('id'), str) or not comment['issue']['id']):
+            raise ValueError('invalid comment in listing')
+        parsed = genuine_comment(comment, workspace, project, issue['id'])
+        if parsed and parsed['key'] not in local:
+            history.append(parsed)
+    planned = history + list(local.values())
     listed = {c['id']: c for c in nodes}
-    history = [parsed for c in nodes
-               for parsed in [genuine_comment(c, workspace, project, issue['id'])] if parsed]
     pending = []
     for entry in entries:
         intent = entry['intent']
         cid = comment_id(workspace, project, issue['id'], intent['key'])
         comment = listed.get(cid)
+        if comment is None and entry['receipted']:
+            history.append(local[intent['key']])
+            continue
         if comment is None:
             comment = read_comment(reader.client, cid)
         if comment is None:
-            if entry['receipted']:
-                raise ValueError('uncovered history: receipted comment missing')
             pending.append(entry)
             continue
         parsed = genuine_comment(comment, workspace, project, issue['id'])
         if not parsed or parsed['markers'] != intent_markers(intent):
             raise ValueError('listed comment disagrees or exact-ID markers disagree')
         entry['confirmed'] = parsed
-        if cid not in listed:
-            history.append(parsed)
-    planned = history + [{'key': e['intent']['key'], 'op': e['intent']['verb'], 'order': e['order'],
-                          'markers': intent_markers(e['intent'])} for e in pending]
+        history.append(local[intent['key']])
     return {'history': history, 'pending': pending, 'latest': latest_state(planned)}
 
 
@@ -947,7 +956,7 @@ def reconcile_issue(reader, workspace, project, team, issue, entries, dry_run, p
          'markers': intent_markers(e['intent'])}
         if dry_run else e['confirmed'] for e in prepared['pending']]
     latest = latest_state(comments)
-    if latest != prepared['latest']:
+    if (latest or {}).get('key') != (prepared['latest'] or {}).get('key'):
         raise ValueError('confirmed comments disagree with preparation')
     before = read_drain_issue(reader.client, issue['id'])
     if before['id'] != issue['id']:
