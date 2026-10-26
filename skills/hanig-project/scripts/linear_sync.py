@@ -851,15 +851,17 @@ def collect_intents(directories, contract, report):
             label = '%s line %d' % (directory, number)
             try:
                 intent = contract.normalize_intent(json.loads(line))
+                # Retain keys even if later validation rejects this line.
+                key = intent.get('key')
+                if isinstance(key, str):
+                    if key in keys:
+                        duplicate = 'outbox has duplicate idempotency key %r' % key
+                        break
+                    keys.add(key)
                 order = intent_order(intent.get('at'), intent.get('key'), intent.get('seq'))
                 problems = contract.validate_intent(intent)
                 if problems:
                     raise ValueError('; '.join(problems))
-                key = intent['envelope']['idempotency_key']
-                if key in keys:
-                    duplicate = 'outbox has duplicate idempotency key %r' % key
-                    break
-                keys.add(key)
                 label += ' key=' + intent['key']
                 if intent['verb'] == 'close':
                     evidence = intent.get('evidence')
