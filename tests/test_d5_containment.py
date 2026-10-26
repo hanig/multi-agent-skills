@@ -274,7 +274,7 @@ class TestGateGuards(unittest.TestCase):
 class TestMergeAdmission(unittest.TestCase):
     def test_production_merge_launch_is_not_admitted(self):
         import merge_unit as M
-        self.assertIs(M.DMA.merge_launch_admitted(), False)
+        self.assertIs(M.merge_launch_admitted(), False)
 
     def test_active_entries_refuse_before_any_effect_without_forced_admission(self):
         from tests.test_d5_registry import TestD5Registry

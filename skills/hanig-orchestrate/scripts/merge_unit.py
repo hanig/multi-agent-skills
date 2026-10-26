@@ -27,7 +27,6 @@ import time
 from urllib.parse import quote, urlsplit
 
 import skill_paths
-import d5_merge_admission as DMA
 
 _ORCHESTRATE_DIR = os.environ.get("HANIG_ORCHESTRATE_DIR") or Path(__file__).parents[1]
 _SWARM_DIR = skill_paths.sibling_skill_root(
@@ -54,8 +53,13 @@ def _d5_refuse(route):
         raise Refusal("D5 active: {} is outside the supported merge profile".format(route))
 
 
+def merge_launch_admitted():
+    """U4.9/U8 own admission after executable binding and integrity review."""
+    return False
+
+
 def _d5_merge_launch_entry():
-    if D5.d5_active() and not DMA.merge_launch_admitted():
+    if D5.d5_active() and not merge_launch_admitted():
         raise Refusal("D5 active: merge launch is not admitted; U4.9 must supply "
                       "an operator-authorized executable binding and enforce its "
                       "integrity boundary before U4.9/U8 admit merge launch")
