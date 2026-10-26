@@ -92,7 +92,7 @@ ADAPTERS: dict[str, dict[str, Any]] = {
              "override": "CODEX_HOME", "preferred": False},
         ],
         "duplicates": {"same_name": "unverified", "symlink_identity": "unverified",
-                       "consumed_by": ["codex", "opencode", "pi"]},
+                       "consumed_by": ["codex", "opencode", "pi", "cursor"]},
     },
     "opencode": {
         "identity": "OpenCode",
@@ -160,6 +160,41 @@ ADAPTERS: dict[str, dict[str, Any]] = {
         "duplicates": {"same_name": "later_source_wins", "symlink_identity": "canonical_path_deduplicated",
                        "consumed_by": ["pi"]},
     },
+    "cursor": {
+        "identity": "Cursor",
+        "executable": "cursor-agent",
+        "invocation": ["cursor-agent", "--version"],
+        "certifications": [],
+        "sources": ["https://www.cursor.com/docs/context/skills"],
+        "source_verification": {"release": "unverified", "root_policy": "documented",
+                                "native_discovery": "unverified", "invocation": "unverified"},
+        "roots": [
+            {"id": "cursor-user", "kind": "native", "base": "cursor", "suffix": "skills",
+             "override": None, "preferred": True},
+            {"id": "agents-user", "kind": "shared", "base": "agents", "suffix": "skills",
+             "override": None, "preferred": False},
+        ],
+        "duplicates": {"same_name": "unverified", "symlink_identity": "unverified",
+                       "consumed_by": ["cursor"]},
+    },
+    "grok": {
+        "identity": "Grok Build",
+        "executable": "grok",
+        "invocation": ["grok", "--version"],
+        "certifications": [],
+        "sources": ["https://docs.x.ai/build/features/skills-plugins-marketplaces"],
+        "source_verification": {"release": "unverified", "root_policy": "documented",
+                                "native_discovery": "unverified", "invocation": "unverified"},
+        # Doc versions disagree: these are evidence, never consumer edges or
+        # roots that can satisfy coverage instead of the native destination.
+        "unverified_consumption": ["~/.claude/skills", "~/.agents/skills"],
+        "roots": [
+            {"id": "grok-user", "kind": "native", "base": "grok", "suffix": "skills",
+             "override": None, "preferred": True},
+        ],
+        "duplicates": {"same_name": "unverified", "symlink_identity": "unverified",
+                       "consumed_by": ["grok"]},
+    },
 }
 
 # Compatibility summaries for callers; decisions below use the exact version's
@@ -168,7 +203,7 @@ for _adapter in ADAPTERS.values():
     _adapter["verified_versions"] = list(dict.fromkeys(
         record["version"] for record in _adapter["certifications"]))
     _adapter["verified_on"] = max(
-        record["verified_on"] for record in _adapter["certifications"])
+        (record["verified_on"] for record in _adapter["certifications"]), default=None)
 
 # Consumer edges include compatibility stores, not just an adapter's preferred
 # destination.  They let an installer show that two requested copies will be
@@ -176,12 +211,14 @@ for _adapter in ADAPTERS.values():
 CONSUMER_EDGES = {
     "claude-user": ("claude",),
     "opencode-claude-compatible": ("opencode",),
-    "agents-user": ("codex", "opencode", "pi"),
+    "agents-user": ("codex", "opencode", "pi", "cursor"),
     "codex-legacy": ("codex",),
     "opencode-user": ("opencode",),
     "opencode-home": ("opencode",),
     "opencode-config-dir": ("opencode",),
     "pi-user": ("pi",),
+    "cursor-user": ("cursor",),
+    "grok-user": ("grok",),
 }
 
 DISCOVERY_SCHEMA: dict[str, Any] = {
@@ -217,7 +254,9 @@ def adapters() -> dict[str, dict[str, Any]]:
 
 
 def probe_deadline(spec: Mapping[str, Any]) -> float:
-    """Deadline derived from the adapter's measured ``--version`` wall time."""
+    """Measured probe headroom, or the floor for an unmeasured adapter."""
+    if "probe_timing" not in spec:
+        return PROBE_DEADLINE_FLOOR_SECONDS
     observed = float(spec["probe_timing"]["observed_max_seconds"])
     return max(PROBE_DEADLINE_FLOOR_SECONDS,
                observed * PROBE_DEADLINE_HEADROOM)
@@ -230,16 +269,17 @@ def certification_for(spec: Mapping[str, Any], version: Optional[str]) -> Option
     return deepcopy(max(records, key=lambda record: record["verified_on"])) if records else None
 
 
-def verification_review_due(spec: Mapping[str, Any]) -> date:
+def verification_review_due(spec: Mapping[str, Any]) -> Optional[date]:
     """One record's deadline, or an adapter's earliest exact-version deadline.
 
     A newer observation supersedes older evidence only for the same version.
     An adapter still needs review when any distinct version's evidence expires.
+    An uncertified adapter has no deadline.
     """
     if "certifications" in spec:
         versions = {record["version"] for record in spec["certifications"]}
-        return min(verification_review_due(certification_for(spec, version))
-                   for version in versions)
+        return min((verification_review_due(certification_for(spec, version))
+                    for version in versions), default=None)
     verified = datetime.strptime(spec["verified_on"], "%Y-%m-%d").date()
     return verified + timedelta(days=VERIFICATION_MAX_AGE_DAYS)
 
@@ -248,7 +288,7 @@ def stale_adapter_certifications(as_of: Optional[date] = None) -> list[str]:
     """Adapter IDs with an expired exact version's newest retained evidence."""
     observed = as_of or date.today()
     return [name for name, spec in ADAPTERS.items()
-            if observed > verification_review_due(spec)]
+            if spec["certifications"] and observed > verification_review_due(spec)]
 
 
 def assess_certification(agent: str, version: Optional[str], verification: str,
@@ -305,6 +345,8 @@ def _base(agent: str, env: Mapping[str, str]) -> str:
         return _absolute(os.path.join(home, ".opencode"), env)
     if agent == "pi":
         return _absolute(env.get("PI_CODING_AGENT_DIR", os.path.join(home, ".pi", "agent")), env)
+    if agent in ("cursor", "grok"):
+        return _absolute(os.path.join(home, "." + agent), env)
     if agent == "agents":
         return _absolute(os.path.join(home, ".agents"), env)
     raise KeyError(agent)
@@ -548,6 +590,8 @@ def discover(
         executable = finder(spec["executable"])
         evidence: dict[str, Any] = {"config_directories": [
             {"path": path, "exists": os.path.isdir(path)} for path in config_bases]}
+        if spec.get("unverified_consumption"):
+            evidence["unverified_consumption"] = list(spec["unverified_consumption"])
         if executable:
             seconds = float(timeout) if timeout is not None else probe_deadline(spec)
             result = runner(executable, seconds)
@@ -568,6 +612,7 @@ def discover(
                 "output": output, "elapsed_seconds": elapsed,
                 "deadline_seconds": seconds,
                 "deadline_basis": ("caller override" if timeout is not None else
+                                   "unmeasured adapter; default floor" if "probe_timing" not in spec else
                                    "measured %s max %.3fs x %.1f headroom" % (
                                        spec["probe_timing"]["measured_on"],
                                        spec["probe_timing"]["observed_max_seconds"],
@@ -602,7 +647,9 @@ def discover(
             # Presence chooses a destination; verification says whether that
             # adapter version is certified. Conflating them made four present
             # agents look exactly like no agents at all.
-            "eligible_for_automatic_target": state in ("executable_found", "slow"),
+            "eligible_for_automatic_target": (state in ("executable_found", "slow")
+                                              or (key in ("cursor", "grok")
+                                                  and state == "configured")),
             "explicit_path_route": "select_target(report, agent_id) accepts this agent without a binary",
         }
     return {"schema_version": SCHEMA_VERSION, "agents": found_agents,
@@ -616,7 +663,8 @@ def select_targets(
     """Plan targets for all detected agents or an explicit offline/bootstrap set.
 
     An empty ``agents`` sequence means automatic mode: every reported executable
-    is selected, while its independent verification field remains visible. A non-empty
+    is selected when its probe succeeds or times out; Cursor and Grok also
+    qualify from a config directory alone. Verification remains separate. A non-empty
     sequence is explicit mode and therefore permits absent/configured agents.
     Direct destinations are de-duplicated by physical path.  Destination
     planning uses the adapter declaration order, not flag order, so the same
@@ -687,15 +735,18 @@ def select_targets(
         agent_warnings = []
         if record["verification"] != "verified" or assessment["certification_record"] is None:
             if mode == "automatic":
+                basis = ("configuration directory" if record["state"] == "configured"
+                         else "executable presence")
                 version = record.get("version") or "unknown version"
                 agent_warnings.append(
-                    f"{agent} {version} was selected from executable presence, but "
+                    f"{agent} {version} was selected from {basis}, but "
                     "this version is not adapter-certified; selection is not a "
                     "native-compatibility or invocation pass")
             else:
                 agent_warnings.append(
                     f"{agent} was selected explicitly with discovery state "
-                    f"{record['state']}; bootstrap destination planning proceeded, "
+                    f"{record['state']}; this version is not adapter-certified; "
+                    "bootstrap destination planning proceeded, "
                     "but presence, native compatibility, and invocation remain "
                     "unverified (skip is not pass)")
         if assessment["verification_freshness"] == "stale":
@@ -737,4 +788,4 @@ def select_target(report: Mapping[str, Any], agent_id: Optional[str] = None) -> 
     if len(direct) == 1:
         return direct[0]
     return {"status": "requires_explicit_target", "eligible_agents": [item["agent"] for item in direct],
-            "reason": "no executable found" if not direct else "multiple executables found"}
+            "reason": "no eligible agent found" if not direct else "multiple eligible agents found"}
