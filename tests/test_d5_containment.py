@@ -119,6 +119,14 @@ class TestEnumeratedRefusals(unittest.TestCase):
 
 
 class TestGateGuards(unittest.TestCase):
+    def test_dash_prefixed_git_directory_is_a_value_not_an_option(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(['git', '-C', '--output=probe.txt', 'status'],
+                cwd=tmp, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cannot change to '--output=probe.txt'", result.stderr)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
     def test_committee_provider_posts_and_real_writes_stay_gate_local(self):
         for command in ('open', 'ask', 'review', 'synthesize', 'tiebreak', 'show'):
             with self.subTest(command=command):
