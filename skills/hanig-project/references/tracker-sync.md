@@ -55,27 +55,11 @@ and source. <!-- declaration: tracker.attestation -->
 Unit state remains authoritative when tracker access fails. A tracker outage
 must never mutate swarm state. <!-- declaration: drain.authority -->
 
-Run `linear_sync.py drain --binding .hanig/linear-binding.json --state-dir DIR` (repeat `--state-dir` for other waves), then `audit`. Draft mode uses `--draft tickets.json`, requires the exact envelope project slug, refuses nameless `swarm`, and requires any tracker identifier to agree exactly. Both modes check issue project and team before mutation. <!-- declaration: outbox.receipt -->
+Run `linear_sync.py drain --binding .hanig/linear-binding.json --state-dir DIR` (repeat `--state-dir` for other waves), then `audit`. Draft mode uses `--draft tickets.json`, requires the exact envelope project slug, refuses nameless `swarm`, and requires any tracker identifier to agree exactly. Both modes check issue project and team before mutation. Drain is incremental by default: after merges it selects only issues with an unreceipted, non-errored entry. Receipted-only issues incur no issue requests. Run `drain --full` about once a day to repair drift on them. It selects every issue and retains healthy-path reconciliation with an intentional fail-closed correction. Binding audit detection is unchanged. <!-- declaration: outbox.receipt -->
 
-Comments carry reason, unit state, attempt, evidence digest and intent/evidence/order markers. IDs are derived from workspace, project, issue and key. State reconciliation reads every comment page, ignores copied non-derived IDs, and includes comments confirmed by id in this run despite listing lag. One host locks the project; two hosts are an accepted eventual-reconciliation boundary. Intents sort by instant, then legacy before sequenced, then sequence and key; the latest state intent wins in one state write and earlier intents are superseded. New intents receive a positive sequence one greater than the outbox maximum under the coordinator lease; legacy records remain unchanged. Sequences are local to one state directory; across directories at the same instant, sequence ties still fall back to key, not global emission order. <!-- declaration: outbox.receipt -->
+Comments carry reason, unit state, attempt, evidence digest and intent/evidence/order markers. IDs are derived from workspace, project, issue and key. State reconciliation reads every comment page, ignores copied non-derived IDs, and includes comments confirmed by id in this run despite listing lag. One host locks the project; two hosts are an accepted eventual-reconciliation boundary. Intents sort by instant, then legacy before sequenced, then sequence and key; the latest state intent wins in one state write and earlier intents are superseded. New intents receive a positive sequence one greater than the outbox maximum under the coordinator lease; legacy records remain unchanged. Sequences are local to one state directory; across directories at the same instant, sequence ties still fall back to key, not global emission order. Before effects, prepare all locally collected intents plus a complete comment listing for intents not known locally. Missing receipted notes and states need no exact-ID read: their op and order are local. Validate listed known comments; exact-ID reads cover pending comments omitted from the listing. An invalid comment, incomplete page or listing exception (even an empty-message exception) withholds all effects and receipts on that issue; siblings proceed independently. Create planned comments and confirm them, then reconcile from prepared history without re-listing it. State mutations require read-back; any effect failure withholds the issue's receipts for retry. <!-- declaration: outbox.receipt -->
 
 Receipts record read-back at a time, not present synchronization. Already-receipted intents receive no new comment or receipt and are authoritative local history even when their comments are missing. Incomplete reads or failed reconciliation return 3 for selected issues. Missing receipt state means unacknowledged, never that no filing occurred. Drain exits are 0 when only superseded intents remain, 3 for other pending intents or failed reconciliation, and 2 for configuration/key/lock errors. Dry-run performs no mutation or receipt write and retains the same pending-intent exit convention. <!-- declaration: outbox.receipt -->
-
-Drain is incremental by default: after merges it selects only issues with an
-unreceipted, non-errored entry. Receipted-only issues incur no issue requests.
-Run `drain --full` about once a day to repair drift on them. It selects every
-issue and retains healthy-path reconciliation with an intentional fail-closed
-correction. Binding audit detection is unchanged. <!-- declaration: outbox.receipt -->
-
-Before effects, prepare all locally collected intents plus a complete comment
-listing for intents not known locally. Missing receipted notes and states need
-no exact-ID read: their op and order are local. Validate listed known comments;
-exact-ID reads cover pending comments omitted from the listing. An invalid
-comment, incomplete page or listing exception (even an empty-message exception)
-withholds all effects and receipts on that issue; siblings proceed independently.
-Create planned comments and confirm them, then reconcile from prepared history
-without re-listing it. State mutations require read-back; any effect failure
-withholds the issue's receipts for retry. <!-- declaration: outbox.receipt -->
 
 ## Read-only audit <!-- declaration: tracker.check -->
 
