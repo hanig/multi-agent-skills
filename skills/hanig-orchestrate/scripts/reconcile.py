@@ -2,8 +2,11 @@
 """Read-only comparison of merged PRs, merge journals and tracker obligations.
 
 An observation, not a merge gate: same-credential bypass remains possible.
-Only coordinator-held launch anchors bind sources; merge journals are audit
-records, never authority. Unbound or unreadable state cannot certify clean.
+Only coordinator-held launch anchors bind sources. Intent journals are not
+successful-completion authority: their labels describe requests and no-replay
+state. A D5-bound receipt validated on durable readback is authority for the
+admitted merge; legacy booleans confer no D5 authority. This audit reads intents,
+not that completion contract. Unbound or unreadable state cannot certify clean.
 """
 
 import argparse

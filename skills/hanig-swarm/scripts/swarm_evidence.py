@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import coordinator_paths as CP
+import d5_activation as D5
 import swarm_journal as SJ
 import swarm_state as SS
 import unit as U
@@ -739,7 +740,13 @@ def admit_merge(state_dir, unit, produced, expect_repo=None, repo=None,
     `produced` is the commit this coordinator judged the attempt to have
     produced. An attestation that pins a different head is refused: that is
     the whole binding, and without it any attester closes any unit.
+
+    Active D5 admits only the operator's synchronous merge receipt readback.
+    Coordinator closure consumption remains outside that restricted profile;
+    neither a legacy attestation nor a D5 receipt enables DONE here.
     """
+    if D5.d5_active():
+        raise OutboxError("D5 active: merge receipt consumption is outside the supported merge profile")
     if not produced:
         return None, ("this attempt has no produced commit, so there is "
                       "nothing a merge could be bound to. A unit reaches "
