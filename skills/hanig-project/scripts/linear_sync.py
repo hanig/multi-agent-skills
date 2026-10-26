@@ -1052,18 +1052,15 @@ def drain_locked(args, reader, config, workspace, project, team, contract):
                 if confirmed:
                     entry['confirmed'] = confirmed
                 elif entry['receipted']:
-                    say('%s: uncovered history (comment missing); reconciling from existing comments' % issue['identifier'])
+                    raise ValueError('%s: uncovered history (comment missing)' % issue['identifier'])
                 elif args.dry_run:
                     say('would post comment for ' + entry['label'])
             except Exception as exc:
-                if entry['receipted']:
-                    if isinstance(exc, ValueError):
-                        say('%s: uncovered history (%s); reconciling from existing comments' % (issue['identifier'], exc))
-                    else:
-                        fail(entry['label'] + ': comment read UNKNOWN: ' + str(exc))
-                else:
-                    entry['error'] = str(exc)
-                    fail(entry['label'] + ': ' + str(exc))
+                entry['error'] = str(exc)
+                fail(entry['label'] + ': comment read UNKNOWN: ' + str(exc))
+        # Incomplete history cannot authorize any state change or receipt.
+        if any(e.get('error') for e in group):
+            continue
         try:
             latest, after = reconcile_issue(reader, workspace, project, team, issue, group, args.dry_run, listed)
             say('%s: %s%s' % (issue['identifier'], 'would reconcile to ' if args.dry_run else 'reconciled to ',
