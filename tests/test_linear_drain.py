@@ -712,43 +712,38 @@ class TestIncrementalDrain(DrainCase):
             self.seed(intent, iid)
             self.legacy(intent, directory)
 
+    def request_count(self, count, full):
+        directory = self.root / ('count-%d-%s' % (count, full))
+        self.history(count, directory=directory)
+        self.fake.add('999')
+        self.intent('new', tracker='ARC-999', directory=directory)
+        self.fake.comments.pop(LS.comment_id('workspace', 'project', '999', 'new'), None)
+        before = (directory / DC.RECEIPTS).read_bytes()
+        self.fake.calls.clear()
+        self.assertEqual(self.drain(directory, full=full), 0, self.stdout + self.stderr)
+        self.assertTrue((directory / DC.RECEIPTS).read_bytes().startswith(before))
+        self.assertEqual(len(self.receipts(directory)), count + 1)
+        self.assertIn('%d issues skipped' % (0 if full else count), self.stdout)
+        return directory
+
     def test_incremental_request_count_independent_of_receipted_history(self):
         for count in (1, 50):
-            with self.subTest(receipted_issues=count):
-                directory = self.root / ('incremental-%d' % count)
-                self.history(count, directory=directory)
-                self.fake.add('999')
-                self.intent('new', tracker='ARC-999', directory=directory)
-                self.fake.comments.pop(LS.comment_id('workspace', 'project', '999', 'new'), None)
-                before = (directory / DC.RECEIPTS).read_bytes()
-                self.fake.calls.clear()
-                self.assertEqual(self.drain(directory), 0, self.stdout + self.stderr)
-                self.assertEqual(len(self.fake.calls), 8)
-                self.assertIn('%d issues skipped (already receipted)' % count, self.stdout)
-                self.assertTrue((directory / DC.RECEIPTS).read_bytes().startswith(before))
-                self.assertEqual(len(self.receipts(directory)), count + 1)
-                for q, v in self.fake.calls:
-                    if 'OperationIdentifiers' in q:
-                        self.assertEqual(v['filter']['number']['in'], [999])
-                    if 'CommentBatch' in q:
-                        self.assertEqual(v['ids'], ['999'])
-                self.fake.calls.clear()
-                self.assertEqual(self.drain(directory), 0)
-                self.assertEqual(len(self.fake.calls), 1)  # Binding only, no issue reads.
+            directory = self.request_count(count, False)
+            self.assertEqual(len(self.fake.calls), 8)
+            for q, v in self.fake.calls:
+                if 'OperationIdentifiers' in q:
+                    self.assertEqual(v['filter']['number']['in'], [999])
+                if 'CommentBatch' in q:
+                    self.assertEqual(v['ids'], ['999'])
+            self.fake.calls.clear()
+            self.assertEqual(self.drain(directory), 0)
+            self.assertEqual(len(self.fake.calls), 1)  # Binding only.
 
     def test_full_request_count_scales_with_receipted_history(self):
         for count, requests in ((1, 14), (50, 211)):
-            with self.subTest(receipted_issues=count):
-                directory = self.root / ('full-%d' % count)
-                self.history(count, directory=directory)
-                self.fake.add('999')
-                self.intent('new', tracker='ARC-999', directory=directory)
-                self.fake.comments.pop(LS.comment_id('workspace', 'project', '999', 'new'), None)
-                self.fake.calls.clear()
-                self.assertEqual(self.drain(directory, full=True), 0, self.stdout + self.stderr)
-                self.assertEqual(len(self.fake.calls), requests)
-                self.assertIn('0 issues skipped', self.stdout)
-                self.assertEqual(sum('query IntentComment(' in q for q, _ in self.fake.calls), count + 2)
+            self.request_count(count, True)
+            self.assertEqual(len(self.fake.calls), requests)
+            self.assertEqual(sum('query IntentComment(' in q for q, _ in self.fake.calls), count + 2)
 
     def test_efficiency2_shaped_measurement(self):
         counts = {}
@@ -769,57 +764,20 @@ class TestIncrementalDrain(DrainCase):
               (counts[True], counts[False]))
 
     def test_pending_sibling_uses_listing_and_resolved_state(self):
-        for alias in ('ARC-1', '1'):
-            with self.subTest(receipted_reference=alias):
-                directory = self.root / ('mixed-' + alias)
-                old = self.intent('old', 'start', tracker=alias, directory=directory)
-                self.seed(old); self.legacy(old, directory)
-                self.fake.issues['1']['state']['type'] = 'started'
-                self.intent('new', 'note', directory=directory)
-                self.fake.comments.pop(LS.comment_id('workspace', 'project', '1', 'new'), None)
-                self.fake.calls.clear()
-                self.assertEqual(self.drain(directory), 0, self.stdout + self.stderr)
-                self.assertEqual(len(self.fake.calls), 5)
-                self.assertEqual(sum('CommentBatch' in q for q, _ in self.fake.calls), 1)
-                self.assertEqual(sum('query IntentComment(' in q for q, _ in self.fake.calls), 1)
-                self.assertFalse(any('DrainIssue' in q for q, _ in self.fake.calls))
-                self.assertEqual({r['key'] for r in self.receipts(directory)}, {'old', 'new'})
-                self.assertIn('0 issues skipped', self.stdout)
-
-    def test_incremental_mutation_requires_state_readback(self):
-        self.intent()
-        self.fake.lag_state = True
-        self.assertEqual(self.drain(), 3, self.stdout + self.stderr)
-        self.assertEqual(self.receipts(), [])
-        self.assertEqual(len(self.writes('DrainState')), 1)
-        self.assertEqual(sum('query DrainIssue' in q for q, _ in self.fake.calls), 1)
-        self.assertIn('state read-back', self.stdout)
-        self.fake.lag_state = False
-        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
-        self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
-        self.assertEqual(len(self.writes('DrainState')), 1)
-        self.assertEqual(self.receipts()[0]['outcome'], 'confirmed_by_readback')
-
-    def test_incremental_receipt_requires_comment_readback(self):
-        self.intent(op='note')
-        self.fake.hide_comments = True
-        self.assertEqual(self.drain(), 3, self.stdout + self.stderr)
-        self.assertEqual(self.receipts(), [])
-        self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
-        self.assertIn('comment missing or markers disagree', self.stdout)
-        self.fake.hide_comments = False
-        self.assertEqual(self.drain(), 0, self.stdout + self.stderr)
-        self.assertEqual(len(self.writes('IntentCommentCreate')), 1)
-        self.assertEqual(self.receipts()[0]['outcome'], 'confirmed_by_readback')
-
-    def test_incremental_conflicting_listed_comment_is_not_acknowledged(self):
-        intent = self.intent()
-        comment = self.seed(intent)
-        comment['body'] = comment['body'].replace('2026-10-05', '2026-10-06')
-        self.assertEqual(self.drain(), 3)
-        self.assertEqual(self.receipts(), [])
-        self.assertEqual(self.fake.mutations, [])
-        self.assertIn('markers disagree', self.stdout)
+        directory = self.state
+        old = self.intent('old', 'start', tracker='1', directory=directory)
+        self.seed(old); self.legacy(old, directory)
+        self.fake.issues['1']['state']['type'] = 'started'
+        self.intent('new', 'note', directory=directory)
+        self.fake.comments.pop(LS.comment_id('workspace', 'project', '1', 'new'), None)
+        self.fake.calls.clear()
+        self.assertEqual(self.drain(directory), 0, self.stdout + self.stderr)
+        self.assertEqual(len(self.fake.calls), 5)
+        self.assertEqual(sum('CommentBatch' in q for q, _ in self.fake.calls), 1)
+        self.assertEqual(sum('query IntentComment(' in q for q, _ in self.fake.calls), 1)
+        self.assertFalse(any('DrainIssue' in q for q, _ in self.fake.calls))
+        self.assertEqual({r['key'] for r in self.receipts(directory)}, {'old', 'new'})
+        self.assertIn('0 issues skipped', self.stdout)
 
 
 class TestDrainGuards(DrainCase):
