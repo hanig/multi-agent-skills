@@ -45,7 +45,7 @@ def inactive_script_capture(script=None):
                         calls=c.calls(), receipts=c.receipts(),
                         changed=sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k)))
         for receipt in captured['receipts']:
-            datetime.fromisoformat(receipt['at'])
+            datetime.strptime(receipt['at'], '%Y-%m-%dT%H:%M:%S%z')
             c.assertIsInstance(receipt['by'], str)
             c.assertTrue(receipt['by'])
             receipt.update(at='<time>', by='<operator>')
