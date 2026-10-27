@@ -176,7 +176,9 @@ class TestActivationCopies(unittest.TestCase):
                     result = subprocess.run([sys.executable, '-I', '-S', '-B',
                         str(gate / 'scripts' / (program + '.py'))] + argv,
                         input='{}', capture_output=True, text=True, timeout=30, cwd=tmp,
-                        env={'PATH': '', 'XDG_STATE_HOME': str(Path(tmp) / 'state')})
+                        env={'PATH': '', 'XDG_STATE_HOME': str(Path(tmp) / 'state'),
+                             'OPENAI_API_KEY': 'synthetic', 'OPENROUTER_API_KEY': 'synthetic',
+                             'ANTHROPIC_API_KEY': 'synthetic'})
                     output = result.stdout + result.stderr
                     if state == 'missing':
                         self.assertIn('D5 activation unavailable', output)
