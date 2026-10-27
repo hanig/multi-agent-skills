@@ -168,12 +168,12 @@ ORCHESTRATE_DECLARATIONS = (
     "tracker.reconcile",
     "tracker.drain",
     "tracker.dag",
-    "report.timezone",
     "report.three-parts",
     "handoff.contents",
     "handoff.transfer",
     "takeover.verify",
     "limit.session-liveness",
+    "report.timezone",
 )
 
 PROJECT_DECLARATIONS = (
