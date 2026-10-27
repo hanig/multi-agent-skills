@@ -46,6 +46,7 @@ class TestMergeProvider(unittest.TestCase):
         self.c.setUp()
         self.addCleanup(self.c.doCleanups)
         self.stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+        self.stack.enter_context(mock.patch.object(M, 'merge_launch_admitted', return_value=True))
         self.binding = dict(unit='u', attempt='a', head='a' * 40,
             repo='https://github.com/example/project', target='main', pr=7)
         self.scope = dict(plans=['p'], repositories=[self.binding['repo']], actions=['merge'], trackers=[])
@@ -591,6 +592,7 @@ class TestOperator(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(mock.patch.dict(os.environ, c.env))
             stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+            stack.enter_context(mock.patch.object(M, 'merge_launch_admitted', return_value=True))
             stack.enter_context(mock.patch.object(t.registry.CP, '_external_base', return_value=c.directory / 'external'))
             stack.enter_context(mock.patch.object(t.host, 'session_anchor', return_value=('native', t.ANCHOR)))
             stack.enter_context(mock.patch.object(t.admission.time, 'time', return_value=150))
