@@ -3,8 +3,7 @@
 
 All remote requests use linear_api.transport through Client. Local input bytes
 are captured once; no draft, state or receipt is rewritten by the audit.
-While D5 is active, audit is stdout-only: every --out value is refused
-before effects with "D5 active: audit --out is refused; use stdout".
+OD5b terminal SPLIT: while D5 is active, audit is refused pending U4.9.
 """
 import argparse
 from contextlib import contextmanager
@@ -1265,8 +1264,8 @@ def _d5_entry(args):
         return
     if args.command not in ('audit', 'section'):
         raise ValueError('D5 active: linear_sync ' + args.command + ' is refused before first effect')
-    if args.command == 'audit' and args.out is not None:
-        raise ValueError('D5 active: audit --out is refused; use stdout')
+    if args.command == 'audit':
+        raise ValueError('D5 active: audit is refused pending U4.9')
 
 
 if __name__ == '__main__':
