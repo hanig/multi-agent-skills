@@ -577,7 +577,12 @@ python3 "$HANIG_PROJECT_DIR/scripts/linear_sync.py" audit \
 ```
 
 Drain is incremental by default: run it after merges. Fully receipted issues
-incur no issue requests. Run `drain --full` daily to repair drift on those issues.
+incur no issue requests. Incremental drains also skip superseded state intents
+once a later state intent on the same issue is receipted: the reference spelling
+and state directory must match, and both outbox line and intent order must advance.
+Run `drain --full` daily to repair drift and any superseded-intent comment the skip
+left missing. Receipts written before PR 306 confirmed comments per intent, so
+one could be missing.
 It preserves full selection and healthy-path reconciliation, with an intentional
 fail-closed correction: prepare local intents plus a complete comment listing
 before effects. Missing or edited receipted comments do not block. Only structural listing

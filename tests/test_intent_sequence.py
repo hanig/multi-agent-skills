@@ -53,6 +53,12 @@ class TestSequenceDrain(DrainCase):
                 self.assertEqual(self.checks['intent_order'], 'DRIFT')
                 self.assertEqual(self.drain(directory), 0, self.stdout + self.stderr)
                 self.assertEqual(len(self.writes('IntentCommentCreate')), 2)
+                self.assertEqual(self.fake.issues['1']['state']['type'], 'started')
+                self.assertIn('0 acknowledged, 0 superseded, 0 failures, 1 issues skipped',
+                              self.stdout)
+                self.assertEqual(self.drain(directory, full=True), 0,
+                                 self.stdout + self.stderr)
+                self.assertEqual(len(self.writes('IntentCommentCreate')), 2)
                 self.assertEqual(self.fake.issues['1']['state']['type'], 'completed')
 
     def test_legacy_first_at_same_instant(self):
