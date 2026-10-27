@@ -1626,8 +1626,7 @@ def main():
     c.set_defaults(fn=cmd_check)
 
     args = ap.parse_args()
-    if D5.d5_active(): sys.exit("D5 active: unit " + args.cmd + " is refused before first effect")
-    sys.exit(args.fn(args))
+    sys.exit(f"D5 active: unit {args.cmd} is refused before first effect" if D5.d5_active() else args.fn(args))
 
 
 if __name__ == "__main__":
