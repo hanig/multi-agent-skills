@@ -416,15 +416,16 @@ class TestLinearObservations(unittest.TestCase):
             if module.__name__ == '_linear_d5_activation':
                 module.d5_active = lambda: True
         before = sentinel.read_bytes()
+        # Produce the section fixture under the unchanged inactive contract.
+        self.assertEqual(case.cli('audit', '--binding', str(case.binding)), 0)
+        self.assertTrue(case.fake.calls)
+        self.assertTrue(all(q.lstrip().startswith('query') for q, _ in case.fake.calls))
+        self.assertEqual(case.stderr, '')
+        self.assertFalse(case.out.exists())
+        case.out.write_text(case.stdout)
+        captured = case.out.read_bytes()
+        count = len(case.fake.calls)
         with mock.patch.object(importlib.machinery.SourceFileLoader, 'exec_module', active):
-            self.assertEqual(case.cli('audit', '--binding', str(case.binding)), 0)
-            self.assertTrue(case.fake.calls)
-            self.assertTrue(all(q.lstrip().startswith('query') for q, _ in case.fake.calls))
-            self.assertEqual(case.stderr, '')
-            self.assertFalse(case.out.exists())
-            case.out.write_text(case.stdout)
-            captured = case.out.read_bytes()
-            count = len(case.fake.calls)
             self.assertEqual(case.cli('section', '--audit', str(case.out), '--binding', str(case.binding)), 0)
             self.assertEqual(json.loads(case.out.read_text())['verdict'], 'CLEAN')
             self.assertIn('Linear consistent', case.stdout)
@@ -434,7 +435,7 @@ class TestLinearObservations(unittest.TestCase):
 
 
 class TestFinalReviewAuditRegressions(unittest.TestCase):
-    """OD5b: all output paths refuse; stdout and section remain observations."""
+    """OD5b terminal SPLIT: audit refuses; section remains a pure reader."""
 
     def setUp(self):
         from tests.test_linear_audit import AuditCase, LS
@@ -475,7 +476,7 @@ class TestFinalReviewAuditRegressions(unittest.TestCase):
             rc = case.cli('audit', '--binding', str(case.binding), '--out', value)
             self.assertNotEqual(rc, 0, case.stdout)
             self.assertEqual(case.stdout, '')
-            self.assertIn('audit --out is refused; use stdout', case.stderr)
+            self.assertIn('audit is refused pending U4.9', case.stderr)
             self.assertEqual(effects, ([], []))
             key.assert_not_called()
             sources.assert_not_called()
@@ -501,12 +502,13 @@ class TestFinalReviewAuditRegressions(unittest.TestCase):
                 self.assert_out_refused(str(target))
                 self.assertEqual(unrelated.read_bytes(), before)
                 self.assertFalse(target.exists())
-                # With no output path the admitted observation still succeeds.
+                # The terminal SPLIT also refuses an audit with no output path.
                 with self.active(), no_effects() as effects:
-                    self.assertEqual(case.cli('audit', '--binding', str(case.binding)), 0)
+                    self.assertNotEqual(case.cli('audit', '--binding', str(case.binding)), 0)
                     self.assertEqual(effects, ([], []))
-                self.assertEqual(case.stderr, '')
-                self.assertEqual(json.loads(case.stdout)['verdict'], 'CLEAN')
+                self.assertIn('audit is refused pending U4.9', case.stderr)
+                self.assertEqual(case.stdout, '')
+                self.assertEqual(case.fake.calls, [])
 
     def test_audit_output_cannot_overwrite_another_operation_root(self):
         case = self.case
@@ -539,6 +541,7 @@ class TestFinalReviewAuditRegressions(unittest.TestCase):
 
     def test_fresh_cli_refuses_before_import_bytecode_writes(self):
         # Final-review counterexample: deliberately do not pass -B to the child.
+        self.maxDiff = None
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in ('hanig-project', 'hanig-swarm'):
@@ -557,6 +560,7 @@ def load(loader,module):
 importlib.machinery.SourceFileLoader.exec_module=load
 sys.argv=sys.argv[1:]
 sys.path.insert(0,str(Path(sys.argv[0]).parent))
+print(repr(sys.pycache_prefix),file=sys.stderr)
 runpy.run_path(sys.argv[0],run_name='__main__')
 """
             self.assertEqual(list(root.rglob('*.pyc')), [])
@@ -567,64 +571,40 @@ runpy.run_path(sys.argv[0],run_name='__main__')
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('D5 active: audit', result.stderr)
             self.assertEqual(result.stdout, '')
-            self.assertEqual(sorted(str(p.relative_to(root)) for p in root.rglob('*.pyc')),
-                             [], 'pre-refusal bytecode writes')
+            prefix = ast.literal_eval(result.stderr.splitlines()[0])
+            unexpected = []
+            with mock.patch.object(sys, 'pycache_prefix', prefix):
+                for cache in root.rglob('*.pyc'):
+                    relative = cache.relative_to(root)
+                    try:
+                        source = Path(importlib.util.source_from_cache(str(cache)))
+                        # Relative components match adjacent and mirrored caches,
+                        # including /tmp versus /private/tmp spellings.
+                        local = any(source.parts[i:i + 2] == ('skills', name)
+                                    for name in ('hanig-project', 'hanig-swarm')
+                                    for i in range(len(source.parts) - 1))
+                        external = source.is_file() and not local
+                    except (ValueError, OSError):
+                        external = False
+                    if relative.parts[0] == 'skills' or not external:
+                        unexpected.append(str(relative))
+            self.assertEqual(sorted(unexpected), [], 'pre-refusal skill bytecode or unclassifiable cache')
 
-    def test_merge_audit_captures_stdout_for_pure_section_and_cleans_up(self):
+    def test_merge_audit_refuses_without_child_or_temporary_directory(self):
         import merge_unit as M
-        case = self.case
-        directory = case.root / '.hanig'
-        directory.mkdir()
-        case.binding.rename(directory / 'linear-binding.json')
-        case.binding = directory / 'linear-binding.json'
-        args = mock.Mock(plan=str(case.plan), state_dir=str(case.state))
-        for failure in (None, 1, 2, 3, 'timeout', 'section'):
-            with self.subTest(failure=failure), self.active():
-                paths, commands, captures, temporary = [], [], [], []
-                make_temp = tempfile.TemporaryDirectory
-                def private_temp(**kwargs):
-                    tmp = make_temp(**kwargs)
-                    temporary.append(Path(tmp.name))
-                    return tmp
-                def child(command, **kwargs):
-                    self.assertEqual(Path(command[1]).name, 'linear_sync.py')
-                    self.assertNotIn('--out', command)
-                    commands.append(command[2])
-                    if command[2] == 'audit' and failure == 'timeout':
-                        raise subprocess.TimeoutExpired(command, 300)
-                    if command[2] == 'audit' and isinstance(failure, int):
-                        return subprocess.CompletedProcess(command, failure, '', 'refused')
-                    if command[2] == 'section':
-                        path = Path(command[command.index('--audit') + 1])
-                        self.assertEqual(path.parent, temporary[-1])
-                        self.assertTrue(path.is_file())
-                        self.assertEqual(path.read_text(), captures[-1])
-                        paths.append(path)
-                        before = path.read_bytes()
-                    with no_effects() as effects:
-                        rc = case.cli(*command[2:])
-                        self.assertEqual(effects, ([], []))
-                    if command[2] == 'audit':
-                        captures.append(case.stdout)
-                    else:
-                        self.assertEqual(path.read_bytes(), before)
-                        if failure == 'section':
-                            rc = 2
-                    return subprocess.CompletedProcess(command, rc, case.stdout, case.stderr)
-                output = io.StringIO()
-                with mock.patch.object(M.D5, 'd5_active', return_value=True), \
-                        mock.patch.object(M.tempfile, 'TemporaryDirectory', private_temp), \
-                        mock.patch.object(M.subprocess, 'run', child), redirect_stdout(output):
-                    self.assertIsNone(M.print_tracker_audit(args))
-                self.assertTrue(temporary)
-                self.assertTrue(all(not p.exists() for p in temporary + paths))
-                if failure is None:
-                    self.assertEqual(commands, ['audit', 'section'])
-                    self.assertIn('Linear consistent', output.getvalue())
-                    self.assertNotIn('"schema_version"', output.getvalue())
-                else:
-                    self.assertIn('Tracker: UNAVAILABLE', output.getvalue())
-                    self.assertNotIn('Linear consistent', output.getvalue())
+        output = io.StringIO()
+        with mock.patch.object(M.D5, 'd5_active', return_value=True), \
+                mock.patch.object(M.tempfile, 'TemporaryDirectory',
+                    side_effect=AssertionError('temporary directory')) as temporary, \
+                mock.patch.object(M.subprocess, 'run',
+                    side_effect=AssertionError('audit child')) as child, \
+                no_effects() as effects, redirect_stdout(output):
+            self.assertIsNone(M.print_tracker_audit(mock.Mock()))
+            temporary.assert_not_called()
+            child.assert_not_called()
+            self.assertEqual(effects, ([], []))
+        self.assertIn('Tracker: UNAVAILABLE', output.getvalue())
+        self.assertNotIn('Linear consistent', output.getvalue())
 
 
 
