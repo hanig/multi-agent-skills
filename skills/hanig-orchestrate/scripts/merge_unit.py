@@ -53,13 +53,26 @@ def _d5_refuse(route):
         raise Refusal("D5 active: {} is outside the supported merge profile".format(route))
 
 
+def merge_launch_admitted():
+    """U8 owns admission after executable binding and integrity review."""
+    return False
+
+
+def _d5_merge_launch_entry():
+    if D5.d5_active() and not merge_launch_admitted():
+        raise Refusal("D5 active: merge launch is not admitted; U7 must supply "
+                      "an operator-authorized executable binding and enforce its "
+                      "integrity boundary before U8 admits merge launch")
+
+
 def _d5_merge_entry(args):
     """Select the first active profile without entering legacy preparation.
 
-    U4.3 owns its authority binding and in-process receipt recording. Until
-    that binding exists, even the supported synchronous merge must stop here.
+    U4.3 owns authority binding and in-process receipt recording. U8
+    must separately admit merge launch after executable binding review.
     There is deliberately no legacy fallback or runtime opt-out.
     """
+    _d5_merge_launch_entry()
     if D5.d5_active():
         if (args.verify_integration or args.abandon_intent
                 or args.retrieve_remote_evidence or args.remote_recovery_attestation):
@@ -960,6 +973,23 @@ def _bounded_observation(command, *, timeout, **options):
                 processes[0].kill()
 
 
+FORGE_AUTH_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def _merge_child_env():
+    """The existing child filter, with only gh's named credentials restored.
+
+    No D5 environment protocol exists. Drop the D5 namespaces and the two
+    host-anchor declarations as defense in depth; never transfer authority.
+    This retains child_environment's published finite-filter limits.
+    """
+    env = CE.child_env()
+    env.update((name, os.environ[name]) for name in FORGE_AUTH_ENV if name in os.environ)
+    return {name: value for name, value in env.items()
+            if not name.startswith(("D5_", "HANIG_D5_"))
+            and name not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PID")}
+
+
 class _MergeBoundary:
     """One designated Popen; observations and response waits stay outside START."""
     _observation_timeout = 60
@@ -986,7 +1016,7 @@ class _MergeBoundary:
         result = runner(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, timeout=timeout,
             env=(CE.child_env() if command[:2] == [sys.executable, SWARM]
-                 else {k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"}))
+                 else _merge_child_env()))
         if result.returncode not in allowed:
             raise Refusal("command exited {}: {}{}".format(
                 result.returncode, result.stdout, result.stderr))
@@ -1011,9 +1041,17 @@ class _MergeBoundary:
 
     def start(self, operation):
         import d5_submission as DS
-        self.process = subprocess.Popen(self.cmd["merge"], stdin=subprocess.DEVNULL,
+        expected = ["gh", "pr", "merge", str(self.binding["pr"]), "--repo",
+                    self.host + "/" + self.repo_path, "--squash",
+                    "--match-head-commit", self.binding["head"]]
+        command = list(self.cmd["merge"])
+        tail = command[len(expected):]
+        if command[:len(expected)] != expected or (tail and (
+                len(tail) != 2 or tail[0] != "--subject" or not isinstance(tail[1], str))):
+            raise Refusal("D5 merge command is not designated")
+        self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            env={k: v for k, v in os.environ.items() if k != "LINEAR_API_KEY"})
+            shell=False, close_fds=True, env=_merge_child_env())
         return DS.Initiation.SUBMITTED
 
     def finish(self):
@@ -1062,6 +1100,7 @@ class _MergeBoundary:
 @contextmanager
 def _active_entry_lease(args):
     """Read-only installation preflight before acquiring the existing lease."""
+    _d5_merge_launch_entry()
     if (args.verify_integration or args.abandon_intent or args.retrieve_remote_evidence
             or args.remote_recovery_attestation):
         _d5_merge_entry(args)
@@ -1267,6 +1306,9 @@ def print_tracker_audit(args):
     """Best-effort operator read after advance; never affects merge outcome."""
     key = None
     try:
+        if D5.d5_active():
+            print('Tracker: UNAVAILABLE (D5 active: audit is not admitted)')
+            return
         project_dir = skill_paths.sibling_skill_root(
             _ORCHESTRATE_DIR, "hanig-orchestrate", "hanig-project")
         sys.path.insert(0, str(project_dir / "scripts"))

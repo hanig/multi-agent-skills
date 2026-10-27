@@ -30,7 +30,7 @@ import child_environment as CE
 POLICY = "verification-execution.json"
 BUNDLE_REF = "refs/heads/verification-candidate"
 FILES = ("candidate.bundle", "request.json", "remote_verify.py", "verify.py",
-         "child_environment.py")
+         "child_environment.py", "d5_activation.py")
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
             "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED"}
 CLEANUP_RETRY_SECONDS = 20
@@ -1734,6 +1734,17 @@ def main():
     group.add_argument("--worker")
     group.add_argument("--supervise")
     args = parser.parse_args()
+    previous_bytecode_setting = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        import d5_activation
+        active = d5_activation.d5_active()
+    except Exception as exc:
+        sys.exit("D5 activation unavailable: " + type(exc).__name__)
+    finally:
+        sys.dont_write_bytecode = previous_bytecode_setting
+    if active:
+        sys.exit("D5 active: remote verification is refused before first effect")
     stage = Path(args.worker or args.supervise)
     if args.worker:
         return worker(stage)

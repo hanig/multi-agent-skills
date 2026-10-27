@@ -80,6 +80,7 @@ import worktree as W
 import isolation as ISO
 import coordinator_paths as CP
 import child_environment as CE
+import d5_activation as D5
 import signal
 import stat
 import subprocess
@@ -1625,7 +1626,7 @@ def main():
     c.set_defaults(fn=cmd_check)
 
     args = ap.parse_args()
-    sys.exit(args.fn(args))
+    sys.exit(f"D5 active: unit {args.cmd} is refused before first effect" if D5.d5_active() else args.fn(args))
 
 
 if __name__ == "__main__":

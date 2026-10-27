@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 from tests import test_d5_submission as t
 import d5_activation as activation
+import merge_unit as merge_operator
 import d5_merge_journal as J
 
 
@@ -39,6 +40,7 @@ def main():
         return
     with ExitStack() as stack:
         stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+        stack.enter_context(mock.patch.object(merge_operator, 'merge_launch_admitted', return_value=True))
         stack.enter_context(mock.patch.object(t.registry, 'd5_active', return_value=True))
         stack.enter_context(mock.patch.object(t.registry.CP, '_external_base', return_value=Path(data['external'])))
         stack.enter_context(mock.patch.object(t.host, 'session_anchor', return_value=('native', t.ANCHOR)))
