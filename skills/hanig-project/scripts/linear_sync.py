@@ -3,6 +3,8 @@
 
 All remote requests use linear_api.transport through Client. Local input bytes
 are captured once; no draft, state or receipt is rewritten by the audit.
+While D5 is active, audit is stdout-only: every --out value is refused
+before effects with "D5 active: audit --out is refused; use stdout".
 """
 import argparse
 from contextlib import contextmanager
@@ -1263,19 +1265,8 @@ def _d5_entry(args):
         return
     if args.command not in ('audit', 'section'):
         raise ValueError('D5 active: linear_sync ' + args.command + ' is refused before first effect')
-    if args.command != 'audit' or not args.out:
-        return
-    out = Path(args.out).resolve()
-    protected = [TA.operation_directory('workspace', 'project').parent.parent.resolve()]
-    if args.state_dir:
-        protected.append(Path(args.state_dir).resolve())
-    # An explicit destination can target another coordinator, not just the
-    # --state-dir being audited. Existing coordinator markers identify it.
-    for parent in (out, *out.parents):
-        if any((parent / marker).exists() for marker in ('swarm-state.json', 'lease.lock')):
-            protected.append(parent)
-    if any(out == root or root in out.parents for root in protected):
-        raise ValueError('D5 active: --out is inside coordinator or operation-journal state')
+    if args.command == 'audit' and args.out is not None:
+        raise ValueError('D5 active: audit --out is refused; use stdout')
 
 
 if __name__ == '__main__':
