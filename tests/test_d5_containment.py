@@ -126,11 +126,11 @@ class TestMergeChild(unittest.TestCase):
         self.assertEqual(gh.parent, Path(os.environ['PATH']))
         self.assertEqual(gh.parent.name, 'tools')
         received = self.fixture.c.root / 'received.json'
-        prefix = ('import json, os\nfrom pathlib import Path\n'
+        prefix = ('import json, os, sys\nfrom pathlib import Path\n'
                   'received=[]\nfor fd in range(3,256):\n'
                   '    try:\n        st=os.fstat(fd); received.append([st.st_dev,st.st_ino])\n'
                   '    except OSError: pass\n'
-                  'Path(%r).write_text(json.dumps([sorted(set(os.environ) & %r),received]))\n'\
+                  "if sys.argv[1:3] == ['pr', 'merge']: Path(%r).write_text(json.dumps([sorted(set(os.environ) & %r),received]))\n"\
                   % (str(received), names | auth))
         original = gh.read_text().split('\n', 1)
         gh.write_text(original[0] + '\n' + prefix + original[1])
