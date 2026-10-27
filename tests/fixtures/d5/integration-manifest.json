@@ -123,9 +123,9 @@
         "print_tracker_audit"
       ],
       "effects": [
-        "tracker read queries"
+        "nonblocking UNAVAILABLE console observation; no child or tracker call under D5"
       ],
-      "test": "tests.test_d5_u6_tracker_reject",
+      "test": "tests.test_d5_containment.TestFinalReviewAuditRegressions",
       "merge_launch": "refused before first effect; see merge_launch"
     },
     {
