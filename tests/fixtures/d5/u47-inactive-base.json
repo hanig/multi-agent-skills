@@ -1,5 +1,5 @@
 {
-"base":"9f9cbaf74d2154262a1f1664c26573f1ef0c9d80",
+"base":"ce207c41c62da2001b193fe03ae423c717eb0348",
 "captures":{
 "unit/allocate":{"commands":[["git","-C","<fixture>","rev-parse","--show-toplevel"]],"launches":["subprocess.run"],"outcome":["AssertionError","unexpected subprocess.run"],"output":"","protected_unchanged":true,"transports":[],"writes":[]},
 "unit/bind":{"commands":[],"launches":[],"outcome":["AssertionError","unexpected write_text"],"output":"","protected_unchanged":true,"transports":[],"writes":["write_text"]},
@@ -25,5 +25,6 @@
 "committee/synthesize":{"commands":[],"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":"","protected_unchanged":true,"transports":[],"writes":["mkdir"]},
 "committee/tiebreak":{"commands":[],"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":"","protected_unchanged":true,"transports":[],"writes":["mkdir"]},
 "committee/show":{"commands":[],"launches":[],"outcome":["SystemExit","0"],"output":"committee 'fixture'  phase=plan  opened=fixture\n  deepseek-v4-pro    openrouter  turns=0 errors=0\n  luna               openai      turns=0 errors=0\n\nturns: none\n","protected_unchanged":true,"transports":[],"writes":[]},
-"merge_unit/main":{"commands":[],"files_changed":[],"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":[],"tracker_intents":[],"writes":["mkdir"]}
+"merge_unit/main":{"commands":[],"files_changed":[],"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":[],"tracker_intents":[],"writes":["mkdir"]},
+"merge_unit/audit":{"commands":[],"launches":[],"outcome":null,"output":"Tracker: UNAVAILABLE (unexpected mkdir)\n","protected_unchanged":true,"transports":[],"writes":["mkdir"]}
 }}

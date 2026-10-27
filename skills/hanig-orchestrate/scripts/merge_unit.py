@@ -1333,13 +1333,21 @@ def print_tracker_audit(args):
             inputs.extend(['--' + name.replace('_', '-'), value])
         with tempfile.TemporaryDirectory(prefix='tracker-audit-') as tmp:
             path = str(Path(tmp) / 'audit.json')
-            for command in ([sys.executable, script, 'audit', *inputs, '--out', path],
+            active = D5.d5_active()
+            audit_command = [sys.executable, script, 'audit', *inputs]
+            if not active:
+                audit_command.extend(['--out', path])
+            for command in (audit_command,
                             [sys.executable, script, 'section', *inputs, '--audit', path]):
                 result = subprocess.run(command, env=dict(os.environ),
                                         stdin=subprocess.DEVNULL, capture_output=True,
                                         text=True, timeout=300)
-                allowed = (0, 1, 3) if command[2] == 'audit' else (0,)
-                if result.returncode not in allowed or not Path(path).is_file():
+                allowed = (0, 1, 3) if command[2] == 'audit' and not active else (0,)
+                if result.returncode not in allowed:
+                    raise ValueError('audit/section failed: ' + result.stderr)
+                if active and command[2] == 'audit':
+                    Path(path).write_text(result.stdout)
+                if not Path(path).is_file():
                     raise ValueError('audit/section failed: ' + result.stderr)
             # Use the same offline renderer at the final consumer boundary.
             print(LINEAR_API.redact(TA.section(path, **sources), key))
