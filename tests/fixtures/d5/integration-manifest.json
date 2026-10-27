@@ -92,7 +92,7 @@
   "tracker_bootstraps_installed": []
 },
 "u47_containment":{
-  "guarantee": "U4.7a claims containment of the merge child and pre-effect refusal or bounded admission for the enumerated roots only. With D5 active and fixed default gate roots, no designed effect of review.py or committee.py writes coordinator state, a run root, the tracker or the forge. This assumes, externally and throughout admitted execution, a usable standard temporary directory so the stdlib default search never reaches its cwd fallback; this continuing host precondition is not verified or enforced. D5-active merge launch refuses at entry pending U4.9/U8 executable binding and integrity review. Active audit --out is refused, including an empty value; this satisfies OD1 revision 3 unsafe-output refusal under OD5b. Merge audit captures stdout into its private TemporaryDirectory for file-based section rendering, with failures reported UNAVAILABLE. The drift guard covers canonical main comparisons only; compound guards and entry-point completeness remain U4.9 acceptance items.",
+  "guarantee": "U4.7a claims containment of the merge child and pre-effect refusal or bounded admission for the enumerated roots only. With D5 active and fixed default gate roots, no designed effect of review.py or committee.py writes coordinator state, a run root, the tracker or the forge. This assumes, externally and throughout admitted execution, a usable standard temporary directory so the stdlib default search never reaches its cwd fallback; this continuing host precondition is not verified or enforced. D5-active merge launch refuses at entry pending U4.9/U8 executable binding and integrity review. OD5b terminal SPLIT refuses active audit entirely and prints merge audit UNAVAILABLE without a child. Other linear_sync disposition work transfers to U4.9; existing direct-root guards remain. NOT READY: import-time bytecode precedes audit refusal; the pre-effect guarantee is not established. The drift guard covers canonical main comparisons only; compound guards and entry-point completeness remain U4.9 acceptance items.",
   "limits": [
     "No filesystem destination confinement of same-UID programs: aliasing, symlinking or redirecting gate-local roots or targets into coordinator state is outside the trusted-writer envelope, including explicit TMPDIR redirection.",
     "Pre-existing ambient environment (except D5 activation/readiness inputs and refused gate-local root overrides), user/system/repository Git configuration, shell startup files and other tools configuration are outside the trusted-writer envelope when supplied outside D5 and written by no admitted program. Their effects are not claimed safe. Configuration created, modified or selected by admitted programs, or derived from tracked files, plan.json, coordinator state or CLI arguments remains in scope.",
@@ -144,14 +144,12 @@
     },
     {
       "path": "skills/hanig-project/scripts/linear_sync.py",
-      "disposition": "admitted",
+      "disposition": "refused before first effect",
       "entries": [
-        "audit without --out",
-        "section"
+        "audit"
       ],
       "effects": [
-        "tracker read queries",
-        "stdout-only audit record; every parsed --out value is refused before effects (OD5b)"
+        "documented refusal; import-time bytecode finding remains open"
       ],
       "test": "tests.test_d5_containment"
     },

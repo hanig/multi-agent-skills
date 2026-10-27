@@ -1306,6 +1306,9 @@ def print_tracker_audit(args):
     """Best-effort operator read after advance; never affects merge outcome."""
     key = None
     try:
+        if D5.d5_active():
+            print('Tracker: UNAVAILABLE (D5 active: audit is refused pending U4.9)')
+            return
         project_dir = skill_paths.sibling_skill_root(
             _ORCHESTRATE_DIR, "hanig-orchestrate", "hanig-project")
         sys.path.insert(0, str(project_dir / "scripts"))
@@ -1333,21 +1336,13 @@ def print_tracker_audit(args):
             inputs.extend(['--' + name.replace('_', '-'), value])
         with tempfile.TemporaryDirectory(prefix='tracker-audit-') as tmp:
             path = str(Path(tmp) / 'audit.json')
-            active = D5.d5_active()
-            audit_command = [sys.executable, script, 'audit', *inputs]
-            if not active:
-                audit_command.extend(['--out', path])
-            for command in (audit_command,
+            for command in ([sys.executable, script, 'audit', *inputs, '--out', path],
                             [sys.executable, script, 'section', *inputs, '--audit', path]):
                 result = subprocess.run(command, env=dict(os.environ),
                                         stdin=subprocess.DEVNULL, capture_output=True,
                                         text=True, timeout=300)
-                allowed = (0, 1, 3) if command[2] == 'audit' and not active else (0,)
-                if result.returncode not in allowed:
-                    raise ValueError('audit/section failed: ' + result.stderr)
-                if active and command[2] == 'audit':
-                    Path(path).write_text(result.stdout)
-                if not Path(path).is_file():
+                allowed = (0, 1, 3) if command[2] == 'audit' else (0,)
+                if result.returncode not in allowed or not Path(path).is_file():
                     raise ValueError('audit/section failed: ' + result.stderr)
             # Use the same offline renderer at the final consumer boundary.
             print(LINEAR_API.redact(TA.section(path, **sources), key))
