@@ -80,6 +80,7 @@ import worktree as W
 import isolation as ISO
 import coordinator_paths as CP
 import child_environment as CE
+import d5_activation as D5
 import signal
 import stat
 import subprocess
@@ -1578,22 +1579,6 @@ def cmd_check(args):
     return STATES[state]
 
 
-def _d5_dispatch(args):
-    """Refuse all three direct CLI subcommands before their first effect."""
-    previous_bytecode_setting = sys.dont_write_bytecode
-    try:
-        sys.dont_write_bytecode = True
-        import d5_activation
-        active = d5_activation.d5_active()
-    except Exception as exc:
-        sys.exit("D5 activation unavailable: " + type(exc).__name__)
-    finally:
-        sys.dont_write_bytecode = previous_bytecode_setting
-    if active:
-        sys.exit("D5 active: unit " + args.cmd + " is refused before first effect")
-    return args.fn(args)
-
-
 def main():
     ap = argparse.ArgumentParser(
         prog="unit.py", description=__doc__,
@@ -1641,7 +1626,8 @@ def main():
     c.set_defaults(fn=cmd_check)
 
     args = ap.parse_args()
-    sys.exit(_d5_dispatch(args))
+    if D5.d5_active(): sys.exit("D5 active: unit " + args.cmd + " is refused before first effect")
+    sys.exit(args.fn(args))
 
 
 if __name__ == "__main__":

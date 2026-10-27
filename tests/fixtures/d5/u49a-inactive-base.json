@@ -1,80 +1,10 @@
 {
-  "base": "ce207c41c62da2001b193fe03ae423c717eb0348",
-  "captures": {
-    "unit/allocate": {
-      "launches": [
-        "subprocess.run"
-      ],
-      "outcome": [
-        "AssertionError",
-        "unexpected subprocess.run"
-      ],
-      "output": "",
-      "protected_unchanged": true,
-      "transports": [],
-      "writes": []
-    },
-    "unit/bind": {
-      "launches": [],
-      "outcome": [
-        "AssertionError",
-        "unexpected write_text"
-      ],
-      "output": "",
-      "protected_unchanged": true,
-      "transports": [],
-      "writes": [
-        "write_text"
-      ]
-    },
-    "unit/check": {
-      "launches": [],
-      "outcome": [
-        "AssertionError",
-        "unexpected write_text"
-      ],
-      "output": "",
-      "protected_unchanged": true,
-      "transports": [],
-      "writes": [
-        "write_text"
-      ]
-    },
-    "remote_verify/worker": {
-      "launches": [],
-      "outcome": [
-        "AssertionError",
-        "unexpected mkdir"
-      ],
-      "output": "",
-      "protected_unchanged": true,
-      "transports": [],
-      "writes": [
-        "mkdir"
-      ]
-    },
-    "remote_verify/supervise": {
-      "launches": [],
-      "outcome": [
-        "AssertionError",
-        "unexpected mkdir"
-      ],
-      "output": "",
-      "protected_unchanged": true,
-      "transports": [],
-      "writes": [
-        "mkdir"
-      ]
-    },
-    "merge_unit/audit": {
-      "launches": [],
-      "outcome": null,
-      "output": "Tracker: UNAVAILABLE (unexpected mkdir)\n",
-      "protected_unchanged": true,
-      "transports": [],
-      "writes": [
-        "mkdir"
-      ]
-    }
-  }
-}
+"base":"ce207c41c62da2001b193fe03ae423c717eb0348",
+"captures":{
+"unit/allocate":{"launches":["subprocess.run"],"outcome":["AssertionError","unexpected subprocess.run"],"output":"","protected_unchanged":true,"transports":[],"writes":[]},
+"unit/bind":{"launches":[],"outcome":["AssertionError","unexpected write_text"],"output":"","protected_unchanged":true,"transports":[],"writes":["write_text"]},
+"unit/check":{"launches":[],"outcome":["AssertionError","unexpected write_text"],"output":"","protected_unchanged":true,"transports":[],"writes":["write_text"]},
+"remote_verify/worker":{"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":"","protected_unchanged":true,"transports":[],"writes":["mkdir"]},
+"remote_verify/supervise":{"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":"","protected_unchanged":true,"transports":[],"writes":["mkdir"]},
+"merge_unit/audit":{"launches":[],"outcome":null,"output":"Tracker: UNAVAILABLE (unexpected mkdir)\n","protected_unchanged":true,"transports":[],"writes":["mkdir"]}
+}}
