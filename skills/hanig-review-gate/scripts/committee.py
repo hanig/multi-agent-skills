@@ -489,6 +489,7 @@ def cmd_ask(args):
 
 def cmd_review(args):
     """Phase 3: the diff goes back to the SAME members, against THEIR plan."""
+    R.require_revision(args.range)
     session = load_session(args.name)
     error = (bind_authors(session, args.author)
              or session_author_conflict(session))
@@ -739,6 +740,7 @@ def cmd_show(args):
 
 
 def main():
+    R.d5_gate_entry()
     ap = argparse.ArgumentParser(
         prog="committee.py", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -802,6 +804,7 @@ def main():
     s.set_defaults(fn=cmd_show)
 
     args = ap.parse_args()
+    R.require_revision(getattr(args, "range", None))
     sys.exit(args.fn(args))
 
 
