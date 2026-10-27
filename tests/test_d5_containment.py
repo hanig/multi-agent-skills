@@ -592,6 +592,10 @@ runpy.run_path(sys.argv[0],run_name='__main__')
 
     def test_merge_audit_refuses_without_child_or_temporary_directory(self):
         import merge_unit as M
+        directory = self.case.root / '.hanig'
+        directory.mkdir()
+        self.case.binding.rename(directory / 'linear-binding.json')
+        args = mock.Mock(plan=str(self.case.plan), state_dir=str(self.case.state))
         output = io.StringIO()
         with mock.patch.object(M.D5, 'd5_active', return_value=True), \
                 mock.patch.object(M.tempfile, 'TemporaryDirectory',
@@ -599,7 +603,7 @@ runpy.run_path(sys.argv[0],run_name='__main__')
                 mock.patch.object(M.subprocess, 'run',
                     side_effect=AssertionError('audit child')) as child, \
                 no_effects() as effects, redirect_stdout(output):
-            self.assertIsNone(M.print_tracker_audit(mock.Mock()))
+            self.assertIsNone(M.print_tracker_audit(args))
             temporary.assert_not_called()
             child.assert_not_called()
             self.assertEqual(effects, ([], []))
