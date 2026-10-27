@@ -179,7 +179,7 @@ class TestTrackerRefusal(unittest.TestCase):
 
 
 class TestAuditObservation(audit_fixture.AuditCase):
-    def test_active_audit_invokes_only_observations_at_real_transport(self):
+    def test_audit_split_refuses_active_and_preserves_inactive_observation(self):
         host = registry_fixture.TestD5Registry()
         self.addCleanup(host.doCleanups)
         host.setUp()
@@ -214,9 +214,15 @@ class TestAuditObservation(audit_fixture.AuditCase):
                 commands.clear()
                 self.fake.calls.clear()
                 M.print_tracker_audit(args)
-                self.assertEqual(commands, ["audit", "section"])
-                self.assertIn("Linear consistent", output.getvalue())
-                self.assertTrue(self.fake.calls)
+                if active:
+                    self.assertEqual(commands, [])
+                    self.assertIn("Tracker: UNAVAILABLE", output.getvalue())
+                    self.assertNotIn("Linear consistent", output.getvalue())
+                    self.assertEqual(self.fake.calls, [])
+                else:
+                    self.assertEqual(commands, ["audit", "section"])
+                    self.assertIn("Linear consistent", output.getvalue())
+                    self.assertTrue(self.fake.calls)
                 self.assertTrue(all(q.lstrip().startswith("query") for q, _ in self.fake.calls))
                 self.assertEqual(self.fake.issues, tracker_before)
                 self.assertEqual(host.tree(), before)
