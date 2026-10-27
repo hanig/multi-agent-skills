@@ -46,7 +46,7 @@ spec.loader.exec_module(review)
 
 def copy_review_script(destination):
     """Copy the entry point and its eager shipped dependency as fixture data."""
-    for name in ("review.py", "plan_review.py"):
+    for name in ("review.py", "plan_review.py", "d5_activation.py"):
         (destination.parent / name).write_bytes((SCRIPT.parent / name).read_bytes())
 
 
@@ -2633,7 +2633,7 @@ class TestProtocolIsEnforcedNotRemembered(unittest.TestCase):
             root = Path(tmp)
             script = root / "scripts" / "review.py"
             script.parent.mkdir()
-            for name in ("review.py", "plan_review.py", "committee.py"):
+            for name in ("review.py", "plan_review.py", "committee.py", "d5_activation.py"):
                 shutil.copyfile(SCRIPT.parent / name, script.parent / name)
             for first, second, refused in (
                     (("openai", "fixture-a"), ("openai", "fixture-b"), True),

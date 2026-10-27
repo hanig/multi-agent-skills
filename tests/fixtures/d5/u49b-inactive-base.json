@@ -1,0 +1,14 @@
+{
+"base":"bf63c0224f95f5e253df0f97201205d6d2f3e07c",
+"captures":{
+"review/size":{"launches":[],"outcome":["SystemExit","0"],"output":"gathered input: 60 characters; planning budget: 100000; truncation limit: 180000\n","transports":[],"writes":[]},
+"review/list":{"launches":[],"outcome":["SystemExit","2"],"output":"tier: standard (configured default for --list)\nprofile: standard\nREVIEWER             PROVIDER     MODEL                          EFFORT   STATUS\nluna                 openai       gpt-6-luna                     max      UNAVAILABLE (AssertionError: unexpected provider (after 3 attempts))\nkimi-k2.7-code       openrouter   moonshotai/kimi-k2.7-code      -        UNAVAILABLE (AssertionError: unexpected provider (after 3 attempts))\nsonnet-5.5           anthropic    claude-sonnet-5-5              high     UNAVAILABLE (AssertionError: unexpected provider (after 3 attempts))\n\n0 of 3 reviewers answered a live probe\nNo reviewer can run. The gate will report REVIEW_UNAVAILABLE, which is not a pass.\n","transports":["provider","provider","provider","provider","provider","provider","provider","provider","provider"],"writes":[]},
+"review/ledger":{"launches":["subprocess.Popen"],"outcome":["AssertionError","unexpected subprocess.Popen"],"output":"","transports":[],"writes":[]},
+"review/option":{"launches":["subprocess.run"],"outcome":["AssertionError","unexpected subprocess.run"],"output":"","transports":[],"writes":[]},
+"committee/open":{"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":"committee 'new': deepseek-v4-pro (openrouter), sonnet-5.5 (anthropic), gemini-argon (openrouter)\nphase 1 (plan), waiting for all members...\n\n","transports":["provider","provider","provider","provider","provider","provider","provider","provider","provider"],"writes":["mkdir"]},
+"committee/ask":{"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":"","transports":[],"writes":["mkdir"]},
+"committee/review":{"launches":["subprocess.Popen"],"outcome":["AssertionError","unexpected subprocess.Popen"],"output":"","transports":[],"writes":[]},
+"committee/synthesize":{"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":"","transports":[],"writes":["mkdir"]},
+"committee/tiebreak":{"launches":[],"outcome":["AssertionError","unexpected mkdir"],"output":"","transports":[],"writes":["mkdir"]},
+"committee/show":{"launches":[],"outcome":["SystemExit","0"],"output":"committee 'fixture'  phase=plan  opened=fixture\n\nturns: none\n","transports":[],"writes":[]}
+}}
