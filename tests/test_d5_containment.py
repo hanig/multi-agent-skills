@@ -590,6 +590,20 @@ runpy.run_path(sys.argv[0],run_name='__main__')
                         unexpected.append(str(relative))
             self.assertEqual(sorted(unexpected), [], 'pre-refusal skill bytecode or unclassifiable cache')
 
+    def test_external_startup_cache_is_excluded(self):
+        source = self.case.root / 'skills/hanig-project/startup.py'
+        source.parent.mkdir(parents=True)
+        source.write_text('VALUE = 1\n')
+        original = subprocess.run
+        def launch(argv, **kwargs):
+            prefix = str(Path(kwargs['env']['HOME']) / 'mirror')
+            startup = 'import sys\nsys.path.insert(0, %r)\nimport startup\n' % str(source.parent)
+            argv = [argv[0], '-X', 'pycache_prefix=' + prefix,
+                    '-c', startup + argv[2]] + argv[3:]
+            return original(argv, **kwargs)
+        with mock.patch.object(subprocess, 'run', side_effect=launch):
+            self.test_fresh_cli_refuses_before_import_bytecode_writes()
+
     def test_merge_audit_refuses_without_child_or_temporary_directory(self):
         import merge_unit as M
         directory = self.case.root / '.hanig'
