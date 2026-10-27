@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = '9f9cbaf74d2154262a1f1664c26573f1ef0c9d80'
+BASE = 'ce207c41c62da2001b193fe03ae423c717eb0348'
 FIXTURES = ROOT / 'tests/fixtures/d5'
 GATE = ROOT / 'skills/hanig-review-gate/scripts'
 SWARM = ROOT / 'skills/hanig-swarm/scripts'
@@ -417,19 +417,24 @@ class TestLinearObservations(unittest.TestCase):
                 module.d5_active = lambda: True
         before = sentinel.read_bytes()
         with mock.patch.object(importlib.machinery.SourceFileLoader, 'exec_module', active):
-            self.assertEqual(case.cli('audit', '--binding', str(case.binding), '--out', str(case.out)), 0)
+            self.assertEqual(case.cli('audit', '--binding', str(case.binding)), 0)
             self.assertTrue(case.fake.calls)
             self.assertTrue(all(q.lstrip().startswith('query') for q, _ in case.fake.calls))
+            self.assertEqual(case.stderr, '')
+            self.assertFalse(case.out.exists())
+            case.out.write_text(case.stdout)
+            captured = case.out.read_bytes()
             count = len(case.fake.calls)
             self.assertEqual(case.cli('section', '--audit', str(case.out), '--binding', str(case.binding)), 0)
             self.assertEqual(json.loads(case.out.read_text())['verdict'], 'CLEAN')
             self.assertIn('Linear consistent', case.stdout)
             self.assertEqual(len(case.fake.calls), count)
+            self.assertEqual(case.out.read_bytes(), captured)
         self.assertEqual(sentinel.read_bytes(), before)
 
 
 class TestFinalReviewAuditRegressions(unittest.TestCase):
-    """Unfixed OD5 final-review counterexamples, retained for recovery."""
+    """OD5b: all output paths refuse; stdout and section remain observations."""
 
     def setUp(self):
         from tests.test_linear_audit import AuditCase, LS
@@ -457,24 +462,51 @@ class TestFinalReviewAuditRegressions(unittest.TestCase):
             side_effect=AssertionError('unexpected network')))
         return stack
 
+    def assert_out_refused(self, value):
+        case = self.case
+        case.fake.calls.clear()
+        with self.active(), no_effects() as effects, \
+                mock.patch.object(self.linear.API, 'load_key',
+                    side_effect=AssertionError('credential read')) as key, \
+                mock.patch.object(self.linear, 'sources',
+                    side_effect=AssertionError('state read')) as sources, \
+                mock.patch.object(self.linear.TA, 'operation_directory',
+                    side_effect=AssertionError('operation-root scan')) as ops:
+            rc = case.cli('audit', '--binding', str(case.binding), '--out', value)
+            self.assertNotEqual(rc, 0, case.stdout)
+            self.assertEqual(case.stdout, '')
+            self.assertIn('audit --out is refused; use stdout', case.stderr)
+            self.assertEqual(effects, ([], []))
+            key.assert_not_called()
+            sources.assert_not_called()
+            ops.assert_not_called()
+        self.assertEqual(case.fake.calls, [])
+
+    def test_all_output_values_refuse_before_effects_including_empty(self):
+        for value in ('', str(self.case.out), str(self.case.root / 'absent/report.json')):
+            with self.subTest(value=value):
+                self.assert_out_refused(value)
+
     def test_safe_reports_ignore_unrelated_marker_names(self):
         case = self.case
         for marker in ('lease.lock', 'swarm-state.json'):
-            with self.subTest(marker=marker), self.active():
+            with self.subTest(marker=marker):
                 reports = case.root / ('reports-' + marker)
                 reports.mkdir()
                 target = reports / 'audit.json'
-                argv = ('audit', '--binding', str(case.binding), '--out', str(target))
-                self.assertEqual(case.cli(*argv), 0, case.stderr)
-                target.unlink()
+                self.assert_out_refused(str(target))
                 unrelated = reports / marker
                 unrelated.write_text('Unrelated fixture data, not coordinator state.\n')
                 before = unrelated.read_bytes()
-                case.fake.calls.clear()
-                rc = case.cli(*argv)
+                self.assert_out_refused(str(target))
                 self.assertEqual(unrelated.read_bytes(), before)
-                self.assertEqual((rc, target.exists(), bool(case.fake.calls)),
-                                 (0, True, True), case.stderr)
+                self.assertFalse(target.exists())
+                # With no output path the admitted observation still succeeds.
+                with self.active(), no_effects() as effects:
+                    self.assertEqual(case.cli('audit', '--binding', str(case.binding)), 0)
+                    self.assertEqual(effects, ([], []))
+                self.assertEqual(case.stderr, '')
+                self.assertEqual(json.loads(case.stdout)['verdict'], 'CLEAN')
 
     def test_audit_output_cannot_overwrite_another_operation_root(self):
         case = self.case
@@ -485,10 +517,65 @@ class TestFinalReviewAuditRegressions(unittest.TestCase):
             target = directory / 'existing-operation.json'
             target.write_text('{"protected":"operation-journal"}\n')
         before = target.read_bytes()
-        with self.active():
-            rc = case.cli('audit', '--binding', str(case.binding), '--out', str(target))
-        self.assertEqual((rc != 0, target.read_bytes() == before, not case.fake.calls),
-                         (True, True, True), 'unsafe output must refuse before effects')
+        self.assert_out_refused(str(target))
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_merge_audit_captures_stdout_for_pure_section_and_cleans_up(self):
+        import merge_unit as M
+        case = self.case
+        directory = case.root / '.hanig'
+        directory.mkdir()
+        case.binding.rename(directory / 'linear-binding.json')
+        case.binding = directory / 'linear-binding.json'
+        args = mock.Mock(plan=str(case.plan), state_dir=str(case.state))
+        for failure in (None, 1, 2, 3, 'timeout', 'section'):
+            with self.subTest(failure=failure), self.active():
+                paths, commands, captures, temporary = [], [], [], []
+                make_temp = tempfile.TemporaryDirectory
+                def private_temp(**kwargs):
+                    tmp = make_temp(**kwargs)
+                    temporary.append(Path(tmp.name))
+                    return tmp
+                def child(command, **kwargs):
+                    self.assertEqual(Path(command[1]).name, 'linear_sync.py')
+                    self.assertNotIn('--out', command)
+                    commands.append(command[2])
+                    if command[2] == 'audit' and failure == 'timeout':
+                        raise subprocess.TimeoutExpired(command, 300)
+                    if command[2] == 'audit' and isinstance(failure, int):
+                        return subprocess.CompletedProcess(command, failure, '', 'refused')
+                    if command[2] == 'section':
+                        path = Path(command[command.index('--audit') + 1])
+                        self.assertEqual(path.parent, temporary[-1])
+                        self.assertTrue(path.is_file())
+                        self.assertEqual(path.read_text(), captures[-1])
+                        paths.append(path)
+                        before = path.read_bytes()
+                    with no_effects() as effects:
+                        rc = case.cli(*command[2:])
+                        self.assertEqual(effects, ([], []))
+                    if command[2] == 'audit':
+                        captures.append(case.stdout)
+                    else:
+                        self.assertEqual(path.read_bytes(), before)
+                        if failure == 'section':
+                            rc = 2
+                    return subprocess.CompletedProcess(command, rc, case.stdout, case.stderr)
+                output = io.StringIO()
+                with mock.patch.object(M.D5, 'd5_active', return_value=True), \
+                        mock.patch.object(M.tempfile, 'TemporaryDirectory', private_temp), \
+                        mock.patch.object(M.subprocess, 'run', child), redirect_stdout(output):
+                    self.assertIsNone(M.print_tracker_audit(args))
+                self.assertTrue(temporary)
+                self.assertTrue(all(not p.exists() for p in temporary + paths))
+                if failure is None:
+                    self.assertEqual(commands, ['audit', 'section'])
+                    self.assertIn('Linear consistent', output.getvalue())
+                    self.assertNotIn('"schema_version"', output.getvalue())
+                else:
+                    self.assertIn('Tracker: UNAVAILABLE', output.getvalue())
+                    self.assertNotIn('Linear consistent', output.getvalue())
+
 
 
 if __name__ == '__main__':

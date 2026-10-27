@@ -64,7 +64,7 @@ def capture(source, tool, command, active=False, installed=False, allow_gate=Fal
 
     with ExitStack() as stack:
         tmp = Path(stack.enter_context(tempfile.TemporaryDirectory())).resolve()
-        if tool == 'merge_unit':
+        if tool == 'merge_unit' and command == 'main':
             from tests.test_d5_u4_1_active_surface import SurfaceFixture
             return SurfaceFixture(tmp).observe('operator', command, active)
         tools = tmp / 'tools'
@@ -111,6 +111,10 @@ def capture(source, tool, command, active=False, installed=False, allow_gate=Fal
         binding.write_text(json.dumps(dict(schema_version=1, repository='https://example.invalid/r',
             workspace={'id': 'workspace', 'name': 'Workspace'}, team={'id': 'team', 'key': 'ARC'},
             project={'id': 'project', 'name': 'Project'})))
+        if tool == 'merge_unit':
+            import merge_unit
+            (tmp / '.hanig').mkdir()
+            (tmp / '.hanig/linear-binding.json').write_bytes(binding.read_bytes())
         body = tmp / 'body.md'
         body.write_text('Fixture body')
         committee.SESSIONS = home / '.hanig-committee'
@@ -119,6 +123,7 @@ def capture(source, tool, command, active=False, installed=False, allow_gate=Fal
             problem='fixture', turns=[], members={r['name']: dict(provider=r['provider'],
             model=r['model'], history=[]) for r in members}))
         entries = {
+            'merge_unit': {'audit': []},
             'unit': {
                 'allocate': ['allocate', '--root', str(runs), '--task', 'u', '--kind', 'pipeline', '--output', 'out'],
                 'bind': ['bind', str(runs), '--job-id', '7'],
@@ -194,7 +199,11 @@ def capture(source, tool, command, active=False, installed=False, allow_gate=Fal
                 for name in ('Popen', 'run'):
                     calls.enter_context(mock.patch('subprocess.' + name, launching(getattr(__import__('subprocess'), name))))
                 try:
-                    result = guarded_main(importlib.import_module(tool).main)
+                    if tool == 'merge_unit':
+                        result = merge_unit.print_tracker_audit(SimpleNamespace(
+                            plan=str(tmp / 'plan.json'), state_dir=str(state)))
+                    else:
+                        result = guarded_main(importlib.import_module(tool).main)
                 except BaseException as exc:
                     result = [type(exc).__name__, str(exc)]
         after = {str(p): p.read_bytes() for root in (state, runs, ops)
