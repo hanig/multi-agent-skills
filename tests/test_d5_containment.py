@@ -520,6 +520,56 @@ class TestFinalReviewAuditRegressions(unittest.TestCase):
         self.assert_out_refused(str(target))
         self.assertEqual(target.read_bytes(), before)
 
+    def test_terminal_split_refuses_audit_and_merge_observation(self):
+        import merge_unit as M
+        with self.active(), mock.patch.object(M.D5, 'd5_active', return_value=True), \
+                mock.patch.object(self.linear.API, 'load_key',
+                    side_effect=AssertionError('credential read')) as key, no_effects() as effects:
+            self.assertNotEqual(self.case.cli('audit', '--binding', str(self.case.binding)), 0)
+            self.assertIn('audit is refused pending U4.9', self.case.stderr)
+            output = io.StringIO()
+            with mock.patch.object(M.skill_paths, 'sibling_skill_root',
+                    side_effect=AssertionError('dependency lookup')) as sibling, redirect_stdout(output):
+                self.assertIsNone(M.print_tracker_audit(mock.Mock()))
+                sibling.assert_not_called()
+            self.assertIn('Tracker: UNAVAILABLE', output.getvalue())
+            self.assertEqual(effects, ([], []))
+            key.assert_not_called()
+        self.assertEqual(self.case.fake.calls, [])
+
+    def test_fresh_cli_refuses_before_import_bytecode_writes(self):
+        # Final-review counterexample: deliberately do not pass -B to the child.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('hanig-project', 'hanig-swarm'):
+                shutil.copytree(ROOT / 'skills' / name, root / 'skills' / name,
+                                ignore=shutil.ignore_patterns('__pycache__'))
+            binding = root / 'binding.json'
+            binding.write_bytes(self.case.binding.read_bytes())
+            script = root / 'skills/hanig-project/scripts/linear_sync.py'
+            bootstrap = """import importlib.machinery,runpy,sys
+from pathlib import Path
+original=importlib.machinery.SourceFileLoader.exec_module
+def load(loader,module):
+    original(loader,module)
+    if module.__name__=='_linear_d5_activation':
+        module.d5_active=lambda: True
+importlib.machinery.SourceFileLoader.exec_module=load
+sys.argv=sys.argv[1:]
+sys.path.insert(0,str(Path(sys.argv[0]).parent))
+runpy.run_path(sys.argv[0],run_name='__main__')
+"""
+            self.assertEqual(list(root.rglob('*.pyc')), [])
+            result = subprocess.run([sys.executable, '-c', bootstrap, str(script),
+                'audit', '--binding', str(binding), '--out', ''], cwd=tmp,
+                env={'PATH': '', 'HOME': str(root)}, capture_output=True,
+                text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('D5 active: audit', result.stderr)
+            self.assertEqual(result.stdout, '')
+            self.assertEqual(sorted(str(p.relative_to(root)) for p in root.rglob('*.pyc')),
+                             [], 'pre-refusal bytecode writes')
+
     def test_merge_audit_captures_stdout_for_pure_section_and_cleans_up(self):
         import merge_unit as M
         case = self.case
