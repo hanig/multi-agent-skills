@@ -14,6 +14,19 @@ The worker record and permission events provide evidence that directory timestam
 
 A watcher is armed in the dispatching turn, tested against a condition already present, and its watch set is derived from coordinator state. Arming it later is the same defect as omitting it, because nothing else wakes the session when a worker finishes and `swarm.py status` records neither an observation time nor a unit age. <!-- declaration: watch.proof -->
 
+## Owner-facing report times
+
+`HANIG_REPORT_TZ` selects the owner's IANA timezone for the orchestrator's observation times, ETAs, status lines and three-part report, with the abbreviation shown. Check the name against the host's IANA zone database before conversion: `date` can silently accept an invalid `TZ`, so successful output alone is not validation. Unset or invalid configuration uses UTC with one notice per session. The zone database supplies daylight-time transitions, never a fixed offset. Internal logs, evidence and journals can stay in UTC; quoted tool output, logs and evidence keep their timestamps unchanged, with any converted annotation outside the quotation. <!-- declaration: report.timezone -->
+
+For a validated `HANIG_REPORT_TZ`, these examples convert the same Unix timestamp and include the abbreviation. For the fallback, use `TZ=UTC` instead. <!-- declaration: report.timezone -->
+
+```sh
+# macOS / BSD date
+TZ="$HANIG_REPORT_TZ" date -r 1793102400 '+%Y-%m-%d %H:%M:%S %Z'
+# GNU date
+TZ="$HANIG_REPORT_TZ" date -d @1793102400 '+%Y-%m-%d %H:%M:%S %Z'
+```
+
 ## Preservation, dispatch, and merge
 
 Recovery uses a separate ref because moving the coordinator's judged branch destroys the stable comparison route. A restorable snapshot includes base identity, content digest, full porcelain including untracked paths, and a restore check. <!-- declaration: preservation.before-cleanup -->
