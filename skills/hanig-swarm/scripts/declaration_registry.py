@@ -102,9 +102,9 @@ CLOSED_DECLARATIONS = {
         preservation.before-cleanup dispatch.mechanics merge.requirements
         merge.flake-triage
         code.merge-command limit.merge-command
-        tracker.authority tracker.reconcile tracker.drain tracker.dag report.timezone report.three-parts
+        tracker.authority tracker.reconcile tracker.drain tracker.dag report.three-parts
         handoff.contents handoff.transfer takeover.verify
-        limit.session-liveness
+        limit.session-liveness report.timezone
     """),
     "hanig-project": _closed_ids("""
         placement.behavior-deciding placement.reference-elaboration
