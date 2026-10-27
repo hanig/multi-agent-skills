@@ -69,6 +69,7 @@ import datetime
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -102,6 +103,42 @@ DEFAULT_PROFILE = "standard"
 # That is the signal to step back to root cause, not to review again.
 MAX_ROUNDS = 3
 ROUND_LOCK_WAIT_SECONDS = 5
+
+
+def d5_gate_active():
+    """Use the pinned gate-local activation copy; absence never admits work."""
+    previous_bytecode_setting = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location('_gate_d5_activation', HERE / 'd5_activation.py')
+        activation = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(activation)
+        return activation.d5_active()
+    except Exception as exc:
+        config_error("D5 activation unavailable: " + type(exc).__name__)
+    finally:
+        sys.dont_write_bytecode = previous_bytecode_setting
+
+
+def d5_gate_entry():
+    """Refuse unreviewed root overrides at the named D5 gate entries."""
+    if not d5_gate_active():
+        return
+    overrides = [name for name in ("XDG_STATE_HOME", "HANIG_COMMITTEE_DIR",
+                                  JOURNAL_TEST_MARKER) if name in os.environ]
+    if overrides:
+        config_error("D5 active: gate-local root overrides refused: " + ", ".join(overrides)
+                     + ". Drop these overrides to use the fixed default roots.")
+
+
+def require_revision(value):
+    """Under D5 reject option-shaped revisions before Git; inactive is unchanged."""
+    if value is None or not d5_gate_active():
+        return
+    endpoints = range_endpoints(value)
+    if any(ref.startswith("-") for ref in ([value] + list(endpoints[1:] if endpoints else ()))):
+        config_error("Git revision/range must not begin with '-'. "
+                     "Pass a commit/ref or a range with non-option endpoints.")
 
 
 def change_identity(target="origin/main", plan_name=None, unit=None):
@@ -1661,6 +1698,8 @@ def git_out(*args):
     # timeout alone was not enough -- the whole group has to go.
     pr = None
     try:
+        if args and args[0] in ("diff", "show", "log") and d5_gate_active():
+            args = (args[0], "--no-ext-diff", "--no-textconv", *args[1:])
         pr = subprocess.Popen(["git", *args], stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, encoding="utf-8",
                               errors="replace", start_new_session=True)
@@ -1710,6 +1749,7 @@ def resolve_range_ref(ref):
     Appending ^{commit} directly to :/regex changes the search pattern.
     Return failed Git results intact so the caller can name the original ref.
     """
+    require_revision(ref)
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--verify", ref],
@@ -1767,6 +1807,7 @@ def range_divergence_warning(range_spec):
     git_out returns an empty string on failure. Every ancestry command here
     must return non-empty output before we can report known divergence.
     """
+    require_revision(range_spec)
     endpoints = range_endpoints(range_spec)
     if not endpoints or endpoints[0] != "..":
         return ""
@@ -1875,6 +1916,7 @@ def redaction_notice(redactions):
 
 
 def gather(args):
+    require_revision(args.range)
     parts, label = [], ""
     if not hasattr(args, "input_redactions"):
         args.input_redactions = []
@@ -2610,6 +2652,7 @@ def changed_paths(args):
     includes both the removed and added path, so renaming code to docs cannot
     hide the code side. Range syntax remains Git's, not another parser here.
     """
+    require_revision(args.range)
     paths = set()
     revision = (["HEAD"] if args.diff else ["--cached"] if args.staged
                 else [args.range] if args.range else None)
@@ -3215,7 +3258,10 @@ def main():
 
 
 def _main():
+    d5_gate_entry()
     args = build_parser().parse_args()
+    require_revision(args.range)
+    require_revision(args.target)
     if args.adjudicate is not None or args.open_findings:
         if (args.diff or args.staged or args.range or args.file or args.list or args.size or args.kind
                 or args.plan or args.claim or args.escalate or args.only
@@ -3651,6 +3697,7 @@ def _main():
 if __name__ == "__main__":
     if sys.argv[1:] == [JOURNAL_CHILD_ARG]:
         try:
+            d5_gate_entry()
             child_result = _journal_child(json.load(sys.stdin))
         except Exception as child_exc:
             child_result = {
