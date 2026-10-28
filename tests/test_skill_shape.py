@@ -173,6 +173,7 @@ ORCHESTRATE_DECLARATIONS = (
     "handoff.transfer",
     "takeover.verify",
     "limit.session-liveness",
+    "report.timezone",
 )
 
 PROJECT_DECLARATIONS = (
@@ -373,6 +374,7 @@ REFERENCE_ELABORATION_INVENTORIES = {
         ("references/operating-loop.md", "limit.merge-command", 2),
         ("references/operating-loop.md", "preservation.before-cleanup", 1),
         ("references/operating-loop.md", "report.three-parts", 2),
+        ("references/operating-loop.md", "report.timezone", 2),
         ("references/operating-loop.md", "tracker.authority", 2),
         ("references/operating-loop.md", "tracker.dag", 1),
         ("references/operating-loop.md", "tracker.drain", 3),
@@ -910,6 +912,19 @@ class TestAuthoredSkillShape(unittest.TestCase):
         skill = SKILLS / "hanig-orchestrate"
         self.assertEqual(DECLARATION_REGISTRY.body_diff(skill), "")
         self.assertEqual(_declaration_completeness_problems(skill), [])
+
+    def test_orchestrate_report_timezone_reaches_the_generated_body(self):
+        skill = SKILLS / "hanig-orchestrate"
+        data = json.loads((skill / "declarations.json").read_text(encoding="utf-8"))
+        declarations = {entry["id"]: entry for entry in data["declarations"]}
+        self.assertIn("report.timezone", data["known_declarations"])
+        self.assertIn("report.timezone", declarations)
+        text = (skill / "SKILL.md").read_text(encoding="utf-8")
+        block = text.split(DECLARATION_REGISTRY.BEGIN_MARKER, 1)[1].split(
+            DECLARATION_REGISTRY.END_MARKER, 1)[0]
+        self.assertIn(
+            "- **`report.timezone`:** " +
+            declarations["report.timezone"]["normative_text"], block)
 
     def test_orchestrate_reference_modals_are_tied_to_registered_declarations(self):
         skill = SKILLS / "hanig-orchestrate"

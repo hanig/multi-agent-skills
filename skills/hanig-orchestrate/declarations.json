@@ -54,7 +54,8 @@
     "handoff.contents",
     "handoff.transfer",
     "takeover.verify",
-    "limit.session-liveness"
+    "limit.session-liveness",
+    "report.timezone"
   ],
   "retired_declarations": [],
   "replacement_declarations": [],
@@ -92,7 +93,7 @@
     {"id": "adjudication.record", "normative_text": "A nonblocking record must identify affected goals, criteria, outputs, and consumers; impact evidence; shared surfaces; pre-existing policy authority; and an observable falsifier.", "references": ["references/authority-adjudication.md"]},
     {"id": "adjudication.nonoverridable", "normative_text": "Never override a hard constraint, missing or fabricated evidence, unauthorized or destructive action, failed required criterion or output, compromised isolation or authority, an unsound shared guard, or a missing candidate-merge check.", "references": ["references/authority-adjudication.md"]},
     {"id": "adjudication.honesty", "normative_text": "Keep REVIEW_FAIL and REVIEW_CLAIMS_REFUTED intact in the record as non-passing verdicts; eligibility after adjudication is not a pass. REVIEW_CLAIMS_REFUTED means quorum reached with refuted claims and zero confirmed findings: correct the claim (or the code), then re-run within the same round bound; a false delivered claim must never be silently endorsed."},
-    {"id": "watch.facts", "normative_text": "Track running, progressing, permission-blocked, and last-observed time as separate facts; every status must carry its observation time.", "references": ["references/operating-loop.md"]},
+    {"id": "watch.facts", "normative_text": "Track running, progressing, permission-blocked, and last-observed time as separate facts; every status must carry its observation time. See report.timezone for owner-facing times.", "references": ["references/operating-loop.md"]},
     {"id": "watch.source", "normative_text": "Read the worker's own record and permission events rather than inferring progress from directory mtime or liveness alone.", "references": ["references/operating-loop.md"]},
     {"id": "watch.proof", "normative_text": "Arm a watcher in the same turn as the dispatch it covers, prove it fires against an already-detectable condition before trusting it, and discover watched work from state rather than a hand-maintained list.", "references": ["references/operating-loop.md"]},
     {"id": "loop.quiescence", "normative_text": "Act until quiescent by reconciling state, servicing workers and reviews, adjudicating, merging, recording, advancing, draining, reconciling the tracker, dispatching ready work, and reporting; a blocked unit must not stall unrelated work.", "references": ["references/operating-loop.md"]},
@@ -112,6 +113,7 @@
     {"id": "handoff.contents", "normative_text": "A durable handoff must separately carry authority references, a decision ledger with an explicit unadjudicated frontier, and operational continuation including ambiguous effects, budgets, blockers, and actual wakeup arrangements.", "references": ["references/handoff-takeover.md"]},
     {"id": "handoff.transfer", "normative_text": "A predecessor may transfer references and custody but cannot manufacture consent; successor authority must be durable and cover the run, actions, limits, policy, duration, and revocation conditions.", "references": ["references/handoff-takeover.md"]},
     {"id": "takeover.verify", "normative_text": "Before acting, a successor must verify authority, repository and run identity, anchors, installed skill and executable versions, evidence bytes and bindings, remote effects, liveness, remaining budgets, and exclusive control; ambiguous authority blocks only affected actions.", "references": ["references/handoff-takeover.md"]},
-    {"id": "limit.session-liveness", "normative_text": "LIMIT: Instructions cannot keep a terminated session running; every external wait needs a real registered wakeup, and an unscheduled handoff must say restart unscheduled.", "references": ["references/handoff-takeover.md"]}
+    {"id": "limit.session-liveness", "normative_text": "LIMIT: Instructions cannot keep a terminated session running; every external wait needs a real registered wakeup, and an unscheduled handoff must say restart unscheduled.", "references": ["references/handoff-takeover.md"]},
+    {"id": "report.timezone", "normative_text": "Use the IANA zone named by HANIG_REPORT_TZ (e.g. Europe/Paris), with its abbreviation, for all times in the orchestrator's own wording to the owner: observation times, ETAs, status lines and the three-part report. If unset or invalid, use UTC and say so once per session. Follow IANA daylight-time transitions; never hardcode an offset. Internal logs, evidence and journals may keep UTC. Verbatim quoted tool output (including linear_sync.py section) and quoted logs or evidence retain their timestamps; converted annotations belong outside quotations.", "references": ["references/operating-loop.md"]}
   ]
 }
