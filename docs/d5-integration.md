@@ -9,29 +9,47 @@ U4.9b did not land (ARC-4171-OD2/OD3). Its admission, option injection,
 review-gate activation copy and route-inventory drift guard remain preserved
 at `recovery/swarm-d105d6d1b345fb7f`, not part of the shipped guarantee.
 
-The following table is the complete U4.9 guarantee list. Its exact claims,
-mechanism names and test IDs must agree with `u49_guarantees` in the
-[manifest](../tests/fixtures/d5/integration-manifest.json).
-`tests.test_d5_u49_activation_closure` checks that agreement, resolves the
-named definitions and runs the cited behavior tests. Test-owned fingerprints
-pin each reviewed claim and its evidence references independently of the two
-editable sources; evidence ordering is immaterial. Claim text and evidence
-membership changes require an explicit test-contract update and review; this is
-not a semantic proof. This establishes the
-named coverage, not a proof of arbitrary call-flow closure. Active scenarios
-use synthetic activation; merge-child tests explicitly force admission.
-No production activation is performed by these tests.
+The `d5-claims` block is the complete and authoritative inventory of U4.9
+guarantees and non-claims; all surrounding prose is non-normative.
+Prose-to-ledger completeness ("every public claim") is enforced by review,
+not by test. `tests.test_d5_u49_activation_closure` defines the fence grammar,
+compares IDs with the [manifest](../tests/fixtures/d5/integration-manifest.json),
+and resolves non-skipped tests. It also checks the manifest's definitions and
+runs its behavior tests, using synthetic activation and forced merge admission.
+This establishes named coverage, not arbitrary call-flow closure or activation.
+
+```d5-claims
+{
+  "guarantees": [
+    {"id": "merge-child-containment", "test": "tests.test_d5_containment.TestMergeChild.test_actual_child_environment_and_no_descriptors_or_provider_tracker"},
+    {"id": "direct-root-refusals", "test": "tests.test_d5_containment.TestDirectRoots.test_direct_clis_both_readiness_states_before_effects"},
+    {"id": "merge-admission-switch", "test": "tests.test_d5_containment.TestMergeAdmission.test_production_merge_launch_is_not_admitted"},
+    {"id": "unavailable-audit", "test": "tests.test_d5_containment.TestMergeAudit.test_active_audit_unavailable_without_dependencies_or_effects"},
+    {"id": "entry-point-routing", "test": "tests.test_d5_u49_entrypoints.TestRoutes.test_cmd_run"},
+    {"id": "bytecode-advisory", "test": "tests.test_d5_u49_entrypoints.TestAdvisory.test_warning_truth_table_at_swarm_entries"}
+  ],
+  "non_claims": [
+    "process-and-same-uid-isolation",
+    "bytecode-suppression-and-stale-cache",
+    "repository-wide-quiet-and-od4",
+    "non-canonical-guard-coverage",
+    "linear-sync-direct-root-refusals",
+    "route-inventory-drift-guard",
+    "review-committee-admission-and-option-injection"
+  ]
+}
+```
 
 ## U4.9 guarantees
 
-| ID | Guarantee | Mechanisms | Tests |
-|---|---|---|---|
-| merge-child-containment | The designated merge child uses shell=False and close_fds=True, receives no authority descriptors, and filters the declared D5/session/provider/tracker credential names while retaining the declared forge credentials. Arbitrary commands and undesignated extra switches refuse. | `merge_unit.py:_merge_child_env`<br>`merge_unit.py:_MergeBoundary.start` | `tests.test_d5_containment.TestMergeChild.test_actual_child_environment_and_no_descriptors_or_provider_tracker`<br>`tests.test_d5_containment.TestMergeChild.test_arbitrary_executable_or_extra_switch_refuses_before_launch` |
-| direct-root-refusals | With D5 active, unit.py allocate/bind/check and remote_verify.py worker/supervise refuse before effects, with readiness absent or installed. | `unit.py:main`<br>`remote_verify.py:main` | `tests.test_d5_containment.TestDirectRoots.test_direct_clis_both_readiness_states_before_effects` |
-| merge-admission-switch | merge_launch_admitted() is False until owner activation at U8; active merge entries refuse before effects even with readiness installed. | `merge_unit.py:merge_launch_admitted`<br>`merge_unit.py:_d5_merge_launch_entry`<br>`merge_unit.py:_active_entry_lease` | `tests.test_d5_containment.TestMergeAdmission.test_production_merge_launch_is_not_admitted`<br>`tests.test_d5_containment.TestMergeAdmission.test_active_entries_refuse_before_any_effect_without_forced_admission` |
-| unavailable-audit | With D5 active, the post-merge tracker audit prints UNAVAILABLE without launching or importing linear_sync and without audit writes or transport. | `merge_unit.py:print_tracker_audit` | `tests.test_d5_containment.TestMergeAudit.test_active_audit_unavailable_without_dependencies_or_effects` |
-| entry-point-routing | swarm.py cmd_run, cmd_advance and main use shared d5_activation routing; merge_unit.py main retains its admission refusal. The named inactive captures remain equal to their recorded baselines. | `swarm.py:cmd_run`<br>`swarm.py:cmd_advance`<br>`swarm.py:main`<br>`merge_unit.py:main`<br>`d5_activation.py:d5_active` | `tests.test_d5_u49_entrypoints.TestRoutes.test_cmd_run`<br>`tests.test_d5_u49_entrypoints.TestRoutes.test_cmd_advance`<br>`tests.test_d5_u49_entrypoints.TestRoutes.test_swarm_main`<br>`tests.test_d5_u49_entrypoints.TestRoutes.test_merge_main`<br>`tests.test_d5_u49_entrypoints.TestRoutes.test_manifest_routes_and_shared_activation_owner`<br>`tests.test_d5_u49_entrypoints.TestInactive.test_m6_bound_to_base`<br>`tests.test_d5_containment.TestDirectRoots.test_inactive_matches_recorded_merge_base` |
-| bytecode-advisory | The swarm entries warn when D5 is active and sys.dont_write_bytecode is false. The advisory neither changes that flag nor probes the filesystem, and diagnostic failures never block schema. | `swarm.py:_d5_bytecode_advisory` | `tests.test_d5_u49_entrypoints.TestAdvisory.test_warning_truth_table_at_swarm_entries`<br>`tests.test_d5_u49_entrypoints.TestAdvisory.test_read_only_and_diagnostic_failure_never_blocks`<br>`tests.test_d5_u49_entrypoints.TestAdvisory.test_missing_stderr_preserves_schema_stdout`<br>`tests.test_d5_u49_entrypoints.TestAdvisory.test_unexpected_stderr_errors_never_gate_schema` |
+| ID | Guarantee |
+|---|---|
+| merge-child-containment | The designated merge child uses shell=False and close_fds=True, receives no authority descriptors, and filters the declared D5/session/provider/tracker credential names while retaining the declared forge credentials. Arbitrary commands and undesignated extra switches refuse. |
+| direct-root-refusals | With D5 active, unit.py allocate/bind/check and remote_verify.py worker/supervise refuse before effects, with readiness absent or installed. |
+| merge-admission-switch | merge_launch_admitted() is False until owner activation at U8; active merge entries refuse before effects even with readiness installed. |
+| unavailable-audit | With D5 active, the post-merge tracker audit prints UNAVAILABLE without launching or importing linear_sync and without audit writes or transport. |
+| entry-point-routing | swarm.py cmd_run, cmd_advance and main use shared d5_activation routing; merge_unit.py main retains its admission refusal. The named inactive captures remain equal to their recorded baselines. |
+| bytecode-advisory | The swarm entries warn when D5 is active and sys.dont_write_bytecode is false. The advisory neither changes that flag nor probes the filesystem, and diagnostic failures never block schema. |
 
 ## Explicit non-claims
 
@@ -45,7 +63,7 @@ No production activation is performed by these tests.
 - No non-canonical guard coverage.
 - No `linear_sync` mutator direct-root refusals (ARC-3766-OD1a).
 - No route-inventory drift guard (ARC-4171-OD2). The owner checks the inventory
-  by hand at the U8 activation review. The guarantee-table consistency check
+  by hand at the U8 activation review. The ledger consistency check
   does not inventory newly added production routes.
 - No review or committee admission or option injection under D5. U4.9b did
   not land; U8 must decide these before activation. The review-gate activation
