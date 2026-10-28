@@ -15,7 +15,7 @@ from tests.test_d5_u4_0b1_issuance import no_effects
 from tests.watchdog_guard import guarded_main
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = 'bf63c0224f95f5e253df0f97201205d6d2f3e07c'
+BASE = '4a97999d999347cdc52a6496bbfa5392f0b22d88'
 GATE = ROOT / 'skills/hanig-review-gate/scripts'
 FIXTURES = ROOT / 'tests/fixtures/d5'
 sys.path.insert(0, str(GATE))

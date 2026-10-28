@@ -20,11 +20,28 @@ def tracked(root):
             if not row.startswith(b'160000 ')]
 
 
+def reject_script_links(root):
+    def unreadable(exc):
+        raise AssertionError('unreadable script tree: ' + str(exc)) from exc
+    for scripts in Path(root).glob('skills/*/scripts'):
+        for path in (scripts.parent, scripts):
+            if path.is_symlink():
+                raise AssertionError('symlink: ' + str(path))
+        for folder, dirs, files in os.walk(scripts, onerror=unreadable):
+            for name in dirs + files:
+                path = Path(folder) / name
+                if path.is_symlink():
+                    raise AssertionError('symlink: ' + str(path))
+
+
 def candidates(root, paths):
     found = set()
     for name in paths:
         path = Path(root) / name
-        if path.lstat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            continue
+        if mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
             found.add(name)
         if path.suffix == '.py':
             try:
@@ -47,10 +64,19 @@ def candidates(root, paths):
 
 def check_inventory(root, paths, manifest):
     admitted = {row['path'] for row in manifest['entrypoints']}
-    denied = set(manifest['denied_entrypoints'])
+    denied = manifest['denied_entrypoints']
+    if isinstance(denied, dict):
+        denied = [prefix + name for prefix, names in denied.items() for name in names]
+    denied = set(denied)
     if admitted & denied:
         raise AssertionError('entry both admitted and denied')
+    reject_script_links(root)
     try:
+        for name in admitted | denied:
+            path = Path(root) / name
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise AssertionError('nonregular recorded route: ' + name)
+            path.read_bytes()
         missing = candidates(root, paths) - admitted - denied
     except OSError as exc:
         raise AssertionError('unreadable tracked entry: ' + str(exc)) from exc
@@ -106,30 +132,51 @@ class TestEntrypointInventory(unittest.TestCase):
 
     def test_drift_mutations_fail_closed(self):
         for mutation in ('unrecorded-main', 'unrecorded-exec', 'unrecorded-symlink',
-                         'unrecorded-python-symlink', 'deleted-file', 'syntax-error', 'deleted-record'):
+                         'unrecorded-python-symlink', 'data-link', 'exec-link', 'dir-link',
+                         'deleted-file', 'deleted-route', 'unreadable-file', 'syntax-error', 'deleted-record'):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / 'new.py'
+                folder = Path(tmp) / 'skills/fixture/scripts'
+                folder.mkdir(parents=True)
+                path = folder / ('new' if mutation == 'unreadable-file' else 'new.py')
                 path.write_text('if __name__ == "__main__":\n    pass\n')
                 manifest = {'entrypoints': [], 'denied_entrypoints': []}
+                paths = [str(path.relative_to(tmp))]
                 if mutation == 'unrecorded-exec':
                     path.write_text('pass\n')
                     path.chmod(0o755)
                 elif mutation in ('unrecorded-symlink', 'unrecorded-python-symlink'):
                     path.unlink()
-                    path = Path(tmp) / ('link.py' if mutation == 'unrecorded-python-symlink' else 'link')
+                    path = folder / ('link.py' if mutation == 'unrecorded-python-symlink' else 'link')
                     path.symlink_to('absent')
-                elif mutation == 'deleted-file':
-                    manifest['entrypoints'] = [{'path': path.name}]
+                    paths = [str(path.relative_to(tmp))]
+                elif mutation in ('data-link', 'exec-link', 'dir-link'):
+                    target = Path(tmp) / 'target'
+                    if mutation == 'dir-link':
+                        target.mkdir()
+                    else:
+                        target.write_text('fixture')
+                        target.chmod(0o755 if mutation == 'exec-link' else 0o644)
                     path.unlink()
+                    path.symlink_to(target)
+                    paths = []  # Untracked links must also fail.
+                elif mutation in ('deleted-file', 'deleted-route'):
+                    manifest['entrypoints'] = [{'path': paths[0]}]
+                    path.unlink()
+                    if mutation == 'deleted-route':
+                        paths = []  # Also exercise a staged deletion.
+                elif mutation == 'unreadable-file':
+                    manifest['entrypoints'] = [{'path': paths[0]}]
+                    path.chmod(0)
                 elif mutation == 'syntax-error':
                     path.write_text('if invalid syntax\n')
-                    manifest['denied_entrypoints'] = [path.name]
+                    manifest['denied_entrypoints'] = paths.copy()
                 elif mutation == 'deleted-record':
-                    manifest['denied_entrypoints'] = [path.name]
-                    check_inventory(tmp, [path.name], manifest)
+                    manifest['denied_entrypoints'] = paths.copy()
+                    check_inventory(tmp, paths, manifest)
                     manifest['denied_entrypoints'].clear()
-                with self.assertRaisesRegex(AssertionError, path.name):
-                    check_inventory(tmp, [path.name], manifest)
+                pattern = ('symlink.*' if 'link' in mutation else '') + str(path.relative_to(tmp))
+                with self.assertRaisesRegex(AssertionError, pattern):
+                    check_inventory(tmp, paths, manifest)
 
 
 if __name__ == '__main__':
