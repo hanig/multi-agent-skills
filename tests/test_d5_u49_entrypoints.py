@@ -97,6 +97,28 @@ class TestRoutes(unittest.TestCase):
 
 
 class TestAdvisory(unittest.TestCase):
+    def schema_output(self, stderr):
+        output = io.StringIO()
+        with mock.patch.object(activation, 'd5_active', return_value=True), \
+                mock.patch.object(sys, 'dont_write_bytecode', False), \
+                mock.patch.object(sys, 'argv', ['swarm.py', 'schema']), \
+                redirect_stdout(output), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as stopped:
+                S.main()
+            self.assertEqual(stopped.exception.code, 0)
+        return output.getvalue()
+
+    def test_missing_stderr_preserves_schema_stdout(self):
+        expected = self.schema_output(io.StringIO())
+        self.assertEqual(self.schema_output(None), expected)
+
+    def test_unexpected_stderr_errors_never_gate_schema(self):
+        expected = self.schema_output(io.StringIO())
+        for error in (RuntimeError, AttributeError, TypeError):
+            with self.subTest(error=error.__name__):
+                stream = mock.Mock(write=mock.Mock(side_effect=error('synthetic stream failure')))
+                self.assertEqual(self.schema_output(stream), expected)
+
     def test_warning_truth_table_at_swarm_entries(self):
         for active in (False, True):
             for disabled in (False, True):
