@@ -1,4 +1,4 @@
-"""Limited tracked-entry drift detection, not repository-wide caller closure."""
+"""Tracked route drift, not caller closure."""
 import ast
 import json
 import os
@@ -14,9 +14,10 @@ MANIFEST = ROOT / 'tests/fixtures/d5/integration-manifest.json'
 
 
 def tracked(root):
-    result = subprocess.run(['git', 'ls-files', '-z'], cwd=str(root),
+    result = subprocess.run(['git', 'ls-files', '--stage', '-z'], cwd=str(root),
         capture_output=True, check=True, timeout=30)
-    return os.fsdecode(result.stdout).split('\0')[:-1]
+    return [os.fsdecode(row.split(b'\t', 1)[1]) for row in result.stdout.split(b'\0')[:-1]
+            if not row.startswith(b'160000 ')]
 
 
 def candidates(root, paths):
@@ -24,7 +25,7 @@ def candidates(root, paths):
     for name in paths:
         path = Path(root) / name
         if path.lstat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-            found.add(name)  # Includes symlinks via lstat, including dangling links.
+            found.add(name)
         if path.suffix == '.py':
             try:
                 tree = ast.parse(path.read_bytes(), filename=name)
@@ -66,13 +67,16 @@ class TestEntrypointInventory(unittest.TestCase):
             git('init', '-q')
             manifest = {'entrypoints': [], 'denied_entrypoints': []}
             check_inventory(tmp, tracked(tmp), manifest)
+            (Path(tmp) / 'module').mkdir()
+            git('update-index', '--add', '--cacheinfo', '160000,' + 'a' * 40 + ',module')
+            check_inventory(tmp, tracked(tmp), manifest)
+            git('update-index', '--force-remove', 'module')
             oid = git('hash-object', '-w', '--stdin', data=b'fixture').strip()
             name = b'caf\xe9.dat'
             git('update-index', '-z', '--index-info', data=b'100644 ' + oid + b'\t' + name + b'\0')
             def lstat(path):
                 self.assertEqual(os.fsencode(path), os.fsencode(tmp) + b'/' + name)
-                return type('Mode', (), {'st_mode': mode})()
-            # The real Git index supplies bytes even on filesystems rejecting this name.
+                return mock.Mock(st_mode=mode)
             with mock.patch.object(Path, 'lstat', lstat):
                 mode = 0o100644
                 check_inventory(tmp, tracked(tmp), manifest)
