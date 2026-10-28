@@ -116,7 +116,7 @@
 "u49_guarantees":[
   {
     "id": "merge-child-containment",
-    "claim": "The designated merge child uses shell=False and close_fds=True, receives no authority descriptors, and filters D5/session/provider/tracker credentials while retaining the declared forge credentials. Arbitrary commands and extra switches refuse.",
+    "claim": "The designated merge child uses shell=False and close_fds=True, receives no authority descriptors, and filters the declared D5/session/provider/tracker credential names while retaining the declared forge credentials. Arbitrary commands and undesignated extra switches refuse.",
     "mechanisms": [
       "merge_unit.py:_merge_child_env",
       "merge_unit.py:_MergeBoundary.start"
