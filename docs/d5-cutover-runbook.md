@@ -5,8 +5,7 @@ Title: D5 preparatory cutover runbook
 Purpose: Bound the U7 race evidence and list the human checks and owner decisions before U8.
 
 The owner's 2026-10-28 "Drop U5, shrink U7" decision drops U5 because U6
-closes row 75. This preparation grants no activation, write or merge authority.
-U8 remains owner-controlled; [the mandate](orchestrator-mandate.md) is unchanged.
+closes row 75. U8 remains owner-controlled; [the mandate](orchestrator-mandate.md) is unchanged.
 
 ## Quiescence and human inventory
 
@@ -79,7 +78,7 @@ calls. Production requires process exit after unreleased submit (ARC-3762-OD1).
 
 The U4.x test names were checked at base `7a7559bdff5ef60d00e064a51d5ba892622ff63c`
 (`test_d5_u4*.py` and `test_d5_containment.py`): none names compaction. U7 drops
-context-compaction testing. No scenario R1-R7 is silently omitted.
+context-compaction testing. 
 
 ## Non-claims
 
