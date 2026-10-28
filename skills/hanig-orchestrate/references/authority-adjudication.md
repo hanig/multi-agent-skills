@@ -24,7 +24,7 @@ The decision record answers five questions:
 4. Which pre-existing policy authorizes leaving it?
 5. What observable result falsifies irrelevance?
 
-Record all five answers and "decided by orchestrator judgment, Sol not consulted" for judgment dispositions. Consult Sol only when unsure; then concurrence applies unchanged. Answers never replace evidence; never-overridable classes, honesty, reproduction, green CI and merge checks remain binding. <!-- declaration: adjudication.record -->
+Judgment requires these answers and the phrase in adjudication.concurrence; neither substitutes for evidence. <!-- declaration: adjudication.record -->
 
 Hard constraints, required evidence and outputs, authority boundaries, shared guards, and candidate checks remain outside relevance exceptions. <!-- declaration: adjudication.nonoverridable -->
 
