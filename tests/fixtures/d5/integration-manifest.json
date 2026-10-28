@@ -116,7 +116,6 @@
 "u49_guarantees":[
   {
     "id": "merge-child-containment",
-    "claim": "The designated merge child uses shell=False and close_fds=True, receives no authority descriptors, and filters the declared D5/session/provider/tracker credential names while retaining the declared forge credentials. Arbitrary commands and undesignated extra switches refuse.",
     "mechanisms": [
       "merge_unit.py:_merge_child_env",
       "merge_unit.py:_MergeBoundary.start"
@@ -128,7 +127,6 @@
   },
   {
     "id": "direct-root-refusals",
-    "claim": "With D5 active, unit.py allocate/bind/check and remote_verify.py worker/supervise refuse before effects, with readiness absent or installed.",
     "mechanisms": [
       "unit.py:main",
       "remote_verify.py:main"
@@ -139,7 +137,6 @@
   },
   {
     "id": "merge-admission-switch",
-    "claim": "merge_launch_admitted() is False until owner activation at U8; active merge entries refuse before effects even with readiness installed.",
     "mechanisms": [
       "merge_unit.py:merge_launch_admitted",
       "merge_unit.py:_d5_merge_launch_entry",
@@ -152,7 +149,6 @@
   },
   {
     "id": "unavailable-audit",
-    "claim": "With D5 active, the post-merge tracker audit prints UNAVAILABLE without launching or importing linear_sync and without audit writes or transport.",
     "mechanisms": [
       "merge_unit.py:print_tracker_audit"
     ],
@@ -162,7 +158,6 @@
   },
   {
     "id": "entry-point-routing",
-    "claim": "swarm.py cmd_run, cmd_advance and main use shared d5_activation routing; merge_unit.py main retains its admission refusal. The named inactive captures remain equal to their recorded baselines.",
     "mechanisms": [
       "swarm.py:cmd_run",
       "swarm.py:cmd_advance",
@@ -182,7 +177,6 @@
   },
   {
     "id": "bytecode-advisory",
-    "claim": "The swarm entries warn when D5 is active and sys.dont_write_bytecode is false. The advisory neither changes that flag nor probes the filesystem, and diagnostic failures never block schema.",
     "mechanisms": [
       "swarm.py:_d5_bytecode_advisory"
     ],
@@ -193,5 +187,14 @@
       "tests.test_d5_u49_entrypoints.TestAdvisory.test_unexpected_stderr_errors_never_gate_schema"
     ]
   }
+],
+"u49_non_claims":[
+  "process-and-same-uid-isolation",
+  "bytecode-suppression-and-stale-cache",
+  "repository-wide-quiet-and-od4",
+  "non-canonical-guard-coverage",
+  "linear-sync-direct-root-refusals",
+  "route-inventory-drift-guard",
+  "review-committee-admission-and-option-injection"
 ]
 }
