@@ -119,7 +119,7 @@
     "suffix": "-terra",
     "major": 6
    },
-   "effort": "max",
+   "effort": "xhigh",
    "profiles": [
     "standard",
     "deep"
@@ -140,6 +140,15 @@
     "output_tokens": 50422,
     "completed_replies": 171,
     "observed_in": "Bench, not preflight: corpus-v2, terra-20261027; bench/score-terra/runs-view/std-terra-for-luna/trial-1/a1b-r1.json token counts. 57 replies each: terra, std-terra-for-luna, std-terra-for-kimi."
+   },
+   "_effort_comment": "Owner decision 2026-10-28 (ARC-4179): xhigh replaces max. Frozen corpus-v2, 3 solo trials each, same method and adjudication: in-envelope recall xhigh 24/51 = 47% [34, 61] vs max 25/51 = 49% [36, 62]; McNemar 3:4, p = 1.0; held-out 6/18 vs 7/18; clean controls with a false finding 1/9 vs 2/9; xhigh unavailable 0/57; median review 148 s vs 579 s; output tokens 12.9k vs 53k per review. review.py --list --only terra-xhigh returned ready; replies reported effort xhigh. Bench: /Users/hani/.local/state/hanig-swarm/orchestrator/bench/score-terra-effort/.",
+   "_max_output_tokens_xhigh_accepted": {
+    "date": "2026-10-28",
+    "max_output_tokens": 128000,
+    "effort": "xhigh",
+    "outcome": "completed",
+    "completed_replies": 171,
+    "observed_in": "Bench: /Users/hani/.local/state/hanig-swarm/orchestrator/bench/score-terra-effort/; 57 completed xhigh replies per seat run, 171 total at a 128000 cap. The max-effort measurement above remains historical evidence."
    },
    "_comment": "Owner decision 2026-10-28: overrules m2 adoption: Terra replaces Luna in standard/deep; fast/plan unchanged. Frozen corpus-v2, bench/score-terra, terra-20261027: Terra-for-Luna recall 27/51 = 53% [40, 66] versus 45% [32, 59]; held-out 9/18 versus 6/18; clean-control false-finding trials 2/9 versus 1/9 (fails adoption by one); 0/171 Terra replies unavailable; median about 10 minutes versus Luna's 6."
   },

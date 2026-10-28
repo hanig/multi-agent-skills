@@ -124,7 +124,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
     def test_upgraded_models_reach_the_openai_request_with_existing_limits(self):
         roster = {r["name"]: r for r in R.load_reviewers()}
         for name, model, effort in (("luna", "gpt-6-luna", "max"),
-                                    ("terra", "gpt-6.1-terra", "max"),
+                                    ("terra", "gpt-6.1-terra", "xhigh"),
                                     ("astra", "gpt-6-astra", "xhigh"),
                                     ("sol", "gpt-6.1-sol", "xhigh")):
             with self.subTest(reviewer=name), \
@@ -167,7 +167,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
     def test_owner_decision_efforts_and_transports_are_exact(self):
         expected = {
             "luna": ("openai", "gpt-6-luna", "max"),
-            "terra": ("openai", "gpt-6.1-terra", "max"),
+            "terra": ("openai", "gpt-6.1-terra", "xhigh"),
             "haiku-5.5": ("anthropic", "claude-haiku-5-5", "max"),
             "astra": ("openai", "gpt-6-astra", "xhigh"),
             "kimi-k3": ("openrouter", "moonshotai/kimi-k3", "xhigh"),
