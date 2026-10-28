@@ -71,6 +71,19 @@
         "coding_index": 74.6,
         "notes": "User-preferred on max reasoning. AA Coding Agent Index ~74.6 (Terra 77, Sol 80). Stronger instruction following + image-capable frontend inspection in sprints."
       }
+    },
+    {
+      "id": "codex/gpt-6.1-terra",
+      "label": "GPT-6.1 Terra",
+      "intelligence_index": null,
+      "intelligence_index_source": "not measured",
+      "coding_index": null,
+      "modalities": [
+        "text"
+      ],
+      "cost_tier": "unmeasured",
+      "quota": "OpenAI API review; Codex/Paseo dispatch unmeasured",
+      "notes": "Owner decision 2026-10-28: standard/deep review at max; bench and family in reviewers.json. Price and dispatch unmeasured."
     }
   ]
 }

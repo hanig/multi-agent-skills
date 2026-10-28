@@ -4,7 +4,7 @@
  "_profiles": {
   "plan": "TWO contrasting models, never escalated. For acceptance criteria and designs, BEFORE code exists. Owner decision 2026-10-19: luna and kimi-k3, OpenAI and Moonshot, chosen by the spec-case benchmark tie rule because the candidate pairs were not separated and Luna had 33% measured code-review recall.",
   "fast": "luna and haiku-5.5; cheapest implementation panel, the first tier of --escalate (owner decision 2026-10-12).",
-  "standard": "luna, kimi-k2.7-code and sonnet-5.5; the usual fixed implementation panel. Escalating from fast retains its verdicts and adds kimi-k2.7-code and sonnet-5.5.",
+  "standard": "terra, kimi-k2.7-code and sonnet-5.5; the usual fixed implementation panel. Escalating from fast retains its verdicts and adds these three seats.",
   "deep": "standard + sol. Final --escalate tier, or a fixed --profile deep panel. astra is NOT here since 2026-09-24: it writes the code now, and an author does not review itself.",
   "committee": "committee.py members, separate from gate profiles. Owner decision 2026-10-13: deepseek-v4-pro, gemini-argon and sonnet-5.5, three model makers. DeepSeek sits in no gate profile.",
   "tiebreak": "Committee divergence only: the ONE enabled reviewer whose only profile is tiebreak rules on existing positions. committee.py selects it by this profile, never by name or model. Not a gate tier or a committee membership profile. sol-tiebreak since 2026-09-28, replacing astra-xhigh because astra authors the code it would rule on (ARC-755).",
@@ -58,10 +58,8 @@
    },
    "effort": "max",
    "profiles": [
-    "deep",
     "fast",
-    "plan",
-    "standard"
+    "plan"
    ],
    "enabled": true,
    "_cost": {
@@ -108,6 +106,42 @@
     }
    ],
    "_note": "Owner decision 2026-10-12: muse-wonder takes the committee seat; fast, standard and deep stay. Effort becomes max, accepted live by the coordinator on 2026-10-12."
+  },
+  {
+   "name": "terra",
+   "provider": "openai",
+   "model": "gpt-6.1-terra",
+   "family": {
+    "listing": "openai",
+    "vendor": "",
+    "prefix": "gpt-",
+    "separator": ".",
+    "suffix": "-terra",
+    "major": 6
+   },
+   "effort": "max",
+   "profiles": [
+    "standard",
+    "deep"
+   ],
+   "enabled": true,
+   "_cost": null,
+   "_cost_note": "Unknown at 2026-10-28; no recorded Terra price.",
+   "max_output_tokens": 128000,
+   "_max_output_tokens": "MEASURED in bench, not preflight; counts below describe one reply.",
+   "_max_output_tokens_accepted": {
+    "date": "2026-10-28",
+    "max_output_tokens": 128000,
+    "provider": "openai",
+    "model": "gpt-6.1-terra",
+    "effort": "max",
+    "outcome": "completed",
+    "input_tokens": 9853,
+    "output_tokens": 50422,
+    "completed_replies": 171,
+    "observed_in": "Bench, not preflight: corpus-v2, terra-20261027; bench/score-terra/runs-view/std-terra-for-luna/trial-1/a1b-r1.json token counts. 57 replies each: terra, std-terra-for-luna, std-terra-for-kimi."
+   },
+   "_comment": "Owner decision 2026-10-28: overrules m2 adoption: Terra replaces Luna in standard/deep; fast/plan unchanged. Frozen corpus-v2, bench/score-terra, terra-20261027: Terra-for-Luna recall 27/51 = 53% [40, 66] versus 45% [32, 59]; held-out 9/18 versus 6/18; clean-control false-finding trials 2/9 versus 1/9 (fails adoption by one); 0/171 Terra replies unavailable; median about 10 minutes versus Luna's 6."
   },
   {
    "name": "kimi-k2.7-code",

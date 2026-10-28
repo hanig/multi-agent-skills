@@ -296,13 +296,9 @@ python3 "$R" --kind implementation --round 1 --escalate --staged \
 adds reviewers not previously run, and stops at the first `REVIEW_FAIL` or
 `REVIEW_CLAIMS_REFUTED` with quorum:
 
-```
-fast      luna + haiku-5.5
-  ↓ pass
-standard  + kimi-k2.7-code + sonnet-5.5
-  ↓ pass
-deep      + sol @ xhigh
-```
+The tier order is `fast` → `standard` → `deep`. Enabled membership comes
+from `reviewers.json`; each step retains earlier results and calls only
+newly eligible reviewers. Use `--list --profile NAME` to inspect a fixed panel.
 
 A failing change costs its starting tier when that tier reaches quorum.
 Pass
@@ -447,23 +443,16 @@ honest sentence is always available.
 
 Routing lives in `reviewers.json`; `review.py --list` measures availability live. The config carries **no quality scores**.
 
-| Name | Provider | Model | Needs |
-|---|---|---|---|
-| `luna` | OpenAI | `gpt-6-luna` (effort `max`, fast/standard/deep) | `OPENAI_API_KEY` |
-| `haiku-5.5` | Anthropic | `claude-haiku-5-5` (effort `max`, fast) | `ANTHROPIC_API_KEY` |
-| `sonnet-5.5` | Anthropic | `claude-sonnet-5-5` (effort `high`, standard/deep/committee) | `ANTHROPIC_API_KEY` |
-| `kimi-k2.7-code` | OpenRouter | `moonshotai/kimi-k2.7-code` (standard/deep) | `OPENROUTER_API_KEY` |
-| `astra` | OpenAI | `gpt-6-astra` (effort `xhigh`, plan) | `OPENAI_API_KEY` |
-| `kimi-k3` | OpenRouter | `moonshotai/kimi-k3` (effort `xhigh`, plan) | `OPENROUTER_API_KEY` |
-| `gemini-argon` | OpenRouter | `google/gemini-4-argon` (effort `xhigh`, committee) | `OPENROUTER_API_KEY` |
-| `sol` | OpenAI | `gpt-6.1-sol` (effort `xhigh`, deep) | `OPENAI_API_KEY` |
-
+Read the enabled seats, model IDs, efforts and profile membership from
+`reviewers.json`. Inspect standard and deep with `review.py --list --profile
+standard` and `review.py --list --profile deep`; these probe the selected
+providers live.
 Provider keys come from `~/.zshrc`; run through `zsh -ic` so the gate can read them.
 
 **Point releases resolve per project** (`scripts/resolve_models.py`; README, "Model families").
 
-Owner decision 2026-10-12: plan pairs Astra and Kimi K3 (OpenAI and Moonshot), since a Claude orchestrator writes plans.
-The committee is DeepSeek V4 Pro, Gemini 4 Argon and Sonnet 5.5; `sol-tiebreak` stays unchanged. Declared authors are excluded.
+Plan and committee membership also come from `reviewers.json`. Declared authors
+are excluded.
 Reviewers run in parallel, so wall time is the slowest one.
 
 Transient 5xx and 429 responses are retried with backoff — a gateway hiccup must
