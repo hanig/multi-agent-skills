@@ -57,7 +57,7 @@ mandate; do not generalise a tool's gate into a standing obligation to consult.
 - Run the review gate, and reproduce any finding before acting on it.
 - Open pull requests from an anchored attempt ref.
 - Merge pull requests that satisfy the adjudication policy below.
-- Dispose of a confirmed, reproduced finding as nonblocking on orchestrator judgment when it is unlikely to change the design or the outcome, including an owner-accepted tradeoff, within the adjudication bounds below; consult Sol only when unsure.
+- Dispose of reproduced findings by orchestrator judgment under the policy below; consult Sol only when unsure.
 - Defer a reproduced finding outside a task's declared supported envelope, without concurrence, under *Findings outside the supported envelope* below.
 - Record merge receipts, advance the DAG, drain tracker intents.
 - File, update and close issues in this project.
@@ -99,7 +99,8 @@ This list is complete. Nothing outside it is a reason to stop a confirmed run.
 
 ## Adjudication policy
 
-A `REVIEW_FAIL` is not an instruction to abandon work. It requires a recorded
+A `REVIEW_FAIL` is not an instruction to abandon work, and it is not an
+instruction to defer to the orchestrator's judgement. It requires a recorded
 disposition before merge. The same holds for `REVIEW_CLAIMS_REFUTED` (exit 7):
 the panel refuted the author's description of the change rather than
 confirming a defect in it. The remedy is to correct the claim or the code;
@@ -109,16 +110,15 @@ it is not a pass.
 |---|---|
 | Disproved by evidence | Dismiss, citing the contradictory evidence. Preserve the original review. |
 | Confirmed, and violates a hard invariant or a required criterion | Repair. No relevance exception exists. |
-| Confirmed and reproduced, unlikely to change the design or the outcome, including an owner-accepted tradeoff | Eligible for a nonblocking disposition on orchestrator judgment within the bounds below; consult Sol only when unsure. |
+| Confirmed and reproduced, unlikely to change the design or outcome | Eligible under the judgment and conditional concurrence rule below. |
 | Unresolved, ambiguous in scope, or outside delegated risk | Block the merge. Investigate within budget, then ask the owner. |
 
 ### The concurrence rule
 
-The orchestrator may dispose of a confirmed, reproduced finding as nonblocking
-on its own judgment, without concurrence, when it judges that the finding is
-unlikely to change the design or the outcome, including an owner-accepted
-tradeoff. It consults Sol only when unsure; then the existing concurrence rule
-applies:
+The orchestrator may make a confirmed, reproduced finding nonblocking on its
+own judgment, without concurrence, when unlikely to change the design or the
+outcome, including an owner-accepted tradeoff. Consult Sol only when unsure;
+then the existing concurrence rule applies:
 
 A confirmed finding may then be dispositioned nonblocking only when **the
 orchestrator and GPT-Sol (the `sol` reviewer in `reviewers.json`) agree that
@@ -140,11 +140,10 @@ change, the disposition goes to the owner.
 
 When Sol is consulted, deadlock fails toward more work, not toward shipping.
 
-Orchestrator judgment cannot waive any class in *Never overridable, whatever
-the relevance* below. Honesty in the record, reproduce-before-acting, green CI
-and all merge checks remain binding. An author never accepts its own rebuttal;
-an orchestrator that authored the affected change sends the disposition to the
-owner.
+All never-overridable classes remain binding on orchestrator judgment.
+Honesty, reproduce-before-acting, green CI and merge checks remain binding;
+an author never accepts its own rebuttal. Every judgment disposition records
+the five answers below and "decided by orchestrator judgment, Sol not consulted".
 
 Fast progress is an explicit goal: when a finding would not change the design
 or the outcome, the orchestrator prefers disposition and merge over further
@@ -157,9 +156,6 @@ repair rounds, within these bounds.
 3. Does accepting it weaken a shared test, verifier, interface or later unit?
 4. Which pre-existing policy permits leaving it unfixed?
 5. What observable result would falsify the claim that it is irrelevant?
-
-Every judgment disposition records all five answers and the words
-"decided by orchestrator judgment, Sol not consulted".
 
 Insufficient on their own: "unrelated file", "low severity", "expensive to
 fix", "another pull request will fix it".
@@ -183,7 +179,7 @@ corrected or explicitly withdrawn, never silently endorsed.
 
 Every dispatched code task declares its supported envelope and accepted limits. Define them through readers and consequences, including ordinary environmental inputs, persisted state, interruption, restart and documented recovery. An input is not outside the envelope merely because the coordinator does not produce it. The review panel receives this declaration and may refute its boundaries.
 
-The out-of-envelope exception remains a special case. An orchestrator that did not author the affected design or implementation may defer a reproduced finding without concurrence when evidence establishes an unsupported trigger, bounded consequences and no violation of a never-overridable requirement. If this special case does not apply, use the judgment and conditional concurrence rule above. Round number and class name confer no exemption.
+The out-of-envelope exception remains a special case: a non-author orchestrator may defer a reproduced finding without concurrence when evidence establishes an unsupported trigger, bounded consequences and no never-overridable violation. Otherwise apply the judgment and conditional concurrence rule above. Round number and class name confer no exemption.
 
 Refusal alone is insufficient. Evidence must establish bounded termination or safe stopping, an actionable diagnosis reaching the responsible operator, preservation of work and authority, and no indefinite obstruction of unrelated work. Recovery must be written so the operator can follow it, with prerequisites and a recognizable successful result. Demonstrate recovery when it is non-obvious or touches evidence, authority or uncertain external effects. Existing demonstrations may cover equivalent cases. Uncertain bounds block deferral.
 
