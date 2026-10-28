@@ -14,10 +14,13 @@ import json
 from pathlib import Path
 import re
 import tempfile
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 DOCUMENT = ROOT / 'docs/d5-integration.md'
 MANIFEST = ROOT / 'tests/fixtures/d5/integration-manifest.json'
 CANDIDATE = re.compile(r'^[ \t]*`{3,}[ \t]*d5-claims\b[^\n]*$', re.M)
@@ -69,9 +72,9 @@ def resolve_test(name):
         raise AssertionError('guarantee-test-missing: ' + name) from exc
     assert isinstance(cls, type) and issubclass(cls, unittest.TestCase), 'not a TestCase'
     assert callable(target), 'guarantee-test-missing: ' + name
-    assert not (cls.__module__.endswith('test_d5_u49_activation_closure') or
-                getattr(target, '__module__', '').endswith('test_d5_u49_activation_closure')), \
-        'closure-test-self-reference'
+    code = getattr(target, '__code__', None)
+    assert not (code and Path(code.co_filename).resolve() == Path(__file__).resolve()
+                and code.co_name == 'test_docs_manifest_closure'), 'closure-test-self-reference'
     assert not (getattr(cls, '__unittest_skip__', False) or
                 getattr(target, '__unittest_skip__', False)), 'guarantee-test-skipped'
     loader = unittest.TestLoader()
@@ -236,19 +239,29 @@ class TestActivationClosure(unittest.TestCase):
 
     def test_test_resolution_rejects_skipped_noncase_and_self(self):
         data = claims_block(self.document)[2]
-        name = data['guarantees'][0]['test']
-        module, cls_name, method = name.rsplit('.', 2)
-        cls = getattr(importlib.import_module(module), cls_name)
-        for owner in (cls, getattr(cls, method)):
+        module, cls, method = data['guarantees'][0]['test'].rsplit('.', 2)
+        module = importlib.import_module(module)
+        case = getattr(module, cls)
+        for owner in (case, getattr(case, method)):
             with mock.patch.object(owner, '__unittest_skip__', True, create=True), \
                     self.assertRaisesRegex(AssertionError, 'guarantee-test-skipped'):
                 self.check_file(render(data))
-        with mock.patch.object(importlib.import_module(module), cls_name, type('NonCase', (), {method: lambda: None})), \
+        with mock.patch.object(module, cls, type('NonCase', (), {method: lambda: None})), \
                 self.assertRaisesRegex(AssertionError, 'not a TestCase'):
             self.check_file(render(data))
-        data['guarantees'][0]['test'] = __name__ + '.TestActivationClosure.test_docs_manifest_closure'
-        with self.assertRaisesRegex(AssertionError, 'closure-test-self-reference'):
+        data['guarantees'][0]['test'] = 'tests.test_self.TestActivationClosure.test_docs_manifest_closure'
+        with mock.patch.dict(sys.modules, {'tests.test_self': sys.modules[__name__]}), \
+                self.assertRaisesRegex(AssertionError, 'closure-test-self-reference'):
             self.check_file(render(data))
+
+    def test_self_reference_invocations(self):
+        file = Path(__file__)
+        for args in (['-m', 'unittest', 'discover', '-s', 'tests', '-p', file.name],
+                     ['-m', 'unittest', 'tests.' + file.stem], [str(file)]):
+            run = subprocess.run([sys.executable] + args + ['-k', 'test_test_resolution'],
+                                 cwd=ROOT, capture_output=True, text=True, timeout=60)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn('Ran 1 test', run.stderr)
 
     def test_named_mechanisms_and_behavior_tests(self):
         data = check_contract(self.document, self.manifest)
