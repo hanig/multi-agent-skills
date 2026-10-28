@@ -312,11 +312,13 @@ def _d5_bytecode_advisory():
     """Report an interpreter precondition; U8 may enforce or waive it."""
     if D5.d5_active() and not sys.dont_write_bytecode:
         try:
-            print("D5 advisory: bytecode writing is enabled; use -B or "
-                  "PYTHONDONTWRITEBYTECODE=1. Bytecode and host temporary-directory "
-                  "readiness remain advisory preconditions for U8 to enforce or waive.",
-                  file=sys.stderr)
-        except (OSError, ValueError):
+            diagnostic = sys.stderr
+            if diagnostic is not None:
+                print("D5 advisory: bytecode writing is enabled; use -B or "
+                      "PYTHONDONTWRITEBYTECODE=1. Bytecode and host temporary-directory "
+                      "readiness remain advisory preconditions for U8 to enforce or waive.",
+                      file=diagnostic)
+        except Exception:
             # An unavailable diagnostic stream must not turn advice into refusal.
             pass
 

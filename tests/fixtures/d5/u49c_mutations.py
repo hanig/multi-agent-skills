@@ -40,6 +40,10 @@ CASES = {
         'main', '_d5_bytecode_advisory()', 'pass'),
     'advisory-stream-failure-blocks': ('TestAdvisory.test_read_only_and_diagnostic_failure_never_blocks',
         tests.S, '_d5_bytecode_advisory', '            pass', '            raise'),
+    'missing-stderr-falls-back-to-stdout': ('TestAdvisory.test_missing_stderr_preserves_schema_stdout',
+        tests.S, '_d5_bytecode_advisory', 'if diagnostic is not None:', 'if True:'),
+    'unexpected-stderr-error-escapes': ('TestAdvisory.test_unexpected_stderr_errors_never_gate_schema',
+        tests.S, '_d5_bytecode_advisory', 'except Exception:', 'except (OSError, ValueError):'),
 }
 
 
@@ -59,7 +63,7 @@ def main():
             result = run_test(test)
         if result.wasSuccessful():
             raise AssertionError('mutation survived: ' + name)
-        if result.errors and name != 'advisory-stream-failure-blocks':
+        if result.errors and name not in ('advisory-stream-failure-blocks', 'unexpected-stderr-error-escapes'):
             raise AssertionError('mutation failed outside an assertion: ' + name)
         print('RESTORED ' + name, flush=True)
         if not run_test(test).wasSuccessful():
