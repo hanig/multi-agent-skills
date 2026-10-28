@@ -1,6 +1,5 @@
 """Named entry/advisory reversions in memory; every restored test must pass."""
 import ast
-from contextlib import ExitStack
 import io
 from pathlib import Path
 import sys

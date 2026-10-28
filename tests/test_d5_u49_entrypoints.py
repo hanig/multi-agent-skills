@@ -115,7 +115,7 @@ class TestAdvisory(unittest.TestCase):
                             else:
                                 getattr(S, entry)(argparse.Namespace(plan='fixture-plan.json'))
                         if entry == 'main':
-                            self.assertIsNone(stopped.exception.code)
+                            self.assertEqual(stopped.exception.code, 0)
                         elif active:
                             self.assertIn('D5 active:', str(stopped.exception))
                         else:
@@ -146,7 +146,7 @@ class TestAdvisory(unittest.TestCase):
                 stack.enter_context(redirect_stdout(io.StringIO()))
                 with self.assertRaises(SystemExit) as stopped:
                     S.main()
-                self.assertIsNone(stopped.exception.code)
+                self.assertEqual(stopped.exception.code, 0)
 
 
 class TestInactive(unittest.TestCase):
