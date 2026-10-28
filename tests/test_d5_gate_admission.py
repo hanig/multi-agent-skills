@@ -146,11 +146,14 @@ class TestGateAdmission(unittest.TestCase):
             'review/size', 'review/list', 'review/ledger', 'review/option',
             'committee/open', 'committee/ask', 'committee/review',
             'committee/synthesize', 'committee/tiebreak', 'committee/show'})
+        env = {'PATH': ''}
+        if 'TMPDIR' in os.environ:
+            env['TMPDIR'] = os.environ['TMPDIR']
         for key, expected in fixture['captures'].items():
             with self.subTest(route=key):
                 result = subprocess.run([sys.executable, '-B', str(FIXTURES / 'u49b_probe.py'),
                     json.dumps([str(ROOT)] + key.split('/'))], capture_output=True,
-                    text=True, timeout=60, env={'PATH': ''})
+                    text=True, timeout=60, env=env)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), expected)
 

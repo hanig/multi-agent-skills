@@ -21,6 +21,8 @@ def capture(source, tool, command):
     import committee
     with ExitStack() as stack:
         root = Path(stack.enter_context(tempfile.TemporaryDirectory())).resolve()
+        stack.callback(os.chdir, Path.cwd())
+        os.chdir(root)
         stack.enter_context(mock.patch.dict(os.environ, {
             'PATH': '', 'XDG_STATE_HOME': str(root / 'state'),
             'HANIG_COMMITTEE_DIR': str(root / 'sessions'),
@@ -29,7 +31,8 @@ def capture(source, tool, command):
         }, clear=True))
         stack.enter_context(mock.patch.object(committee, 'SESSIONS', root / 'sessions'))
         stack.enter_context(mock.patch.object(review.time, 'sleep', return_value=None))
-        subject = root / 'body.txt'
+        # gather() counts the --file header too, so keep its path host-independent.
+        subject = Path('body.txt')
         subject.write_text('Fixture body')
         committee.save_session('fixture', dict(name='fixture', phase='plan',
             opened_at='fixture', problem='fixture', turns=[], members={}))
