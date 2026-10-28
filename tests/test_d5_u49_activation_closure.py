@@ -1,12 +1,4 @@
-"""U4.9 ledger closure; prose-to-ledger completeness is a review obligation.
-
-Fence grammar (physical lines, independent of prose): exactly three backticks
-immediately followed by d5-claims; zero to three leading spaces and trailing
-spaces/tabs are allowed on both fences. LF and CRLF are accepted. The closing
-line has only the three backticks and that whitespace. Extra info tokens,
-longer fences, tabs/four spaces of indentation and an unclosed block refuse.
-No headings, prose claims or Markdown container semantics are interpreted.
-"""
+"""Ledger closure; prose completeness needs review. Physical-line fence grammar: CANDIDATE/OPEN/CLOSE."""
 import ast
 import copy
 import importlib
