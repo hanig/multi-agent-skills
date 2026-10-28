@@ -186,6 +186,23 @@ class TestFamilyParser(unittest.TestCase):
                 self.assertIsNotNone(version, model)
                 self.assertEqual(version[0], family["major"])
 
+    def test_terra_family_admits_only_same_variant_point_releases(self):
+        seat = next(r for r in shipped()[0] if r["name"] == "terra")
+        family = MF.check_family(seat["family"])
+        self.assertEqual(family, dict(SOL, suffix="-terra"))
+        self.assertEqual(seat["model"], "gpt-6.1-terra")
+        self.assertEqual(MF.version_of(seat["model"], family), (6, 1))
+        invalid = ["gpt-6.2-sol", "gpt-6.2-luna", "gpt-6.2-terra-preview",
+                   "gpt-6.2-terra:batch", "openai/gpt-6.2-terra"]
+        for model in invalid:
+            with self.subTest(model=model):
+                self.assertIsNone(MF.version_of(model, family))
+        self.assertEqual(MF.select(invalid + [seat["model"], "gpt-6.2-terra",
+                                             "gpt-7-terra"], family, seat["model"]),
+                         ("gpt-6.2-terra", ["gpt-7-terra"]))
+        registry = json.loads((ROOT / "models.json").read_text(encoding="utf-8"))
+        self.assertIn("codex/" + seat["model"], {r["id"] for r in registry["models"]})
+
     def test_native_sonnet_catalog_uses_exact_ids_and_preserves_the_seat(self):
         seat = next(r for r in shipped()[0] if r["name"] == "sonnet-5.5")
         self.assertEqual((seat["provider"], seat["model"]),
@@ -1049,7 +1066,7 @@ class TestCandidateReports(StateHome):
 
 class TestResolveEndToEnd(StateHome):
     LISTINGS = {"openai": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-sol-pro", "gpt-7-sol",
-                           "gpt-6-luna", "gpt-6-astra"],
+                           "gpt-6-luna", "gpt-6-astra", "gpt-6.1-terra"],
                 "anthropic": ["claude-sonnet-5-5"],
                 "openrouter": ["moonshotai/kimi-k2.7-code",
                                "deepseek/deepseek-v4-pro"],
@@ -1082,6 +1099,7 @@ class TestResolveEndToEnd(StateHome):
         self.assertIn(("sol-tiebreak", "RESOLVED"), status)
         self.assertIn(("sol", "NEW_GENERATION"), status)
         self.assertIn(("luna", "PINNED"), status)
+        self.assertIn(("terra", "PINNED"), status)
         self.assertEqual({c.args[1] for c in probe.call_args_list}, {"gpt-6.1-sol"})
         snapshot = json.loads(Path(report["snapshot"]).read_text())
         self.assertEqual(set(snapshot["reviewers"]), {"sol", "sol-tiebreak"})
