@@ -993,7 +993,7 @@ class TestAuthoredSkillShape(unittest.TestCase):
         }
         with self.subTest(reader="adjudication matrix"):
             self.assertIn(
-                "under the mandate's concurrence rule or its "
+                "under the mandate's judgment and conditional concurrence rule or its "
                 "supported-envelope exception",
                 declarations["adjudication.matrix"],
             )
@@ -1004,9 +1004,68 @@ class TestAuthoredSkillShape(unittest.TestCase):
         ]
         with self.subTest(reader="concurrence reference"):
             self.assertEqual(len(concurrence_lines), 1)
-            self.assertTrue(concurrence_lines[0].startswith(
-                "When the mandate requires concurrence, "),
-                concurrence_lines[0])
+            self.assertIn("It consults Sol only when unsure; then the existing "
+                          "concurrence rule applies:", concurrence_lines[0])
+            self.assertIn("The out-of-envelope exception remains a special case",
+                          concurrence_lines[0])
+
+    def test_orchestrate_judgment_keeps_nonoverridable_classes_binding(self):
+        """Pin policy text, not semantic English inference or agent compliance."""
+        mandate = (ROOT / "docs/orchestrator-mandate.md").read_text(encoding="utf-8")
+        protected = mandate.split(
+            "### Never overridable, whatever the relevance\n\n", 1)[1].split(
+                "\n\n### ", 1)[0]
+        self.assertEqual(protected,
+            "Hard constraint violations. Missing, fabricated or improperly bound evidence.\n"
+            "Unauthorized or destructive action. Failure of a declared acceptance criterion\n"
+            "or a required output. Compromised isolation, anchors, closure authority or\n"
+            "verifier authorization. An unsound shared test or guard that can contaminate\n"
+            "later decisions. Failure of a required check on the actual candidate merge.")
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(SKILLS / "hanig-orchestrate")
+        }
+        self.assertEqual(declarations["adjudication.nonoverridable"],
+            "Never override a hard constraint, missing or fabricated evidence, "
+            "unauthorized or destructive action, failed required criterion or output, "
+            "compromised isolation or authority, an unsound shared guard, or a "
+            "missing candidate-merge check.")
+        self.assertIn("Orchestrator judgment cannot waive any class in *Never "
+                      "overridable, whatever\nthe relevance* below.", mandate)
+        self.assertIn("Orchestrator judgment cannot waive any class in the mandate's "
+                      "Never overridable, whatever the relevance list or "
+                      "adjudication.nonoverridable;", declarations["adjudication.concurrence"])
+
+    def test_orchestrate_judgment_records_bounds_and_conditional_concurrence(self):
+        skill = SKILLS / "hanig-orchestrate"
+        declarations = {
+            item["id"]: item["normative_text"]
+            for item in DECLARATION_REGISTRY.load_registry(skill)
+        }
+        mandate = (ROOT / "docs/orchestrator-mandate.md").read_text(encoding="utf-8")
+        reference = (skill / "references/authority-adjudication.md").read_text(
+            encoding="utf-8")
+        for label, text in (("mandate", mandate), ("declarations", " ".join(
+                declarations[key] for key in ("adjudication.matrix", "adjudication.concurrence"))),
+                ("reference", reference)):
+            with self.subTest(reader=label):
+                normalized = " ".join(text.split())
+                for phrase in ("confirmed, reproduced finding", "on its own judgment",
+                               "without concurrence", "owner-accepted tradeoff",
+                               "only when unsure", "Fast progress is an explicit goal",
+                               "disposition and merge over further repair rounds",
+                               "decided by orchestrator judgment, Sol not consulted",
+                               "five", "reproduce-before-acting", "green CI"):
+                    self.assertIn(phrase, normalized)
+        self.assertIn("When Sol is consulted, deadlock fails toward more work", mandate)
+        self.assertIn("both must independently agree", declarations["adjudication.concurrence"])
+        self.assertIn("disagreement triggers more review rather than merge",
+                      declarations["adjudication.concurrence"])
+        self.assertIn("honesty, reproduce-before-acting, green CI and all merge checks "
+                      "remain binding", declarations["adjudication.concurrence"])
+        for phrase in ("`REVIEW_FAIL` and `REVIEW_CLAIMS_REFUTED` are never relabelled as a pass",
+                       "corrected or explicitly withdrawn, never silently endorsed"):
+            self.assertIn(phrase, " ".join(mandate.split()))
 
     def test_every_declaration_registry_has_a_closed_inventory(self):
         registry_skills = sorted(
