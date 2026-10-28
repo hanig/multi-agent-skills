@@ -3707,8 +3707,6 @@ def cmd_run(args):
 
 
 def cmd_advance(args):
-    _d5_bytecode_advisory()
-    _d5_refuse('cmd_advance')
     return cmd_run(args)
 
 

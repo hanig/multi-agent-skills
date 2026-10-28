@@ -40,15 +40,17 @@ class TestRoutes(unittest.TestCase):
             with self.subTest(active=active), \
                     mock.patch.object(activation, 'd5_active', return_value=active), \
                     mock.patch.object(sys, 'dont_write_bytecode', True), \
-                    mock.patch.object(S, 'cmd_run', return_value=19) as run:
-                args = argparse.Namespace()
-                if active:
-                    with self.assertRaisesRegex(SystemExit, 'D5 active:.*cmd_advance'):
-                        S.cmd_advance(args)
-                    run.assert_not_called()
-                else:
-                    self.assertEqual(S.cmd_advance(args), 19)
-                    run.assert_called_once_with(args)
+                    mock.patch.object(S.SR, 'apply_agent_resolution',
+                                      side_effect=SystemExit('legacy preparation')) as legacy, \
+                    mock.patch.object(S, 'cmd_run', wraps=S.cmd_run) as run:
+                args = argparse.Namespace(plan='fixture-plan.json')
+                with self.assertRaisesRegex(SystemExit, 'D5 active:.*cmd_run' if active else 'legacy preparation'):
+                    S.cmd_advance(args)
+                run.assert_called_once_with(args)
+                self.assertEqual(legacy.call_count, 0 if active else 1)
+        with mock.patch.object(S, 'cmd_run', return_value=19) as run:
+            self.assertEqual(S.cmd_advance(args), 19)
+            run.assert_called_once_with(args)
 
     def test_swarm_main(self):
         for active in (False, True):
