@@ -13,7 +13,10 @@ The following table is the complete U4.9 guarantee list. Its exact claims,
 mechanism names and test IDs must agree with `u49_guarantees` in the
 [manifest](../tests/fixtures/d5/integration-manifest.json).
 `tests.test_d5_u49_activation_closure` checks that agreement, resolves the
-named definitions and runs the cited behavior tests. This establishes the
+named definitions and runs the cited behavior tests. Test-owned fingerprints
+pin each reviewed claim and its evidence references independently of the two
+editable sources. Changes require an explicit test-contract update and review;
+this is not a semantic proof. This establishes the
 named coverage, not a proof of arbitrary call-flow closure. Active scenarios
 use synthetic activation; merge-child tests explicitly force admission.
 No production activation is performed by these tests.

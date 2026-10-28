@@ -5,6 +5,7 @@ interpreter isolation. Active behavior uses the cited tests' synthetic fixtures.
 """
 import ast
 import copy
+import hashlib
 import json
 from pathlib import Path
 import unittest
@@ -17,6 +18,25 @@ GUARANTEES = frozenset({
     'merge-child-containment', 'direct-root-refusals', 'merge-admission-switch',
     'unavailable-audit', 'entry-point-routing', 'bytecode-advisory',
 })
+# Pin the reviewed literal contract independently of the two editable sources.
+# A new claim or evidence mapping needs an explicit test-contract change and
+# review. These fingerprints are not a semantic proof or protection from an
+# editor who also rewrites the test. They prevent synchronized prose/manifest
+# changes from silently reusing coverage for a different claim.
+REVIEWED_BINDINGS = {
+    'merge-child-containment':
+        '006696a325f050075805674995350905cda3f709fbcc399d9c63cb4db36ed2ae',
+    'direct-root-refusals':
+        'a6f482af7fe843e504b0bc48ffd471062f365663c55c81384e2600da224d3bed',
+    'merge-admission-switch':
+        '173162dfdfa7e0f8ce164c249ab0ee43fa7cbe68db040399b531c08e74657cdf',
+    'unavailable-audit':
+        '246bb384ff5ecb35fb6a90aa3c73c4e538d1521deb514a33380d14c509fa29ab',
+    'entry-point-routing':
+        '31f881f1d884ddafa0b89bc697694a1ffa5255028a730568d0dca9844a407b1c',
+    'bytecode-advisory':
+        '812c67f2c5fea3d950522e02044d3a8ab94668eb53a32fdcc0e8ed9ee17a0948',
+}
 START = '## U4.9 guarantees\n\n'
 END = '\n\n## Explicit non-claims\n'
 
@@ -61,6 +81,9 @@ def check_coverage(test, rows):
         for key in ('mechanisms', 'tests'):
             test.assertIsInstance(row[key], list)
             test.assertTrue(row[key], '{} has no {}'.format(row['id'], key))
+        binding = json.dumps(row, sort_keys=True, separators=(',', ':')).encode()
+        test.assertEqual(hashlib.sha256(binding).hexdigest(), REVIEWED_BINDINGS[row['id']],
+                         'unreviewed guarantee binding: ' + row['id'])
         for reference in row['mechanisms']:
             filename, name = reference.split(':')
             test.assertEqual(Path(filename).name, filename)
@@ -128,6 +151,29 @@ class TestActivationClosure(unittest.TestCase):
         changed = self.document.replace(END, '\nAn untested prose guarantee.' + END)
         with self.assertRaisesRegex(AssertionError, 'manifest-docs-mismatch'):
             check_docs(self, changed, self.rows)
+
+    def assert_synchronized_change_refused(self, rows):
+        document = self.document.replace(guarantee_table(self.rows), guarantee_table(rows))
+        check_docs(self, document, rows)  # Both editable sources agree.
+        consumer = TestActivationClosure('test_documented_guarantees_have_tested_mechanisms')
+        consumer.rows, consumer.document = rows, document
+        with self.assertRaisesRegex(AssertionError, 'unreviewed guarantee binding'):
+            consumer.test_documented_guarantees_have_tested_mechanisms()
+
+    def test_synchronized_unsupported_claim_is_rejected(self):
+        for index, row in enumerate(self.rows):
+            with self.subTest(guarantee=row['id']):
+                rows = copy.deepcopy(self.rows)
+                rows[index]['claim'] += ' Review and committee admission is enforced under D5.'
+                self.assert_synchronized_change_refused(rows)
+
+    def test_synchronized_evidence_rebinding_is_rejected(self):
+        for index, row in enumerate(self.rows):
+            for field in ('mechanisms', 'tests'):
+                with self.subTest(guarantee=row['id'], field=field):
+                    rows = copy.deepcopy(self.rows)
+                    rows[index][field] = self.rows[(index + 1) % len(rows)][field][:]
+                    self.assert_synchronized_change_refused(rows)
 
 
 if __name__ == '__main__':
