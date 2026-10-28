@@ -124,6 +124,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
     def test_upgraded_models_reach_the_openai_request_with_existing_limits(self):
         roster = {r["name"]: r for r in R.load_reviewers()}
         for name, model, effort in (("luna", "gpt-6-luna", "max"),
+                                    ("terra", "gpt-6.1-terra", "max"),
                                     ("astra", "gpt-6-astra", "xhigh"),
                                     ("sol", "gpt-6.1-sol", "xhigh")):
             with self.subTest(reviewer=name), \
@@ -145,8 +146,8 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
         roster = R.load_reviewers()
         expected = {
             "fast": {"luna", "haiku-5.5"},
-            "standard": {"luna", "kimi-k2.7-code", "sonnet-5.5"},
-            "deep": {"luna", "kimi-k2.7-code", "sonnet-5.5", "sol"},
+            "standard": {"terra", "kimi-k2.7-code", "sonnet-5.5"},
+            "deep": {"terra", "kimi-k2.7-code", "sonnet-5.5", "sol"},
             "plan": {"luna", "kimi-k3"},
             "planning": {"astra", "gemini-argon"},
             "committee": {"deepseek-v4-pro", "gemini-argon", "sonnet-5.5"},
@@ -166,6 +167,7 @@ class TestShippedLadderAddsReviewers(unittest.TestCase):
     def test_owner_decision_efforts_and_transports_are_exact(self):
         expected = {
             "luna": ("openai", "gpt-6-luna", "max"),
+            "terra": ("openai", "gpt-6.1-terra", "max"),
             "haiku-5.5": ("anthropic", "claude-haiku-5-5", "max"),
             "astra": ("openai", "gpt-6-astra", "xhigh"),
             "kimi-k3": ("openrouter", "moonshotai/kimi-k3", "xhigh"),
@@ -276,7 +278,7 @@ class TestChangedPathProfiles(unittest.TestCase):
         self.write(self.code)
         report, called = self.report("--diff")
         self.assertEqual(report["profile"], "standard")
-        self.assertEqual(set(called), {"luna", "sonnet-5.5", "kimi-k2.7-code"})
+        self.assertEqual(set(called), {"terra", "sonnet-5.5", "kimi-k2.7-code"})
         self.write(self.code, "base\n")
         report, _ = self.report("--diff", "--profile", "standard")
         self.assertEqual(report["profile"], "standard")
@@ -438,9 +440,9 @@ class TestChangedPathProfiles(unittest.TestCase):
             report, called = self.report("--diff", "--escalate", *flags)
             self.assertEqual(report["tiers_run"], expected)
             self.assertEqual(len(called), len(set(called)))
-            wanted = {"luna", "sonnet-5.5", "kimi-k2.7-code", "sol"}
+            wanted = {"terra", "sonnet-5.5", "kimi-k2.7-code", "sol"}
             if expected[0] == "fast":
-                wanted.add("haiku-5.5")
+                wanted.update({"luna", "haiku-5.5"})
             self.assertEqual(set(called), wanted)
             self.assertEqual({r["name"] for r in report["results"]}, wanted)
         self.write(self.code)
@@ -453,7 +455,7 @@ class TestChangedPathProfiles(unittest.TestCase):
                                                failing=True)
         self.assertEqual(code, R.STATES["REVIEW_CLAIMS_REFUTED"], err)
         self.assertEqual(json.loads(output)["tiers_run"], ["standard"])
-        self.assertEqual(set(called), {"luna", "sonnet-5.5", "kimi-k2.7-code"})
+        self.assertEqual(set(called), {"terra", "sonnet-5.5", "kimi-k2.7-code"})
 
     def test_automatic_fast_cannot_relax_author_or_fresh_cycle_floors(self):
         self.write(self.doc)
@@ -514,9 +516,19 @@ class TestAuthorExclusion(unittest.TestCase):
             "--profile", "deep", "--quorum", "3",
             "--author", "codex/gpt-6.1-sol")
         self.assertNotIn("sol", called)
-        self.assertEqual(set(called), {"luna", "sonnet-5.5", "kimi-k2.7-code"})
+        self.assertEqual(set(called), {"terra", "sonnet-5.5", "kimi-k2.7-code"})
         self.assertEqual(code, R.STATES["REVIEW_PASS"], output)
         self.assertIn("sol excluded: authored this change", output)
+
+    def test_terra_author_is_excluded_without_excluding_sol(self):
+        code, output, _err, called = self.invoke(
+            "--profile", "deep", "--quorum", "3",
+            "--author", "codex/gpt-6.1-terra", "--json")
+        report = json.loads(output)
+        self.assertEqual(code, R.STATES["REVIEW_PASS"], output)
+        self.assertEqual(set(called), {"sol", "sonnet-5.5", "kimi-k2.7-code"})
+        self.assertEqual([r["name"] for r in report["excluded"]], ["terra"])
+        self.assertEqual(report["quorum"], 3)
 
     def test_astra_author_keeps_the_standard_panel_and_quorum(self):
         code, output, _err, called = self.invoke(
@@ -526,11 +538,11 @@ class TestAuthorExclusion(unittest.TestCase):
         self.assertEqual(report["profile"], "standard")
         self.assertEqual(report["quorum"], 3)
         self.assertEqual(report["excluded"], [])
-        self.assertEqual(set(called), {"luna", "sonnet-5.5", "kimi-k2.7-code"})
+        self.assertEqual(set(called), {"terra", "sonnet-5.5", "kimi-k2.7-code"})
 
     def test_exclusion_below_quorum_is_unavailable_before_any_call(self):
         for flags in (["--profile", "deep"], ["--escalate"],
-                      ["--only", "sol,luna,kimi-k2.7-code,sonnet-5.5"]):
+                      ["--only", "sol,terra,kimi-k2.7-code,sonnet-5.5"]):
             with self.subTest(flags=flags):
                 code, output, _err, called = self.invoke(
                     *flags, "--quorum", "4", "--author", "codex/gpt-6.1-sol",
@@ -547,7 +559,7 @@ class TestAuthorExclusion(unittest.TestCase):
             "--escalate", "--quorum", "3", "--author", "codex/gpt-6.1-sol",
             "--json")
         self.assertEqual(code, 0, output)
-        self.assertEqual(set(called), {"luna", "sonnet-5.5", "kimi-k2.7-code"})
+        self.assertEqual(set(called), {"terra", "sonnet-5.5", "kimi-k2.7-code"})
         self.assertEqual(json.loads(output)["excluded"][0]["name"], "sol")
 
     def test_repeatable_authors_preserve_nested_model_ids(self):
@@ -555,7 +567,7 @@ class TestAuthorExclusion(unittest.TestCase):
             "--profile", "deep", "--author", "codex/gpt-6.1-sol",
             "--author", "openrouter/moonshotai/kimi-k2.7-code", "--json")
         self.assertEqual(code, 0, output)
-        self.assertEqual(set(called), {"luna", "sonnet-5.5"})
+        self.assertEqual(set(called), {"terra", "sonnet-5.5"})
         self.assertEqual({r["name"] for r in json.loads(output)["excluded"]},
                          {"sol", "kimi-k2.7-code"})
 

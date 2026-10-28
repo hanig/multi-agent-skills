@@ -18,8 +18,9 @@ enforces them.
 | flag | `--kind plan` | `--kind implementation --round N [--escalate]` |
 | judged against | do these criteria hold together | does the code meet the criteria |
 
-The shipped implementation ladder is cumulative: every tier's enabled panel
-is a strict superset of the tier below it. `tests/test_profiles.py` pins that
+The shipped implementation ladder accumulates results: each tier adds enabled
+reviewers not called by earlier tiers. Fixed profile membership need not be
+a superset of the preceding profile. `tests/test_profiles.py` pins that
 configuration invariant so an enabled `deep` panel cannot silently collapse to
 `standard` again. This is a repository test of the shipped routing file, not a
 runtime validation of a locally edited installed copy.
