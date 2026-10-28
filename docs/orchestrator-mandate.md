@@ -115,9 +115,11 @@ it is not a pass.
 
 ### The concurrence rule
 
-The orchestrator may make confirmed, reproduced findings nonblocking on its
-own judgment when unlikely to change design or outcome, including owner-accepted
-tradeoffs. Concurrence is needed only when unsure; then consult Sol:
+Orchestrator judgment is available only to an orchestrator that did not author the affected design or implementation.
+
+Task specifications the orchestrator writes for a unit are not authorship of that unit's implementation; authorship means the orchestrator wrote the code or design under review.
+
+It may make confirmed, reproduced findings nonblocking on its own judgment when unlikely to change design or outcome, including owner-accepted tradeoffs, consulting Sol only when unsure. Otherwise the existing concurrence rule applies unchanged.
 
 A confirmed finding may then be dispositioned nonblocking only when **the
 orchestrator and GPT-Sol (the `sol` reviewer in `reviewers.json`) agree that
@@ -138,7 +140,7 @@ change, the disposition goes to the owner.
 
 When Sol is consulted, deadlock fails toward more work, not toward shipping.
 
-Judgment cannot waive the never-overridable classes.
+Judgment cannot waive the never-overridable classes; "Never overridable, whatever the relevance" remains binding.
 Honesty, reproduce-before-acting, green CI and merge checks remain binding.
 Every judgment disposition records the five answers below and
 "decided by orchestrator judgment, Sol not consulted".
@@ -176,7 +178,7 @@ corrected or explicitly withdrawn, never silently endorsed.
 
 Every dispatched code task declares its supported envelope and accepted limits. Define them through readers and consequences, including ordinary environmental inputs, persisted state, interruption, restart and documented recovery. An input is not outside the envelope merely because the coordinator does not produce it. The review panel receives this declaration and may refute its boundaries.
 
-The out-of-envelope special case lets a non-author orchestrator defer reproduced findings without concurrence when evidence establishes unsupported triggers, bounded consequences and no never-overridable violation. Otherwise apply the rule above. Round number and class name confer no exemption.
+The concurrence rule has one narrow exception. An orchestrator that did not author the affected design or implementation may defer a reproduced finding without concurrence when evidence establishes an unsupported trigger, bounded consequences and no violation of a never-overridable requirement. Otherwise concurrence remains required. Round number and class name confer no exemption.
 
 Refusal alone is insufficient. Evidence must establish bounded termination or safe stopping, an actionable diagnosis reaching the responsible operator, preservation of work and authority, and no indefinite obstruction of unrelated work. Recovery must be written so the operator can follow it, with prerequisites and a recognizable successful result. Demonstrate recovery when it is non-obvious or touches evidence, authority or uncertain external effects. Existing demonstrations may cover equivalent cases. Uncertain bounds block deferral.
 
