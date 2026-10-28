@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -127,7 +128,7 @@ class TestGateAdmission(unittest.TestCase):
                 os.chdir(root)
                 with mock.patch.dict(os.environ, env, clear=True):
                     for config in ('diff.external', 'diff.fixture.textconv'):
-                        command('config', config, str(helper))
+                        command('config', config, shlex.quote(str(helper)))
                         with mock.patch.object(R, 'd5_gate_active', return_value=False):
                             R.git_out('diff', 'HEAD')
                         self.assertEqual(marker.read_text(), 'effect')
@@ -138,6 +139,17 @@ class TestGateAdmission(unittest.TestCase):
                         command('config', '--unset', config)
             finally:
                 os.chdir(old)
+
+    def test_external_diff_fixture_with_space_in_tmpdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spaced = Path(tmp) / 'tmp with spaces'
+            spaced.mkdir()
+            result = subprocess.run([sys.executable, '-B', '-m', 'unittest', '-v',
+                'tests.test_d5_gate_admission.TestGateAdmission.'
+                'test_active_git_disables_external_diff_and_textconv'],
+                cwd=ROOT, env={'PATH': os.defpath, 'TMPDIR': str(spaced)},
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_inactive_matches_recorded_merge_base(self):
         fixture = json.loads((FIXTURES / 'u49b-inactive-base.json').read_text())
