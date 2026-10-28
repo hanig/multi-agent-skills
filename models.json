@@ -76,14 +76,14 @@
       "id": "codex/gpt-6.1-terra",
       "label": "GPT-6.1 Terra",
       "intelligence_index": null,
-      "intelligence_index_source": "not measured here; null rather than a guessed number",
+      "intelligence_index_source": "not measured",
       "coding_index": null,
       "modalities": [
         "text"
       ],
       "cost_tier": "unmeasured",
-      "quota": "OpenAI API review uses provider credentials; Codex/Paseo dispatch availability is unmeasured here",
-      "notes": "Owner decision 2026-10-28: replaces Luna in standard and deep review at max effort. OpenAI API bench evidence and model-resolution family are in reviewers.json; this registry entry does not change code dispatch. No recorded price or dispatch measurement."
+      "quota": "OpenAI API review; Codex/Paseo dispatch unmeasured",
+      "notes": "Owner decision 2026-10-28: standard/deep review at max; bench and family in reviewers.json. Price and dispatch unmeasured."
     }
   ]
 }
