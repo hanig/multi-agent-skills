@@ -1,6 +1,6 @@
 <!-- docs-truth:status -->
 Status: live
-Date: 2026-10-18
+Date: 2026-10-28
 Title: Deferred edge cases
 Purpose: This is the canonical ledger of reproduced findings deferred outside a task's declared supported envelope.
 
@@ -125,3 +125,22 @@ This is the canonical ledger of reproduced findings deferred outside a task's de
   5. Falsified if a supported workflow renames or moves a registered checkout while its registration is live, or if the refusal ever follows a store or boundary call.
 - Maintainer: The orchestrator.
 - Reassessment triggers: a relocatable mandate-source design, which must preserve the registered source binding rather than infer it from repository topology; a registry re-registration path; U8 activation review; or any reported checkout move under a live registration.
+
+### Stale activation bytecode honoured while the activation source is inactive
+
+- Issue and unit: ARC-4171, `d5-u4-9b-admission-d` (U4.9b), reviewed head adadbf3d.
+- Original verdict and round: REVIEW_PASS in round 1 (four reviewers). kimi reported an out-of-envelope finding at review.py:117.
+- Tested revision: adadbf3d0315a8eee19036e18581a1fb61ba2551.
+- Reproduction: importlib honours a timestamp-valid cached activation module compiled while D5 was active, after the source becomes inactive. Reproduced on Python 3.12.15 and isolated Apple 3.9.6 with a disposable copied gate, synthetic keys, `--list --no-probe`, no transport and no credentials. Evidence: /Users/hani/.local/state/hanig-swarm/projects/multi-agent-skills-82e3a975eef5/runs/d5-u4-9b-admission-d/e89a28c94d4dcead/ (reproduce_bytecode.py, bytecode-reproduction-*.txt/json, dispositions.json).
+- Consequence bound: the gate treats D5 as active and refuses; it never admits. No false acknowledgment and no write outside the gate's own refusal path.
+- Operator recovery: stop the gate process, remove only that installation's activation cache (or reinstall the gate fresh), verify the activation source, and rerun. Demonstrated synthetically, returning exit 0 with no source change.
+- The five nonblocking answers:
+  - (1) Affects only review-gate admission while a stale active cache exists.
+  - (2) Bounded by the refusal direction and the demonstrated recovery.
+  - (3) Weakens no shared test, verifier or interface.
+  - (4) The envelope policy in the mandate: interpreter-level effects are excluded by the task's declared envelope.
+  - (5) Falsifier: any case where a stale cache causes admission instead of refusal.
+- Maintainer: orchestrator (efficiency2).
+- Reassessment triggers: U8 activation review; any change to activation loading in review.py or d5_activation.py.
+
+Note: U4.9b did not land; this entry records a deferral against preserved, unmerged work.

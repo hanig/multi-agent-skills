@@ -112,5 +112,86 @@
   },
   "merge": "Existing main -> _active_entry_lease -> merge_launch_admitted refusal; no code change in U4.9c.",
   "advisory": "cmd_advance delegates to cmd_run. Read sys.dont_write_bytecode only; warn when active and writing enabled. No filesystem probe. Host temporary-directory readiness remains advisory; U8 may enforce or waive."
-}
+},
+"u49_guarantees":[
+  {
+    "id": "merge-child-containment",
+    "claim": "The designated merge child uses shell=False and close_fds=True, receives no authority descriptors, and filters D5/session/provider/tracker credentials while retaining the declared forge credentials. Arbitrary commands and extra switches refuse.",
+    "mechanisms": [
+      "merge_unit.py:_merge_child_env",
+      "merge_unit.py:_MergeBoundary.start"
+    ],
+    "tests": [
+      "tests.test_d5_containment.TestMergeChild.test_actual_child_environment_and_no_descriptors_or_provider_tracker",
+      "tests.test_d5_containment.TestMergeChild.test_arbitrary_executable_or_extra_switch_refuses_before_launch"
+    ]
+  },
+  {
+    "id": "direct-root-refusals",
+    "claim": "With D5 active, unit.py allocate/bind/check and remote_verify.py worker/supervise refuse before effects, with readiness absent or installed.",
+    "mechanisms": [
+      "unit.py:main",
+      "remote_verify.py:main"
+    ],
+    "tests": [
+      "tests.test_d5_containment.TestDirectRoots.test_direct_clis_both_readiness_states_before_effects"
+    ]
+  },
+  {
+    "id": "merge-admission-switch",
+    "claim": "merge_launch_admitted() is False until owner activation at U8; active merge entries refuse before effects even with readiness installed.",
+    "mechanisms": [
+      "merge_unit.py:merge_launch_admitted",
+      "merge_unit.py:_d5_merge_launch_entry",
+      "merge_unit.py:_active_entry_lease"
+    ],
+    "tests": [
+      "tests.test_d5_containment.TestMergeAdmission.test_production_merge_launch_is_not_admitted",
+      "tests.test_d5_containment.TestMergeAdmission.test_active_entries_refuse_before_any_effect_without_forced_admission"
+    ]
+  },
+  {
+    "id": "unavailable-audit",
+    "claim": "With D5 active, the post-merge tracker audit prints UNAVAILABLE without launching or importing linear_sync and without audit writes or transport.",
+    "mechanisms": [
+      "merge_unit.py:print_tracker_audit"
+    ],
+    "tests": [
+      "tests.test_d5_containment.TestMergeAudit.test_active_audit_unavailable_without_dependencies_or_effects"
+    ]
+  },
+  {
+    "id": "entry-point-routing",
+    "claim": "swarm.py cmd_run, cmd_advance and main use shared d5_activation routing; merge_unit.py main retains its admission refusal. The named inactive captures remain equal to their recorded baselines.",
+    "mechanisms": [
+      "swarm.py:cmd_run",
+      "swarm.py:cmd_advance",
+      "swarm.py:main",
+      "merge_unit.py:main",
+      "d5_activation.py:d5_active"
+    ],
+    "tests": [
+      "tests.test_d5_u49_entrypoints.TestRoutes.test_cmd_run",
+      "tests.test_d5_u49_entrypoints.TestRoutes.test_cmd_advance",
+      "tests.test_d5_u49_entrypoints.TestRoutes.test_swarm_main",
+      "tests.test_d5_u49_entrypoints.TestRoutes.test_merge_main",
+      "tests.test_d5_u49_entrypoints.TestRoutes.test_manifest_routes_and_shared_activation_owner",
+      "tests.test_d5_u49_entrypoints.TestInactive.test_m6_bound_to_base",
+      "tests.test_d5_containment.TestDirectRoots.test_inactive_matches_recorded_merge_base"
+    ]
+  },
+  {
+    "id": "bytecode-advisory",
+    "claim": "The swarm entries warn when D5 is active and sys.dont_write_bytecode is false. The advisory neither changes that flag nor probes the filesystem, and diagnostic failures never block schema.",
+    "mechanisms": [
+      "swarm.py:_d5_bytecode_advisory"
+    ],
+    "tests": [
+      "tests.test_d5_u49_entrypoints.TestAdvisory.test_warning_truth_table_at_swarm_entries",
+      "tests.test_d5_u49_entrypoints.TestAdvisory.test_read_only_and_diagnostic_failure_never_blocks",
+      "tests.test_d5_u49_entrypoints.TestAdvisory.test_missing_stderr_preserves_schema_stdout",
+      "tests.test_d5_u49_entrypoints.TestAdvisory.test_unexpected_stderr_errors_never_gate_schema"
+    ]
+  }
+]
 }
