@@ -1011,27 +1011,55 @@ class TestAuthoredSkillShape(unittest.TestCase):
 
     def test_orchestrate_judgment_keeps_nonoverridable_classes_binding(self):
         mandate = (ROOT / "docs/orchestrator-mandate.md").read_text(encoding="utf-8")
-        protected = re.split(r"\n+(?= {0,3}#{1,3}[ \t])",
-            mandate.split("### Never overridable, whatever the relevance\n\n", 1)[1], 1)[0]
-        declarations = {d["id"]: d["normative_text"] for d in
+        _, policy, _, prose = self._judgment_parts(mandate)
+        rules = {d["id"]: d["normative_text"] for d in
                         DECLARATION_REGISTRY.load_registry(SKILLS / "hanig-orchestrate")}
-        for text, digest in ((protected, "f409db33b75431c2dfb9b07b339bc3561f5bc75456c80aebd969cecc82ba08b1"),
-                             (declarations["adjudication.nonoverridable"], "fb0b2f3b4eb55f4637adc660bbf83a4182c99f2afdf97132300c0fe863720bbf")):
-            self.assertEqual(hashlib.sha256(text.encode("utf-8")).hexdigest(), digest)
-        for text in (mandate, declarations["adjudication.concurrence"]):
-            self.assertIn("All never-overridable classes remain binding on orchestrator judgment", text)
+        self.assertEqual(hashlib.sha256(json.dumps([policy,
+            rules["adjudication.nonoverridable"]]).encode("utf-8")).hexdigest(),
+            "39bc673fc6dac04c26eb33757f835254f10db602d4dde6977539228d401caf46")
+        for text in (prose, rules["adjudication.concurrence"]):
+            self.assertIn("Judgment cannot waive the never-overridable classes", text)
+
+    def _judgment_parts(self, text):
+        from tests.test_docs_truth import lex_document
+        view = lex_document(text)[1]
+        heads = [n for n, line, hidden in view if not hidden and
+                 line == "### Never overridable, whatever the relevance"]
+        self.assertEqual(len(heads), 1)
+        start = sum(map(len, text.splitlines(keepends=True)[:heads[0] + 1]))
+        body, gap, tail = text[start:].partition("\n\n")
+        return text[:start], body, gap + tail, "\n".join(line for _, line, hidden in view if not hidden)
 
     def test_judgment_guard_ignores_separate_sections(self):
         from unittest.mock import patch
-        source = (ROOT / "docs/orchestrator-mandate.md").read_text()
+        check = self.test_orchestrate_judgment_keeps_nonoverridable_classes_binding
+        text = (ROOT / "docs/orchestrator-mandate.md").read_text(encoding="utf-8")
+        text = text.replace("### Honesty in the record", "### Records")
+        pre, body, tail, _ = self._judgment_parts(text)
         with tempfile.TemporaryDirectory() as tmp, patch.dict(globals(), ROOT=Path(tmp)):
             path = ROOT / "docs/orchestrator-mandate.md"
             path.parent.mkdir()
-            for level in ("#", "##", "###"):
-                with self.subTest(level=level):
-                    path.write_text(source.replace("### Honesty in the record",
-                        level + " Supplemental\n\nSeparate.\n\n### Honesty in the record"))
-                    self.test_orchestrate_judgment_keeps_nonoverridable_classes_binding()
+            for heading in ("# X", "## X", "### X", "#", "##", "###"):
+                with self.subTest(heading=heading):
+                    case = pre + body + "\n\n" + heading + "\n\nX." + tail
+                    self.assertNotEqual(case, text)
+                    path.write_text(case, encoding="utf-8")
+                    check()
+            for sample, valid in (("X.", True), (body, False)):
+                with self.subTest(valid=valid):
+                    real = text if valid else pre + "Removed." + tail
+                    path.write_text("~~~~md\n### Never overridable, whatever the relevance\n\n" + sample + "\n## End\n~~~~\n\n" + real, encoding="utf-8")
+                    if valid:
+                        check()
+                    else:
+                        self.assertRaises(AssertionError, check)
+
+    def test_judgment_utf8(self):
+        done = subprocess.run([sys.executable, "-m", "unittest",
+            "tests.test_skill_shape.TestAuthoredSkillShape.test_judgment_guard_ignores_separate_sections"],
+            cwd=ROOT, env=dict(os.environ, LC_ALL="C", PYTHONUTF8="0"),
+            capture_output=True, encoding="utf-8", timeout=30)
+        self.assertFalse(done.returncode, done)
 
     def test_every_declaration_registry_has_a_closed_inventory(self):
         registry_skills = sorted(

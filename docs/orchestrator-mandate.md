@@ -110,21 +110,19 @@ it is not a pass.
 |---|---|
 | Disproved by evidence | Dismiss, citing the contradictory evidence. Preserve the original review. |
 | Confirmed, and violates a hard invariant or a required criterion | Repair. No relevance exception exists. |
-| Confirmed and reproduced, unlikely to change the design or outcome | Eligible under the judgment and conditional concurrence rule below. |
+| Confirmed, demonstrably outside required behaviour | Eligible for a nonblocking disposition, under the concurrence rule below. |
 | Unresolved, ambiguous in scope, or outside delegated risk | Block the merge. Investigate within budget, then ask the owner. |
 
 ### The concurrence rule
 
 The orchestrator may make confirmed, reproduced findings nonblocking on its
-own judgment without concurrence when unlikely to change design or outcome,
-including owner-accepted tradeoffs. Consult Sol only when unsure; then the
-existing concurrence rule applies:
+own judgment when unlikely to change design or outcome, including owner-accepted
+tradeoffs. Concurrence is needed only when unsure; then consult Sol:
 
 A confirmed finding may then be dispositioned nonblocking only when **the
 orchestrator and GPT-Sol (the `sol` reviewer in `reviewers.json`) agree that
 it is not a deal breaker**. If they disagree, the change goes through another
-review cycle rather than merging. *Findings outside the supported envelope*
-remains a special case below.
+review cycle rather than merging. The one exception is *Findings outside the supported envelope*, below.
 
 Two things keep this honest rather than ceremonial. Sol must be asked to
 assess the finding and its impact, never asked to ratify a conclusion the
@@ -140,13 +138,13 @@ change, the disposition goes to the owner.
 
 When Sol is consulted, deadlock fails toward more work, not toward shipping.
 
-All never-overridable classes remain binding on orchestrator judgment.
+Judgment cannot waive the never-overridable classes.
 Honesty, reproduce-before-acting, green CI and merge checks remain binding.
 Every judgment disposition records the five answers below and
 "decided by orchestrator judgment, Sol not consulted".
 
-Fast progress is an explicit goal: for findings that would not change design
-or outcome, prefer disposition and merge over repair rounds within these bounds.
+Fast progress is an explicit goal: within these bounds, prefer disposition and
+merge over repair when findings would not change design or outcome.
 
 ### What a nonblocking disposition must answer, on the record
 
