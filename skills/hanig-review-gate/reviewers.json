@@ -128,7 +128,7 @@
    "_cost": null,
    "_cost_note": "Unknown at 2026-10-28; no recorded Terra price.",
    "max_output_tokens": 128000,
-   "_max_output_tokens": "Bench observation, not preflight; counts below describe one reply.",
+   "_max_output_tokens": "MEASURED in bench, not preflight; counts below describe one reply.",
    "_max_output_tokens_accepted": {
     "date": "2026-10-28",
     "max_output_tokens": 128000,
