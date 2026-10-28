@@ -8,7 +8,10 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 import unittest
+
+from tests.test_docs_truth import lex_document
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,20 +28,33 @@ GUARANTEES = frozenset({
 # changes from silently reusing coverage for a different claim.
 REVIEWED_BINDINGS = {
     'merge-child-containment':
-        '006696a325f050075805674995350905cda3f709fbcc399d9c63cb4db36ed2ae',
+        'cde6f723e324e1d088f444f6375f104fa243a381ee73b8e42f7dd1ca620c16d9',
     'direct-root-refusals':
-        'a6f482af7fe843e504b0bc48ffd471062f365663c55c81384e2600da224d3bed',
+        '529fd01b59fe99808a1c11ca72df281782ba10a950b60696026d7671ac43cd83',
     'merge-admission-switch':
-        '173162dfdfa7e0f8ce164c249ab0ee43fa7cbe68db040399b531c08e74657cdf',
+        '6ccaebe2ea1bf15d3418885f3cb68b6681da4af8b9984d127c1415b8c6d9e4cc',
     'unavailable-audit':
         '246bb384ff5ecb35fb6a90aa3c73c4e538d1521deb514a33380d14c509fa29ab',
     'entry-point-routing':
-        '31f881f1d884ddafa0b89bc697694a1ffa5255028a730568d0dca9844a407b1c',
+        '7813887f86b650f086555622f7d7b60d591baf5bf3f8a1eb2f29b567a672eee0',
     'bytecode-advisory':
-        '812c67f2c5fea3d950522e02044d3a8ab94668eb53a32fdcc0e8ed9ee17a0948',
+        'e9683c0e7013093345e68b9bc1c89683e75ee2276a17554449445f5b6b031e0d',
 }
 START = '## U4.9 guarantees\n\n'
 END = '\n\n## Explicit non-claims\n'
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate manifest key: ' + key)
+        result[key] = value
+    return result
+
+
+def read_guarantees(raw):
+    return json.loads(raw, object_pairs_hook=unique_object)['u49_guarantees']
 
 
 def guarantee_table(rows):
@@ -52,12 +68,18 @@ def guarantee_table(rows):
 
 
 def check_docs(test, document, rows):
-    # Compare the entire section, including prose: an unlisted line cannot hide
-    # between recognized rows. Other sections explicitly record non-claims and
-    # earlier preparation, and are not parsed as U4.9 activation guarantees.
-    test.assertEqual(document.count(START), 1)
-    test.assertEqual(document.count(END), 1)
-    section = document.split(START, 1)[1].split(END, 1)[0]
+    # Locate visible Markdown headings, not a decoy inside a comment or fence.
+    _, lines = lex_document(document)
+    bounds = []
+    for title in ('U4.9 guarantees', 'Explicit non-claims'):
+        pattern = r' {0,3}##[ \t]+' + re.escape(title) + r'(?:[ \t]+#+)?[ \t]*'
+        matches = [number for number, text, hidden in lines
+                   if not hidden and re.fullmatch(pattern, text)]
+        test.assertEqual(len(matches), 1, title)
+        bounds.append(matches[0])
+    start, end = bounds
+    test.assertLess(start, end)
+    section = '\n'.join(document.splitlines()[start:end - 1]).strip('\n')
     test.assertEqual(section, guarantee_table(rows), 'manifest-docs-mismatch')
 
 
@@ -81,7 +103,9 @@ def check_coverage(test, rows):
         for key in ('mechanisms', 'tests'):
             test.assertIsInstance(row[key], list)
             test.assertTrue(row[key], '{} has no {}'.format(row['id'], key))
-        binding = json.dumps(row, sort_keys=True, separators=(',', ':')).encode()
+        # Reference order is not coverage; retain every member, including duplicates.
+        contract = dict(row, mechanisms=sorted(row['mechanisms']), tests=sorted(row['tests']))
+        binding = json.dumps(contract, sort_keys=True, separators=(',', ':')).encode()
         test.assertEqual(hashlib.sha256(binding).hexdigest(), REVIEWED_BINDINGS[row['id']],
                          'unreviewed guarantee binding: ' + row['id'])
         for reference in row['mechanisms']:
@@ -102,7 +126,7 @@ def check_coverage(test, rows):
 
 class TestActivationClosure(unittest.TestCase):
     def setUp(self):
-        self.rows = json.loads(MANIFEST.read_text(encoding='utf-8'))['u49_guarantees']
+        self.rows = read_guarantees(MANIFEST.read_text(encoding='utf-8'))
         self.document = DOCUMENT.read_text(encoding='utf-8')
 
     def test_docs_manifest_match(self):
@@ -174,6 +198,37 @@ class TestActivationClosure(unittest.TestCase):
                     rows = copy.deepcopy(self.rows)
                     rows[index][field] = self.rows[(index + 1) % len(rows)][field][:]
                     self.assert_synchronized_change_refused(rows)
+
+    def test_duplicate_manifest_members_refuse(self):
+        for key in ('id', 'claim', 'tests', 'mechanisms'):
+            raw = '{"u49_guarantees": [{' + json.dumps(key) + ': null, ' + json.dumps(self.rows[0])[1:] + ']}'
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'duplicate manifest key'):
+                read_guarantees(raw)
+        with self.assertRaisesRegex(ValueError, 'duplicate manifest key'):
+            read_guarantees('{"u49_guarantees": [], "u49_guarantees": []}')
+
+    def test_hidden_decoy_cannot_replace_visible_guarantees(self):
+        bad = copy.deepcopy(self.rows)
+        bad[0]['claim'] += ' Review and committee admission is enforced under D5.'
+        prefix, rest = self.document.split(START, 1)
+        _, suffix = rest.split(END, 1)
+        for opening, closing in (('<!--\n', '-->'), ('```\n', '```'), ('~~~\n', '~~~')):
+            changed = (prefix + opening + START + guarantee_table(self.rows) + END + closing
+                + '\n\n## U4.9 guarantees \n\n' + guarantee_table(bad)
+                + '\n\n## Explicit non-claims \n' + suffix)
+            with self.subTest(wrapper=opening), self.assertRaises(AssertionError):
+                check_docs(self, changed, self.rows)
+            valid = changed.replace(guarantee_table(bad), guarantee_table(self.rows))
+            check_docs(self, valid, self.rows)
+
+    def test_reference_order_does_not_change_coverage(self):
+        rows = copy.deepcopy(self.rows)
+        for row in rows:
+            for field in ('mechanisms', 'tests'):
+                row[field].reverse()
+        document = self.document.replace(guarantee_table(self.rows), guarantee_table(rows))
+        check_docs(self, document, rows)
+        check_coverage(self, rows)
 
 
 if __name__ == '__main__':
