@@ -8,8 +8,7 @@
   "deep": "standard + sol. Final --escalate tier, or a fixed --profile deep panel. astra is NOT here since 2026-09-24: it writes the code now, and an author does not review itself.",
   "committee": "committee.py members, separate from gate profiles. Owner decision 2026-10-13: deepseek-v4-pro, gemini-argon and sonnet-5.5, three model makers. DeepSeek sits in no gate profile.",
   "tiebreak": "Committee divergence only: the ONE enabled reviewer whose only profile is tiebreak rules on existing positions. committee.py selects it by this profile, never by name or model. Not a gate tier or a committee membership profile. sol-tiebreak since 2026-09-28, replacing astra-xhigh because astra authors the code it would rule on (ARC-755).",
-  "planning": "committee.py open --profile planning, for the hanig-project design step. Owner decision 2026-10-18: astra and gemini-argon. Separate from the step-back committee because committee.py refuses a session whose member authored the work, and astra writes the code.",
-  "_owner_decision_2026_10_28": "Owner decision 2026-10-28: \"Let's replace Luna with Terra, I overrule\" overrides the m2 bench adoption rule for standard and deep; luna remains in fast and plan. Frozen corpus-v2, bench/score-terra, series terra-20261027: Terra-for-Luna standard panel in-envelope recall 27/51 = 53% [40, 66], incumbent 45% [32, 59]; held-out recall 9/18 versus 6/18; clean-control false-finding trials 2/9 versus 1/9, failing the adoption rule by one trial; 0 of 171 Terra replies unavailable; median review time about 10 minutes versus Luna's 6. Owner accepts this tradeoff; Terra price remains unknown."
+  "planning": "committee.py open --profile planning, for the hanig-project design step. Owner decision 2026-10-18: astra and gemini-argon. Separate from the step-back committee because committee.py refuses a session whose member authored the work, and astra writes the code."
  },
  "reviewers": [
   {
@@ -129,7 +128,7 @@
    "_cost": null,
    "_cost_note": "Unknown at 2026-10-28; no recorded Terra price.",
    "max_output_tokens": 128000,
-   "_max_output_tokens": "MEASURED in the frozen corpus-v2 bench, series terra-20261027: 171 completed replies at max effort and the 128000 cap, none unavailable. Observed in the bench, not in a preflight; the acceptance record includes one completed reply's token counts, not an aggregate.",
+   "_max_output_tokens": "Bench observation, not preflight; counts below describe one reply.",
    "_max_output_tokens_accepted": {
     "date": "2026-10-28",
     "max_output_tokens": 128000,
@@ -140,8 +139,9 @@
     "input_tokens": 9853,
     "output_tokens": 50422,
     "completed_replies": 171,
-    "observed_in": "Frozen corpus-v2 bench, series terra-20261027; bench/score-terra/runs-view/std-terra-for-luna/trial-1/a1b-r1.json. Token counts are from this completed reply. The 171 completed replies span terra, std-terra-for-luna and std-terra-for-kimi (57 each). Observed in the bench, not in a preflight."
-   }
+    "observed_in": "Bench, not preflight: corpus-v2, terra-20261027; bench/score-terra/runs-view/std-terra-for-luna/trial-1/a1b-r1.json token counts. 57 replies each: terra, std-terra-for-luna, std-terra-for-kimi."
+   },
+   "_comment": "Owner decision 2026-10-28: overrules m2 adoption: Terra replaces Luna in standard/deep; fast/plan unchanged. Frozen corpus-v2, bench/score-terra, terra-20261027: Terra-for-Luna recall 27/51 = 53% [40, 66] versus 45% [32, 59]; held-out 9/18 versus 6/18; clean-control false-finding trials 2/9 versus 1/9 (fails adoption by one); 0/171 Terra replies unavailable; median about 10 minutes versus Luna's 6."
   },
   {
    "name": "kimi-k2.7-code",
