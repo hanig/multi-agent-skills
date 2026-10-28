@@ -1,0 +1,61 @@
+{
+  "base": "4a97999d999347cdc52a6496bbfa5392f0b22d88",
+  "captures": {
+    "merge_unit.main": {
+      "effects": [
+        [
+          "read_object",
+          "fixture-plan.json"
+        ]
+      ],
+      "outcome": [
+        "CaptureStop",
+        "read_object"
+      ],
+      "stderr": "",
+      "stdout": ""
+    },
+    "swarm.cmd_advance": {
+      "effects": [
+        [
+          "apply_agent_resolution",
+          "fixture-plan.json"
+        ]
+      ],
+      "outcome": [
+        "CaptureStop",
+        "apply_agent_resolution"
+      ],
+      "stderr": "",
+      "stdout": ""
+    },
+    "swarm.cmd_run": {
+      "effects": [
+        [
+          "apply_agent_resolution",
+          "fixture-plan.json"
+        ]
+      ],
+      "outcome": [
+        "CaptureStop",
+        "apply_agent_resolution"
+      ],
+      "stderr": "",
+      "stdout": ""
+    },
+    "swarm.main": {
+      "effects": [
+        [
+          "apply_agent_resolution",
+          "fixture-plan.json"
+        ]
+      ],
+      "outcome": [
+        "CaptureStop",
+        "apply_agent_resolution"
+      ],
+      "stderr": "",
+      "stdout": ""
+    }
+  }
+}
