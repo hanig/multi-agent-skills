@@ -90,4 +90,27 @@
   "policy": "Reject before mutation or tracker invocation, including premature activation. Active advance refuses at entry before backfill. Audit remains observation.",
   "tracker_permissions_installed": [],
   "tracker_bootstraps_installed": []
-}}
+},
+"u49c_entrypoints":{
+  "entries": {
+    "swarm.py": [
+      "cmd_run",
+      "cmd_advance",
+      "main"
+    ],
+    "merge_unit.py": [
+      "main"
+    ]
+  },
+  "activation": "skills/hanig-swarm/scripts/d5_activation.py",
+  "advisory_entries": {
+    "swarm.py": [
+      "cmd_run",
+      "cmd_advance",
+      "main"
+    ]
+  },
+  "merge": "Existing main -> _active_entry_lease -> merge_launch_admitted refusal; no code change in U4.9c.",
+  "advisory": "cmd_advance delegates to cmd_run. Read sys.dont_write_bytecode only; warn when active and writing enabled. No filesystem probe. Host temporary-directory readiness remains advisory; U8 may enforce or waive."
+}
+}

@@ -308,6 +308,21 @@ from swarm_types import (
 )
 
 
+def _d5_bytecode_advisory():
+    """Report an interpreter precondition; U8 may enforce or waive it."""
+    if D5.d5_active() and not sys.dont_write_bytecode:
+        try:
+            diagnostic = sys.stderr
+            if diagnostic is not None:
+                print("D5 advisory: bytecode writing is enabled; use -B or "
+                      "PYTHONDONTWRITEBYTECODE=1. Bytecode and host temporary-directory "
+                      "readiness remain advisory preconditions for U8 to enforce or waive.",
+                      file=diagnostic)
+        except Exception:
+            # An unavailable diagnostic stream must not turn advice into refusal.
+            pass
+
+
 def _d5_refuse(route):
     """U4.1: legacy effect routes have no authority in the first active profile."""
     if D5.d5_active():
@@ -3639,6 +3654,7 @@ def cmd_validate(args, plan=None):
 
 def cmd_run(args):
     """Dispatch what is ready, then EXIT. Does not babysit."""
+    _d5_bytecode_advisory()
     _d5_refuse('cmd_run')
     SR.apply_agent_resolution(args.plan)
     plan = _load_plan(args.plan)
@@ -5292,6 +5308,7 @@ def main():
     s.set_defaults(fn=cmd_status)
 
     args = ap.parse_args()
+    _d5_bytecode_advisory()
     _d5_dispatch(args)
     sys.exit(args.fn(args))
 
