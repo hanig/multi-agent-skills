@@ -108,7 +108,7 @@ class TestGateAdmission(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             marker, helper = root / 'effect', root / 'helper'
-            helper.write_text('#!/bin/sh\nprintf effect > "' + str(marker) + '"\n')
+            helper.write_text('#!/bin/sh\nprintf effect > ' + shlex.quote(str(marker)) + '\n')
             helper.chmod(0o755)
             git = shutil.which('git')
             env = {'PATH': os.defpath, 'GIT_CONFIG_NOSYSTEM': '1',
@@ -142,7 +142,7 @@ class TestGateAdmission(unittest.TestCase):
 
     def test_external_diff_fixture_with_space_in_tmpdir(self):
         with tempfile.TemporaryDirectory() as tmp:
-            spaced = Path(tmp) / 'tmp with spaces'
+            spaced = Path(tmp) / 'tmp with spaces $fixture'
             spaced.mkdir()
             result = subprocess.run([sys.executable, '-B', '-m', 'unittest', '-v',
                 'tests.test_d5_gate_admission.TestGateAdmission.'
