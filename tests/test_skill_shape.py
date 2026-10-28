@@ -1010,9 +1010,9 @@ class TestAuthoredSkillShape(unittest.TestCase):
                 concurrence_lines[0])
 
     def test_orchestrate_judgment_keeps_nonoverridable_classes_binding(self):
-        """Pin policy text, not agent compliance."""
         mandate = (ROOT / "docs/orchestrator-mandate.md").read_text(encoding="utf-8")
-        protected = mandate.split("### Never overridable, whatever the relevance\n\n", 1)[1].split("\n\n### ", 1)[0]
+        protected = re.split(r"\n+(?= {0,3}#{1,3}[ \t])",
+            mandate.split("### Never overridable, whatever the relevance\n\n", 1)[1], 1)[0]
         declarations = {d["id"]: d["normative_text"] for d in
                         DECLARATION_REGISTRY.load_registry(SKILLS / "hanig-orchestrate")}
         for text, digest in ((protected, "f409db33b75431c2dfb9b07b339bc3561f5bc75456c80aebd969cecc82ba08b1"),
@@ -1020,6 +1020,18 @@ class TestAuthoredSkillShape(unittest.TestCase):
             self.assertEqual(hashlib.sha256(text.encode("utf-8")).hexdigest(), digest)
         for text in (mandate, declarations["adjudication.concurrence"]):
             self.assertIn("All never-overridable classes remain binding on orchestrator judgment", text)
+
+    def test_judgment_guard_ignores_separate_sections(self):
+        from unittest.mock import patch
+        source = (ROOT / "docs/orchestrator-mandate.md").read_text()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(globals(), ROOT=Path(tmp)):
+            path = ROOT / "docs/orchestrator-mandate.md"
+            path.parent.mkdir()
+            for level in ("#", "##", "###"):
+                with self.subTest(level=level):
+                    path.write_text(source.replace("### Honesty in the record",
+                        level + " Supplemental\n\nSeparate.\n\n### Honesty in the record"))
+                    self.test_orchestrate_judgment_keeps_nonoverridable_classes_binding()
 
     def test_every_declaration_registry_has_a_closed_inventory(self):
         registry_skills = sorted(

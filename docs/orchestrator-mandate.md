@@ -57,7 +57,7 @@ mandate; do not generalise a tool's gate into a standing obligation to consult.
 - Run the review gate, and reproduce any finding before acting on it.
 - Open pull requests from an anchored attempt ref.
 - Merge pull requests that satisfy the adjudication policy below.
-- Dispose of reproduced findings by orchestrator judgment under the policy below; consult Sol only when unsure.
+- Use orchestrator judgment under the policy below; consult Sol only when unsure.
 - Defer a reproduced finding outside a task's declared supported envelope, without concurrence, under *Findings outside the supported envelope* below.
 - Record merge receipts, advance the DAG, drain tracker intents.
 - File, update and close issues in this project.
@@ -115,10 +115,10 @@ it is not a pass.
 
 ### The concurrence rule
 
-The orchestrator may make a confirmed, reproduced finding nonblocking on its
-own judgment, without concurrence, when unlikely to change the design or the
-outcome, including an owner-accepted tradeoff. Consult Sol only when unsure;
-then the existing concurrence rule applies:
+The orchestrator may make confirmed, reproduced findings nonblocking on its
+own judgment without concurrence when unlikely to change design or outcome,
+including owner-accepted tradeoffs. Consult Sol only when unsure; then the
+existing concurrence rule applies:
 
 A confirmed finding may then be dispositioned nonblocking only when **the
 orchestrator and GPT-Sol (the `sol` reviewer in `reviewers.json`) agree that
@@ -141,13 +141,12 @@ change, the disposition goes to the owner.
 When Sol is consulted, deadlock fails toward more work, not toward shipping.
 
 All never-overridable classes remain binding on orchestrator judgment.
-Honesty, reproduce-before-acting, green CI and merge checks remain binding;
-an author never accepts its own rebuttal. Every judgment disposition records
-the five answers below and "decided by orchestrator judgment, Sol not consulted".
+Honesty, reproduce-before-acting, green CI and merge checks remain binding.
+Every judgment disposition records the five answers below and
+"decided by orchestrator judgment, Sol not consulted".
 
-Fast progress is an explicit goal: when a finding would not change the design
-or the outcome, the orchestrator prefers disposition and merge over further
-repair rounds, within these bounds.
+Fast progress is an explicit goal: for findings that would not change design
+or outcome, prefer disposition and merge over repair rounds within these bounds.
 
 ### What a nonblocking disposition must answer, on the record
 
@@ -179,7 +178,7 @@ corrected or explicitly withdrawn, never silently endorsed.
 
 Every dispatched code task declares its supported envelope and accepted limits. Define them through readers and consequences, including ordinary environmental inputs, persisted state, interruption, restart and documented recovery. An input is not outside the envelope merely because the coordinator does not produce it. The review panel receives this declaration and may refute its boundaries.
 
-The out-of-envelope exception remains a special case: a non-author orchestrator may defer a reproduced finding without concurrence when evidence establishes an unsupported trigger, bounded consequences and no never-overridable violation. Otherwise apply the judgment and conditional concurrence rule above. Round number and class name confer no exemption.
+The out-of-envelope special case lets a non-author orchestrator defer reproduced findings without concurrence when evidence establishes unsupported triggers, bounded consequences and no never-overridable violation. Otherwise apply the rule above. Round number and class name confer no exemption.
 
 Refusal alone is insufficient. Evidence must establish bounded termination or safe stopping, an actionable diagnosis reaching the responsible operator, preservation of work and authority, and no indefinite obstruction of unrelated work. Recovery must be written so the operator can follow it, with prerequisites and a recognizable successful result. Demonstrate recovery when it is non-obvious or touches evidence, authority or uncertain external effects. Existing demonstrations may cover equivalent cases. Uncertain bounds block deferral.
 
