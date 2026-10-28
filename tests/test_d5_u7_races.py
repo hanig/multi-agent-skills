@@ -28,7 +28,6 @@ import d5_activation as activation
 import d5_admission as admission
 import d5_authority as authority
 import d5_authority_store as store
-import d5_completion as completion
 import d5_control as control
 import d5_host as host
 import d5_merge_journal as J
@@ -74,7 +73,6 @@ class World:
             remote_recovery_attestation=None)
         self.cmd = M.commands(self.args, self.intent['root'], self.binding, 'github.com', 'example/project')
         self.operation = submission.Operation(self.effect, 'merge', J.encoded(self.scope), J.encoded(self.intent))
-        # Bootstrap a prevalidated installation without a Git/host subprocess.
         with protocol.pin(self.directory) as pinned:
             key = list(pinned._record.key)
         self.ready = dict(registration_id='1' * 32, plan_id='p', state_dir=str(self.state),
@@ -91,7 +89,7 @@ class World:
         ok, reason = state.acquire_lease(self.state, bump_epoch=False)
         case.assertTrue(ok, reason)
         self.stack.callback(state.release_lease, self.state)
-        record = dict(schema_version=1, grant_id='grant-a', issued_at=100, confirmed_at=100,
+        record = dict(schema_version=1, grant_id='a' * 32, issued_at=100, confirmed_at=100,
             expires_at=200, session_cap=1, mandate_sha256=authority.mandate_digest(self.mandate),
             scope=self.scope, confirmation=dict(owner_response='fixture yes', displayed_bounds='fixture bounds'),
             custody=None, invalidation=None)
@@ -121,7 +119,6 @@ class World:
         self.patch(submission, 'os', local_os)
         self.stack.callback(self.drop_holders)
         self.boundary = self.new_boundary()
-        # Registered last: invariant is checked before any fixture cleanup.
         self.stack.callback(self.invariant)
 
     def patch(self, owner, name, *args, **kwargs):
@@ -150,8 +147,7 @@ class World:
             self.close(fd)
 
     def die(self):
-        # Only the simulation closes retained descriptors. A production caller
-        # must EXIT after unconfirmed submission (ARC-3762-OD1).
+        # Simulated death only; production must exit (ARC-3762-OD1).
         self.drop_holders()
         state.release_lease(self.state)
         self.boundary = None
@@ -263,8 +259,9 @@ class TestD5U7Races(unittest.TestCase):
                         # No intent exists: a fresh confirmed grant and observed
                         # dead holder allow B to claim and complete normally.
                         record = store.read(w.directory)
-                        record.update(grant_id='grant-b', issued_at=w.now, confirmed_at=w.now,
+                        record.update(grant_id='b' * 32, issued_at=w.now, confirmed_at=w.now,
                                       expires_at=w.now + 100, invalidation=None)
+                        record['confirmation']['owner_response'] = 'fresh fixture consent'
                         store.replace(w.directory, record)
                         w.claim('B', w.other)
                         self.assertEqual(w.request['generation'], 2)
