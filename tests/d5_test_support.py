@@ -111,8 +111,10 @@ class inactive:
             if not command[index + 1].startswith('# d5-test-bootstrap\n'):
                 command[index + 1] = child_bootstrap(self.source) + command[index + 1]
             return command
-        script = os.path.abspath(os.fspath(command[index]))
-        if os.path.basename(script) not in ('swarm.py', 'unit.py', 'merge_unit.py', 'remote_verify.py'):
+        script = os.path.abspath(os.path.join(options.get('cwd') or os.curdir,
+                                             os.fspath(command[index])))
+        # Nested pins must not bootstrap an already prepared child twice.
+        if os.path.basename(script).startswith('.d5-test-'):
             return args
         if not os.path.isfile(script):
             return args
@@ -123,10 +125,9 @@ class inactive:
         self.files.append(wrapper)
         with os.fdopen(fd, 'w') as stream:
             stream.write('import os, sys\nos.unlink(__file__)\n' + child_bootstrap(source) +
-                         'sys.argv[0] = ' + repr(script) + '\n__file__ = sys.argv[0]\n' +
-                         'with open(__file__, "rb") as _d5_stream:\n'
-                         '    _d5_program = compile(_d5_stream.read(), __file__, "exec")\n'
-                         'exec(_d5_program, globals())\n')
+                         'import runpy\n'
+                         'sys.argv[0] = ' + repr(script) + '\n'
+                         'runpy.run_path(sys.argv[0], run_name="__main__")\n')
         command[index] = wrapper
         return command
 
