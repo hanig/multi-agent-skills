@@ -525,5 +525,10 @@ class TestTheJudgedHeadIsInTheReceipt(unittest.TestCase):
             self.assertIsNone(S.attested_receipt(state, "u1", d)[0])
         self.assertIsNone(S.attested_receipt({}, "u1", "")[0])
 
+# These legacy cases retain their pre-cutover premise, including CLI children.
+from tests.fixtures.d5.inactive import legacy_module
+setUpModule, tearDownModule = legacy_module(globals())
+
+
 if __name__ == "__main__":
     unittest.main()

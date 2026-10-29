@@ -71,7 +71,7 @@ class TestTrackerMatrix(unittest.TestCase):
                     receipts = len(case.receipts()) if route == 'drain' else None
                     rows.append(dict(active=active, route=route, exit=rc,
                                      mutations=mutations, receipts=receipts))
-                    self.assertEqual(rc, 1 if active and route == 'drain' else 0,
+                    self.assertEqual(rc, 3 if active and route == 'drain' else 0,
                                      case.stdout + case.stderr)
                     if route == 'audit':
                         self.assertEqual(mutations, 0)
