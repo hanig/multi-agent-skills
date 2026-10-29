@@ -1,8 +1,6 @@
-"""Explicit pre-cutover premise for legacy tests, including their Python children.
+"""Explicit inactive fixtures and child delivery; importing never changes activation.
 
-Opt in with inactive() around a test, or for_case(self) in a legacy fixture.
-Importing this module never changes activation. Children inherit the pin only
-while the opted-in context is live. Production wiring tests do not opt in.
+Use inactive() or for_case(self). Production-wiring tests retain active defaults.
 """
 from contextlib import ExitStack, contextmanager
 import os
@@ -11,6 +9,17 @@ from pathlib import Path
 import sys
 import tempfile
 from unittest import mock
+
+
+def child_bootstrap(source):
+    """Explicit inactive premise for a test-owned Python child runner."""
+    return (
+        'import importlib.util, sys\n'
+        'spec = importlib.util.spec_from_file_location("d5_activation", ' + repr(str(Path(source).resolve())) + ')\n'
+        'module = importlib.util.module_from_spec(spec)\n'
+        'spec.loader.exec_module(module)\n'
+        'module.d5_active = lambda: False\n'
+        'sys.modules["d5_activation"] = module\n')
 
 
 @contextmanager
@@ -23,19 +32,11 @@ def inactive(owner=None, environ=None):
         if owner is not None and owner is not d5_activation:
             stack.enter_context(mock.patch.object(owner, 'd5_active', return_value=False))
         directory = stack.enter_context(tempfile.TemporaryDirectory(prefix='d5-inactive-test-'))
-        # Test-owned sitecustomize carries the same premise into legacy CLI
-        # fixtures. Explicit active mocks in D5 children still take precedence.
+        # Carry the premise into children; their explicit mocks take precedence.
         source = Path(d5_activation.__file__).resolve()
         environment = dict(os.environ if environ is None else environ)
-        bootstrap = (
-            'import importlib.util, sys\n'
-            'spec = importlib.util.spec_from_file_location("d5_activation", ' + repr(str(source)) + ')\n'
-            'module = importlib.util.module_from_spec(spec)\n'
-            'spec.loader.exec_module(module)\n'
-            'module.d5_active = lambda: False\n'
-            'sys.modules["d5_activation"] = module\n')
-        # An explicit child environment may carry its own fault-injection
-        # sitecustomize. Keep that hook after the pin, rather than hiding it.
+        bootstrap = child_bootstrap(source)
+        # Preserve an explicit child environment's existing fault hook after the pin.
         if environ is not None:
             for entry in environment.get('PYTHONPATH', '').split(os.pathsep):
                 hook = Path(entry) / 'sitecustomize.py'
@@ -66,3 +67,9 @@ def inactive_class(cls):
         original(self)
     cls.setUp = setup
     return cls
+
+
+def inactive_classes(*classes):
+    """Opt in only the explicitly named legacy fixture classes."""
+    for cls in classes:
+        inactive_class(cls)

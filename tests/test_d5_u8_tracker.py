@@ -5,12 +5,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from tests import test_linear_audit as audit
 from tests import test_linear_issue as issue
 from tests import test_linear_file as filing
 from tests import test_linear_drain as drain
@@ -38,9 +36,7 @@ class TestTrackerMatrix(unittest.TestCase):
     def test_linear_routes_in_both_activation_states(self):
         rows = []
         for active in (False, True):
-            # Each route starts with separate synthetic state. No real transport
-            # or subprocess is permitted; the receipt subprocess is re-entered
-            # in process to preserve its production parser and recorder.
+            # Separate stub state per route; real receipt parser/recorder, no child.
             for route in ('new', 'edit', 'replay', 'file', 'audit', 'drain'):
                 with self.subTest(active=active, route=route), ExitStack() as stack:
                     cls = drain.DrainCase if route == 'drain' else (
@@ -55,8 +51,7 @@ class TestTrackerMatrix(unittest.TestCase):
                     elif route == 'edit':
                         rc = case.issue('edit', 'ARC-1', '--title', 'changed')
                     elif route == 'replay':
-                        # Leave one incomplete write so replay is an actual
-                        # mutating route, not an already-confirmed no-op.
+                        # Replay must perform an incomplete write.
                         case.fake.ignore_update = True
                         self.assertNotEqual(case.issue('edit', 'ARC-1', '--title', 'changed'), 0)
                         case.fake.ignore_update = False
@@ -161,8 +156,7 @@ class TestTrackerMatrix(unittest.TestCase):
         print('U8 tracker helper matrix: ' + json.dumps(rows, sort_keys=True))
 
     def test_merge_drain_and_audit_routes(self):
-        # Existing consumer tests exercise real parser/transport in inactive
-        # mode and prove zero subprocesses/queries in active mode.
+        # Real inactive audit consumer; active mode must make no child/query call.
         audit_case = fixture(self, outbox.TestAuditObservation)
         audit_case.test_active_audit_invokes_only_observations_at_real_transport()
         rows = []

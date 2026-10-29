@@ -525,23 +525,11 @@ class TestTheJudgedHeadIsInTheReceipt(unittest.TestCase):
             self.assertIsNone(S.attested_receipt(state, "u1", d)[0])
         self.assertIsNone(S.attested_receipt({}, "u1", "")[0])
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestTheBinding)
-inactive_class(TestAnUnmergedPRDoesNotClose)
-inactive_class(TestMalformedReceiptsAreNotEvidence)
-inactive_class(TestRecordingRefusesABadJournal)
-inactive_class(TestClosureAuthorityIsUnchanged)
-inactive_class(TestTheCommandCanActuallyBeRun)
-inactive_class(TestRoundOneFindings)
-inactive_class(TestReadyForPRIsNotADeadEnd)
-inactive_class(TestTheBindingUsesTheJudgedHead)
-inactive_class(TestRoundTwoFindings)
-inactive_class(TestClosedIsClosed)
-inactive_class(TestTheTreeBelongsToThePinnedCommit)
-inactive_class(TestRoundThreeFindings)
-inactive_class(TestTheProducedHeadIsRecordedNotRederived)
-inactive_class(TestTheJudgedHeadIsInTheReceipt)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestTheBinding, TestAnUnmergedPRDoesNotClose, TestMalformedReceiptsAreNotEvidence,
+    TestRecordingRefusesABadJournal, TestClosureAuthorityIsUnchanged, TestRoundOneFindings,
+    TestRoundThreeFindings)
 
 
 if __name__ == "__main__":

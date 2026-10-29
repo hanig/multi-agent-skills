@@ -240,7 +240,6 @@ class ValidateSeedsTests(unittest.TestCase):
                                      worktrees)
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
 from tests.d5_test_support import inactive_class
 inactive_class(ValidateSeedsTests)
 

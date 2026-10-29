@@ -918,20 +918,13 @@ class TestDoneCodeDrain(unittest.TestCase):
                              ["open_pr", "close"])
             self.assertNotEqual(intents[0]["key"], intents[1]["key"])
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestStatusIsDerivedNotStored)
-inactive_class(TestReceiptAdmissionIsAtomic)
-inactive_class(TestJournalDurability)
-inactive_class(TestReceiptsRequireAKnownIntent)
-inactive_class(TestReviewFindings)
-inactive_class(TestTheWireValueCarriesTheWeakness)
-inactive_class(TestRoundThreeFindings)
-inactive_class(TestTheRefusalCannotBeBypassed)
-inactive_class(TestARefIsRequiredWhereItIsWritten)
-inactive_class(TestAppendingAfterACrashDoesNotDestroyTwoRecords)
-inactive_class(TestHealingHappensUnderTheLock)
-inactive_class(TestDoneCodeDrain)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestStatusIsDerivedNotStored, TestReceiptAdmissionIsAtomic, TestJournalDurability,
+    TestReceiptsRequireAKnownIntent, TestReviewFindings, TestTheWireValueCarriesTheWeakness,
+    TestRoundThreeFindings, TestTheRefusalCannotBeBypassed, TestARefIsRequiredWhereItIsWritten,
+    TestAppendingAfterACrashDoesNotDestroyTwoRecords, TestHealingHappensUnderTheLock,
+    TestDoneCodeDrain)
 
 
 if __name__ == "__main__":

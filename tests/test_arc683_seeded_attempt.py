@@ -95,6 +95,8 @@ class SeedValidationTests(unittest.TestCase):
 
 class SeedDispatchTests(unittest.TestCase):
     def setUp(self):
+        from tests.d5_test_support import for_case
+        for_case(self)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)

@@ -202,10 +202,5 @@ class TestSnapshotEpoch(unittest.TestCase):
         self.refuse_without_writing(stale)
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestSnapshotEpoch)
-
-
 if __name__ == "__main__":
     unittest.main()
