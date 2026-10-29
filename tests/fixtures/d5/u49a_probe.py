@@ -34,7 +34,9 @@ def capture(source, tool, command, active=False, installed=False):
         old = Path.cwd()
         os.chdir(tmp)
         stack.callback(os.chdir, old)
-        stack.enter_context(mock.patch.object(d5_activation, 'd5_active', return_value=active))
+        # None observes production wiring without an activation mock.
+        if active is not None:
+            stack.enter_context(mock.patch.object(d5_activation, 'd5_active', return_value=active))
         stack.enter_context(mock.patch.object(unit, 'now_iso', return_value='fixture-time'))
         state, runs = tmp / 'state', tmp / 'runs'
         state.mkdir()
