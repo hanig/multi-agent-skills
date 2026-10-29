@@ -32,10 +32,6 @@ def setUpModule():
     isolated_module_path()
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestTrackerField(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -239,6 +235,11 @@ class TestTrackerField(unittest.TestCase):
         with mock.patch.object(Path, 'is_file', failed_stat), redirect_stderr(err):
             self.advance()
         self.assertIn('could not backfill tracker labels', err.getvalue())
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestTrackerField)
 
 
 if __name__ == '__main__':

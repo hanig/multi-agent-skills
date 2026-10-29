@@ -66,10 +66,6 @@ assert BASH is None or os.path.isabs(BASH)
 OLD_BASH = "/bin/bash" if 0 < _bash_major("/bin/bash") < 4 else None
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class SlurmEvidence(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -1493,6 +1489,11 @@ class SlurmEvidence(unittest.TestCase):
         self.assertEqual(self.judge(), "DONE")
         self.assertEqual(self.spec["slurm_evidence_source"], "exit-record")
         self.assertTrue(any("unobserved requeue" in note for note in self.notes))
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(SlurmEvidence)
 
 
 if __name__ == "__main__":

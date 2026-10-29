@@ -15,10 +15,6 @@ sys.path.insert(0, str(SCRIPTS))
 HALT = "another coordinator has written state under us"
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestSnapshotEpoch(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -204,6 +200,11 @@ class TestSnapshotEpoch(unittest.TestCase):
                                side_effect=successor_after_read):
             stale = self.load()
         self.refuse_without_writing(stale)
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestSnapshotEpoch)
 
 
 if __name__ == "__main__":
