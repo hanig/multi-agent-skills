@@ -14,10 +14,10 @@ import tempfile
 import time
 import unittest
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 from tests.d5_test_support import child_bootstrap
 
-
-ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "installed_pipeline"
 SKILLS = ("hanig-project", "hanig-swarm")
 OUTPUTS = ["result.txt", "details.txt"]
