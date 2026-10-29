@@ -174,12 +174,14 @@ class TestRemoteVerification(unittest.TestCase):
         self.save_policy()
 
     def generic_verify(self, target):
-        return subprocess.run([
-            sys.executable, S.__file__, 'verify', '--state-dir', str(self.f.state_dir),
-            '--unit', 'u', '--attempt', str(self.f.attempt), '--claim', V.INTEGRATION_CLAIM,
-            '--target-commit', target, '--verifier', V.MERGE_VERIFIER,
-            '--path', str(self.f.repo / V.MERGE_VERIFIER_PATH)],
-            cwd=self.f.repo, env=self.f.env, capture_output=True, text=True, timeout=60)
+        from tests.d5_test_support import inactive
+        with inactive(environ=self.f.env) as environment:
+            return subprocess.run([
+                sys.executable, S.__file__, 'verify', '--state-dir', str(self.f.state_dir),
+                '--unit', 'u', '--attempt', str(self.f.attempt), '--claim', V.INTEGRATION_CLAIM,
+                '--target-commit', target, '--verifier', V.MERGE_VERIFIER,
+                '--path', str(self.f.repo / V.MERGE_VERIFIER_PATH)],
+                cwd=self.f.repo, env=environment, capture_output=True, text=True, timeout=60)
 
     def empty_system_path(self):
         empty = self.f.directory / 'empty-defpath'
