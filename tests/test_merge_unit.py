@@ -208,8 +208,12 @@ class TestMergeUnit(unittest.TestCase):
                    "--state-dir", str(self.state_dir), "--unit", "u", "--pr", "7"]
         if approver:
             command += ["--approver", "Operator"]
-        return subprocess.run(command + list(extra), cwd=str(cwd or self.repo), env=self.env,
-                              capture_output=True, text=True, timeout=60)
+        # Fault-injection tests replace PYTHONPATH after setUp; opt this
+        # legacy child into the same premise while preserving their hook.
+        from tests.d5_test_support import inactive
+        with inactive(environ=self.env) as environment:
+            return subprocess.run(command + list(extra), cwd=str(cwd or self.repo), env=environment,
+                                  capture_output=True, text=True, timeout=60)
 
     def calls(self, prefix=None):
         path = Path(self.env["FORGE_LOG"])
