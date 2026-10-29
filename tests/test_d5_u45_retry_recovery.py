@@ -74,7 +74,7 @@ def inactive_script_capture(script=None):
 class TestRecovery(unittest.TestCase):
     def setUp(self):
         self.c = c = legacy.TestMergeUnit()
-        c.setUp()
+        c.prepare_active_fixture()
         self.addCleanup(c.doCleanups)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

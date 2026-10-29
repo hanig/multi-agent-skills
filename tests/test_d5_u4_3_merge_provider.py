@@ -587,7 +587,7 @@ class TestMergeProvider(unittest.TestCase):
 class TestOperator(unittest.TestCase):
     def test_ready_operator_merges_and_recovers_without_recorder_or_advance(self):
         c = legacy.TestMergeUnit()
-        c.setUp()
+        c.prepare_active_fixture()
         self.addCleanup(c.doCleanups)
         with ExitStack() as stack:
             stack.enter_context(mock.patch.dict(os.environ, c.env))
