@@ -179,6 +179,10 @@ class TestTrackerRefusal(unittest.TestCase):
 
 
 class TestAuditObservation(audit_fixture.AuditCase):
+    def setUp(self):
+        self.prepare_fixture()
+        self.assertIs(activation.d5_active(), True)
+
     def test_active_audit_invokes_only_observations_at_real_transport(self):
         host = registry_fixture.TestD5Registry()
         self.addCleanup(host.doCleanups)

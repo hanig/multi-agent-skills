@@ -44,8 +44,9 @@ class TestTrackerMatrix(unittest.TestCase):
       filing.FileCase if route == 'file' else issue.IssueCase)
      case = cls()
      stack.callback(case.doCleanups)
-     case.setUp()
+     case.prepare_fixture()
      stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=active))
+     self.assertIs(activation.d5_active(), active)
      stack.enter_context(mock.patch.object(subprocess, 'run', side_effect=receipt_child))
      if route == 'new':
       rc = case.issue('new', '--independent', 'fixture')
