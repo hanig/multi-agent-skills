@@ -306,6 +306,53 @@ class TestU8Wiring(unittest.TestCase):
    self.assertEqual(plain.stdout, wrapped.stdout)
    self.assertEqual(wrapped.stdout.strip(), 'ok')
 
+ def test_child_script_bootstrap_preserves_context_and_grandchildren(self):
+  from tests.d5_test_support import inactive
+  with tempfile.TemporaryDirectory() as tmp:
+   root = Path(tmp)
+   tools = root / 'tools'
+   tools.mkdir()
+   (tools / 'd5_activation.py').symlink_to(Path(activation.__file__))
+   script = tools / 'probe.py'
+   script.write_text('import d5_activation,json,os,sys\n'
+    'print(json.dumps([d5_activation.d5_active(),sys.argv,__file__,os.getcwd(),sys.path]))\n')
+   command = [sys.executable, 'tools/probe.py', 'argument with spaces']
+   def run(argv=command):
+    result = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=30)
+    self.assertEqual(result.returncode, 0, result.stderr)
+    return json.loads(result.stdout)
+   plain = run()
+   with inactive():
+    pinned = run()
+    with inactive():
+     self.assertEqual(run(), pinned)
+    grandchild = run([sys.executable, '-c',
+     'import subprocess,sys; subprocess.run([sys.executable,"tools/probe.py",'
+     '"argument with spaces"],check=True)'])
+    self.assertEqual(grandchild, pinned)
+   self.assertEqual(run(), plain)
+   self.assertIs(plain[0], True)
+   self.assertIs(pinned[0], False)
+   self.assertEqual(pinned[1][1:], plain[1][1:])
+   self.assertEqual(pinned[2:], plain[2:])
+   self.assertEqual(list(tools.glob('.d5-test-*')), [])
+
+ def test_child_audit_refuses_uncovered_startup_reference(self):
+  from tests.d5_test_support import inactive
+  with tempfile.TemporaryDirectory() as tmp:
+   root = Path(tmp)
+   (root / 'd5_activation.py').symlink_to(Path(activation.__file__))
+   (root / 'sitecustomize.py').write_text('from d5_activation import d5_active as bound\n')
+   effect = root / 'effect'
+   script = root / 'probe.py'
+   script.write_text('from pathlib import Path\nPath(' + repr(str(effect)) + ').touch()\n')
+   with inactive():
+    result = subprocess.run([sys.executable, str(script)],
+     env={'PYTHONPATH': str(root)}, capture_output=True, text=True, timeout=30)
+   self.assertNotEqual(result.returncode, 0)
+   self.assertIn('uncovered D5 reference: sitecustomize.bound', result.stderr)
+   self.assertFalse(effect.exists())
+
  def test_M5_replacement_needs_fresh_confirmation(self):
   fixture = lease_fixture.TestD5Lease()
   self.addCleanup(fixture.doCleanups)
