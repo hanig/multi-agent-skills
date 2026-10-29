@@ -25,10 +25,6 @@ AUTHORED = ("hanig-orchestrate", "hanig-portable-handoff", "hanig-project",
             "hanig-review-gate", "hanig-swarm", "hanig-verified-workflow")
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class InstalledSnapshot(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -246,6 +242,11 @@ class InstalledSnapshot(unittest.TestCase):
                             self.assertIsInstance(json.loads(result.stdout), dict)
                         else:
                             self.assertIn("usage:", result.stdout)
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(InstalledSnapshot)
 
 
 if __name__ == "__main__":

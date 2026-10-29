@@ -35,10 +35,6 @@ def setUpModule():
     isolated_module_path()
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestOnlyOneConditionTriggersIt(unittest.TestCase):
 
     def setUp(self):
@@ -187,7 +183,6 @@ def _paseo_stub_on_path(case):
     os.environ["PATH"] = closed_bin(d)
 
 
-@inactive_class
 class TestTheBoundIsDeclaredAndChecked(unittest.TestCase):
 
     def setUp(self):
@@ -225,7 +220,6 @@ class TestTheBoundIsDeclaredAndChecked(unittest.TestCase):
         S.validate_plan(self._plan(continuation={"max": 2}))
 
 
-@inactive_class
 class TestItIsNotAUnitState(unittest.TestCase):
 
     def test_no_continuing_state_was_invented(self):
@@ -246,6 +240,13 @@ class TestItIsNotAUnitState(unittest.TestCase):
     def test_exhaustion_fails_rather_than_looping(self):
         src = (SCRIPTS / "swarm.py").read_text()
         self.assertIn("fails for missing production evidence", src)
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestOnlyOneConditionTriggersIt)
+inactive_class(TestTheBoundIsDeclaredAndChecked)
+inactive_class(TestItIsNotAUnitState)
 
 
 if __name__ == "__main__":
