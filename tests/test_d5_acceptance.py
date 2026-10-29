@@ -393,7 +393,7 @@ class TestAcceptance(unittest.TestCase):
         attempt = t.ledger.prepare(*c.args, **dict(request, correlation={'request_id': 'uncertain'}))
         cap, uncertain = t.completion.bind(receipt), t.completion.bind(attempt)
         before = self.snapshot()
-        with mock.patch.object(t.registry, 'd5_active', DEFAULT_ACTIVE), \
+        with inactive(t.registry), \
                 mock.patch.object(t.protocol, 'pin', wraps=t.protocol.pin) as pin:
             for call in (lambda: cap.complete(t.OK), uncertain.uncertain):
                 with self.assertRaisesRegex(t.ledger.EffectError, '^D5 inactive$'):
