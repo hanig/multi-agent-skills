@@ -36,8 +36,11 @@ read-only checklist. No automated route scanner or state mutation is involved.
 
 **After activation, do not run `linear_sync drain` until a P1 unit delivers
 tracker lease authority.** Measured with synthetic transports: active
-`linear_sync drain` sends mutations, then receipt recording refuses, so repeated
-drains re-send idempotent mutations with no recorded receipt. Do not drain to
+`linear_sync drain` first sent two mutations, then receipt recording refused
+(exit 3, zero receipts). An immediate repeat against the same stub tracker and
+queue sent zero mutations and again refused receipt recording (exit 3, zero
+receipts): the already-satisfied state and comment were not resent. These are
+measured histories, not a general retry guarantee. Do not drain to
 discover whether a queued operation was sent. Preserve the queue and reconcile
 external outcomes read-only before any later authorized replay.
 
