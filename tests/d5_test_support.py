@@ -14,7 +14,7 @@ from unittest import mock
 
 
 @contextmanager
-def inactive(owner=None):
+def inactive(owner=None, environ=None):
     with ExitStack() as stack:
         scripts = Path(__file__).resolve().parents[1] / 'skills/hanig-swarm/scripts'
         stack.enter_context(mock.patch.object(sys, 'path', [str(scripts)] + sys.path))
@@ -26,16 +26,28 @@ def inactive(owner=None):
         # Test-owned sitecustomize carries the same premise into legacy CLI
         # fixtures. Explicit active mocks in D5 children still take precedence.
         source = Path(d5_activation.__file__).resolve()
-        Path(directory, 'sitecustomize.py').write_text(
+        environment = dict(os.environ if environ is None else environ)
+        bootstrap = (
             'import importlib.util, sys\n'
             'spec = importlib.util.spec_from_file_location("d5_activation", ' + repr(str(source)) + ')\n'
             'module = importlib.util.module_from_spec(spec)\n'
             'spec.loader.exec_module(module)\n'
             'module.d5_active = lambda: False\n'
             'sys.modules["d5_activation"] = module\n')
-        path = directory + os.pathsep + os.environ.get('PYTHONPATH', '')
-        stack.enter_context(mock.patch.dict(os.environ, {'PYTHONPATH': path}))
-        yield
+        # An explicit child environment may carry its own fault-injection
+        # sitecustomize. Keep that hook after the pin, rather than hiding it.
+        if environ is not None:
+            for entry in environment.get('PYTHONPATH', '').split(os.pathsep):
+                hook = Path(entry) / 'sitecustomize.py'
+                if entry and hook.is_file():
+                    filename = repr(str(hook.resolve()))
+                    bootstrap += ('with open(' + filename + ', "rb") as fixture_hook:\n'
+                                  '    exec(compile(fixture_hook.read(), ' + filename + ', "exec"))\n')
+                    break
+        Path(directory, 'sitecustomize.py').write_text(bootstrap)
+        environment['PYTHONPATH'] = directory + os.pathsep + environment.get('PYTHONPATH', '')
+        stack.enter_context(mock.patch.dict(os.environ, {'PYTHONPATH': environment['PYTHONPATH']}))
+        yield environment
 
 
 def for_case(case):
