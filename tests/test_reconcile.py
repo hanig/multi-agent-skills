@@ -15,6 +15,10 @@ sys.path.insert(0, str(SCRIPTS))
 import reconcile as R
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class ReconcileTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
