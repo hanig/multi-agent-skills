@@ -57,7 +57,7 @@ try:
     import d5_activation
     after_modules = dict(sys.modules)
     after_path = list(sys.path)
-    assert d5_activation.d5_active() is False, "activation is not False"
+    assert d5_activation.d5_active() is True, "activation is not True"
 finally:
     observing = False
     builtins.__import__ = real_import
@@ -106,9 +106,9 @@ class TestD5Activation(unittest.TestCase):
         self.assertFalse(any(isinstance(n, (ast.Import, ast.ImportFrom))
                              for n in ast.walk(tree)))
 
-    def test_inactive(self):
-        self.assertIs(activation.d5_active(), False)
-        self.assertIs(registry.d5_active(), False)
+    def test_production_active(self):
+        self.assertIs(activation.d5_active(), True)
+        self.assertIs(registry.d5_active(), True)
 
     def test_activation_patch_reaches_registry(self):
         for value in (True, False):
@@ -118,12 +118,12 @@ class TestD5Activation(unittest.TestCase):
                 predicate.assert_called_once_with()
 
     def test_registry_patch_remains_local_and_reaches_consumer(self):
-        with mock.patch.object(registry, "d5_active", return_value=True) as predicate:
-            registry._active()
+        with mock.patch.object(registry, "d5_active", return_value=False) as predicate:
+            with self.assertRaisesRegex(registry.AuthorityError, "D5 is not active"):
+                registry._active()
             predicate.assert_called_once_with()
-            self.assertIs(activation.d5_active(), False)
-        with self.assertRaisesRegex(registry.AuthorityError, "D5 is not active"):
-            registry._active()
+            self.assertIs(activation.d5_active(), True)
+        registry._active()
 
     def test_import_mutations_fail_cold_probe(self):
         for statement in ("import d5_registry", "import sys", "from os import path"):
