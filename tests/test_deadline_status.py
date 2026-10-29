@@ -41,10 +41,6 @@ def anchor_launch_host(state, attempt, host=None):
         Path(attempt).name] = {"launch_host": host}
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestDeadlineDeclaration(unittest.TestCase):
     def test_positive_finite_seconds_are_accepted(self):
         S.validate_plan({"name": "p", "units": [unit(deadline_s=0.5)]})
@@ -68,7 +64,6 @@ class TestDeadlineDeclaration(unittest.TestCase):
         self.assertIn("mint a retry", note)
 
 
-@inactive_class
 class TestStatusCarriesTime(unittest.TestCase):
     def test_one_observation_clock_drives_unit_and_state_age(self):
         plan = {"name": "p", "units": [unit()]}
@@ -105,7 +100,6 @@ class TestStatusCarriesTime(unittest.TestCase):
         self.assertEqual(state["state_changed_at"], 120.0)
 
 
-@inactive_class
 class TestDeadlineBreach(unittest.TestCase):
     def _advance(self, allocated_at, deadline_s=60, observed_at=200.0,
                  check_moves_clock_to=None, check_result=None,
@@ -822,6 +816,13 @@ class TestDeadlineBreach(unittest.TestCase):
         self.assertEqual(current["deadline_breach_seq"], 1)
         self.assertNotIn("deadline_breach_active", current)
         self.assertEqual(deadline_intents, [])
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestDeadlineDeclaration)
+inactive_class(TestStatusCarriesTime)
+inactive_class(TestDeadlineBreach)
 
 
 if __name__ == "__main__":

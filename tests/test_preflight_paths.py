@@ -115,10 +115,6 @@ def _state_with_seal(uid, attempt, seal, facts=None):
         us["attempt_launch_facts"] = {Path(attempt).name: facts}
     return {"units": {uid: us}}
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestExternalPathPolicy(Base):
 
     def test_defaults_are_external_and_stable_for_all_commands(self):
@@ -296,7 +292,6 @@ class TestExternalPathPolicy(Base):
         runs.relative_to(Path(env["XDG_STATE_HOME"]).resolve())
 
 
-@inactive_class
 class TestCanonicalDirtyPredicate(Base):
 
     def _dirty_repo(self, make_dirty):
@@ -366,7 +361,6 @@ class TestCanonicalDirtyPredicate(Base):
         self.assertIn('"line\\nbreak.txt"', err)
 
 
-@inactive_class
 class TestPreflightIsTheLaunchChokepoint(Base):
 
     def test_dirty_shared_checkout_does_not_block_code_attempt(self):
@@ -524,7 +518,6 @@ class TestPreflightIsTheLaunchChokepoint(Base):
         self.assertEqual(len(sbatch), 1)
 
 
-@inactive_class
 class TestRefusalIsCarriedNotRederived(unittest.TestCase):
     """Explicit preflight refusals remain distinct for guarded non-code jobs."""
 
@@ -601,7 +594,6 @@ class TestRefusalIsCarriedNotRederived(unittest.TestCase):
         self.assertEqual(us.get("preflight_refusals"), None)
 
 
-@inactive_class
 class TestARefusedAttemptCannotBeBound(unittest.TestCase):
     """Round 2 refuted this on 'no recovery scan exists'. That was wrong.
 
@@ -646,7 +638,6 @@ class TestARefusedAttemptCannotBeBound(unittest.TestCase):
                          "11111111-2222-3333-4444-555555555555")
 
 
-@inactive_class
 class TestContainmentCoversAWorkspaceThatDoesNotExistYet(unittest.TestCase):
     """A declared workspace need not exist when the command runs.
 
@@ -683,6 +674,16 @@ class TestContainmentCoversAWorkspaceThatDoesNotExistYet(unittest.TestCase):
         state, _runs, _wt = CP.resolve_paths(
             state_dir=str(self.tmp / "state"), plan=plan, cwd=str(plain))
         self.assertEqual(state, Path(self.tmp / "state").resolve())
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestExternalPathPolicy)
+inactive_class(TestCanonicalDirtyPredicate)
+inactive_class(TestPreflightIsTheLaunchChokepoint)
+inactive_class(TestRefusalIsCarriedNotRederived)
+inactive_class(TestARefusedAttemptCannotBeBound)
+inactive_class(TestContainmentCoversAWorkspaceThatDoesNotExistYet)
 
 
 if __name__ == "__main__":

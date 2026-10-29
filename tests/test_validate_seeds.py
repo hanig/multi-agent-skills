@@ -17,10 +17,6 @@ sys.path.insert(0, str(SWARM.parent))
 import swarm_plan_rules as SPR
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class ValidateSeedsTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -242,6 +238,11 @@ class ValidateSeedsTests(unittest.TestCase):
                     self.assertEqual(self.snapshot(), before)
                     self.assertEqual(self.git("worktree", "list", "--porcelain"),
                                      worktrees)
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(ValidateSeedsTests)
 
 
 if __name__ == "__main__":

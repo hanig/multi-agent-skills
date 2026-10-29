@@ -15,10 +15,6 @@ import swarm_outbox as SO
 AT = '2026-10-16T10:00:00+0000'
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestSequenceDrain(DrainCase):
     def emit_pair(self, directory, keys):
         directory.mkdir(exist_ok=True)
@@ -146,7 +142,6 @@ class TestSequenceDrain(DrainCase):
         self.assertLess(LS.intent_order(AT, 'a', 7), LS.intent_order(AT, 'z', 7))
 
 
-@inactive_class
 class TestSequenceEmission(unittest.TestCase):
     def test_partial_tail_recovers_after_the_completed_sequence_maximum(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,6 +209,12 @@ class TestSequenceEmission(unittest.TestCase):
             self.assertIsNone(SO.emit_intent(tmp, 'project', 'u', 'DONE',
                                             {'attempt_dir': '/runs/u/a'}, evidence=evidence))
             self.assertEqual(path.read_bytes(), before)
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestSequenceDrain)
+inactive_class(TestSequenceEmission)
 
 
 if __name__ == '__main__':
