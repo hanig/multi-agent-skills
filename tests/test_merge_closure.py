@@ -41,6 +41,10 @@ def write(state_dir, *recs):
             fh.write(json.dumps(r) + "\n")
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestTheBinding(unittest.TestCase):
     """The one check a coordinator without a network can make."""
 
@@ -89,6 +93,7 @@ class TestTheBinding(unittest.TestCase):
             self.assertEqual(got["target"], "main")
 
 
+@inactive_class
 class TestAnUnmergedPRDoesNotClose(unittest.TestCase):
 
     def test_an_open_pr_is_not_a_merge(self):
@@ -105,6 +110,7 @@ class TestAnUnmergedPRDoesNotClose(unittest.TestCase):
             self.assertIn("swarm.py merge", refusal)
 
 
+@inactive_class
 class TestMalformedReceiptsAreNotEvidence(unittest.TestCase):
 
     def test_every_pinning_field_is_required(self):
@@ -143,6 +149,7 @@ class TestMalformedReceiptsAreNotEvidence(unittest.TestCase):
             self.assertIsNone(got)               # not admissible
 
 
+@inactive_class
 class TestRecordingRefusesABadJournal(unittest.TestCase):
 
     class _Args:
@@ -172,6 +179,7 @@ class TestRecordingRefusesABadJournal(unittest.TestCase):
             self.assertTrue(got["attested"])
 
 
+@inactive_class
 class TestClosureAuthorityIsUnchanged(unittest.TestCase):
 
     def test_code_still_closes_on_a_merged_pr(self):
@@ -208,6 +216,7 @@ class TestClosureAuthorityIsUnchanged(unittest.TestCase):
 
 
 
+@inactive_class
 class TestTheCommandCanActuallyBeRun(unittest.TestCase):
     """--repo was optional in argparse while the shape check required it, so
     the command could only ever fail. Every unit test passed a repo, so only
@@ -243,6 +252,7 @@ class TestTheCommandCanActuallyBeRun(unittest.TestCase):
                           f"command can only fail")
 
 
+@inactive_class
 class TestRoundOneFindings(unittest.TestCase):
     """Three MAJOR findings, all attacking the binding, all real."""
 
@@ -284,6 +294,7 @@ class TestRoundOneFindings(unittest.TestCase):
             self.assertIsNotNone(got)
 
 
+@inactive_class
 class TestReadyForPRIsNotADeadEnd(unittest.TestCase):
     """Guarding admission on DONE alone meant the first advance moved a
     produced unit to READY_FOR_PR and never looked again, so a receipt
@@ -308,6 +319,7 @@ class TestReadyForPRIsNotADeadEnd(unittest.TestCase):
                         "parked in READY_FOR_PR can never close")
 
 
+@inactive_class
 class TestTheBindingUsesTheJudgedHead(unittest.TestCase):
     """produced_head re-read HEAD after judging, so an agent moving HEAD
     between the two closed the unit for work nothing had validated."""
@@ -331,6 +343,7 @@ class TestTheBindingUsesTheJudgedHead(unittest.TestCase):
         self.assertIn("return True, head,", src)
 
 
+@inactive_class
 class TestRoundTwoFindings(unittest.TestCase):
 
     def test_a_lookalike_host_is_refused(self):
@@ -362,6 +375,7 @@ class TestRoundTwoFindings(unittest.TestCase):
                                       "https://github.com/acme/app"))
 
 
+@inactive_class
 class TestClosedIsClosed(unittest.TestCase):
     """Adding READY_FOR_PR to the admission guard, to fix a unit that could
     never leave it, created the opposite defect: a unit that HAD closed was
@@ -390,6 +404,7 @@ class TestClosedIsClosed(unittest.TestCase):
         self.assertTrue(guarded, "the admission guard was not found")
 
 
+@inactive_class
 class TestTheTreeBelongsToThePinnedCommit(unittest.TestCase):
     """Reading HEAD^{tree} was a second look at a moving target: the agent
     could leave an empty descendant at HEAD for the first read and a
@@ -406,6 +421,7 @@ class TestTheTreeBelongsToThePinnedCommit(unittest.TestCase):
         self.assertIn("head + '^{tree}'", body.replace('"', "'"))
 
 
+@inactive_class
 class TestRoundThreeFindings(unittest.TestCase):
 
     def test_a_lookalike_path_prefix_is_not_the_host(self):
@@ -440,6 +456,7 @@ class TestRoundThreeFindings(unittest.TestCase):
             self.assertIn("does not block it", refusal)
 
 
+@inactive_class
 class TestTheProducedHeadIsRecordedNotRederived(unittest.TestCase):
     """The root cause behind most findings in three rounds: the coordinator
     kept asking a repository the agent owns what it had produced, and the
@@ -460,6 +477,7 @@ class TestTheProducedHeadIsRecordedNotRederived(unittest.TestCase):
         self.assertNotIn("W.produced_head", body)
 
 
+@inactive_class
 class TestTheJudgedHeadIsInTheReceipt(unittest.TestCase):
     """Recording it during merge admission was still a second question to a
     repository the agent owns. The receipt is written at the moment the

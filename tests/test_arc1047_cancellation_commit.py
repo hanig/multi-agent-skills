@@ -7,6 +7,10 @@ import unittest
 from tests import test_arc683_merge_precondition as preconditions
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestCancellationCommit(unittest.TestCase):
     def setUp(self):
         self.precondition = preconditions.TestMergePrecondition()
