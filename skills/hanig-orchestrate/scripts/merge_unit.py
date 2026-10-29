@@ -54,15 +54,14 @@ def _d5_refuse(route):
 
 
 def merge_launch_admitted():
-    """U8 owns admission after executable binding and integrity review."""
+    """U8 leaves launch closed: executable binding and integrity are not delivered."""
     return False
 
 
 def _d5_merge_launch_entry():
     if D5.d5_active() and not merge_launch_admitted():
-        raise Refusal("D5 active: merge launch is not admitted; U7 must supply "
-                      "an operator-authorized executable binding and enforce its "
-                      "integrity boundary before U8 admits merge launch")
+        raise Refusal("D5 active: merge launch is not admitted; executable binding "
+                      "and integrity remain undelivered at U8 cutover")
 
 
 def _d5_merge_entry(args):
