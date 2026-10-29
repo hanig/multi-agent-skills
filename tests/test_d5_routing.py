@@ -90,7 +90,7 @@ class TestD5Routing(unittest.TestCase):
         with mock.patch.object(registry, "d5_active", return_value=True), \
                 mock.patch.object(install, "replace_authority", wraps=install.replace_authority) as route, \
                 self.store_boundary("replace", [(0, False), (1, False)]):
-            result = self.grant()
+            result = self.grant(confirmed_at=first["confirmed_at"] + 1)
         route.assert_called_once_with(self.directory, result)
         self.assertNotEqual(first["grant_id"], result["grant_id"])
         self.assertEqual(self.read(), result)
