@@ -1,4 +1,4 @@
-"""Fresh exec probe of R7 with the production activation default unpatched."""
+"""Fresh exec probe of R7 inheriting the explicit inactive test context."""
 import json
 import os
 from pathlib import Path
