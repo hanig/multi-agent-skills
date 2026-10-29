@@ -135,7 +135,7 @@ class inactive:
                                        dir=os.path.dirname(script))
         self.files.append(wrapper)
         with os.fdopen(fd, 'w') as stream:
-            stream.write('import os, sys\nos.unlink(__file__)\n' + child_bootstrap(source) +
+            stream.write('import os, sys\n_d5_process_entry = globals().get("_d5_process_entry", __file__)\nos.unlink(__file__)\n' + child_bootstrap(source) +
                          'sys.argv[0] = ' + repr(os.fspath(command[index])) + '\n'
                          '__file__ = os.path.abspath(sys.argv[0])\n'
                          'with open(__file__, "rb") as _d5_stream:\n'

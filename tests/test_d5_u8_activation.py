@@ -177,8 +177,11 @@ class TestU8Wiring(unittest.TestCase):
    root = Path(tmp)
    (root / 'd5_activation.py').write_bytes(Path(activation.__file__).read_bytes())
    target = root / 'exec_target.py'
-   target.write_text('import d5_activation, json, os, sys\n'
-    'print(json.dumps([d5_activation.d5_active(), sys.argv, os.environ.get("FIXTURE_EXEC")]))\n')
+   target.write_text('import d5_activation, json, os, subprocess, sys\n'
+    'print(json.dumps([d5_activation.d5_active(), sys.argv, os.environ.get("FIXTURE_EXEC")]))\n'
+    'command = subprocess.check_output(["/bin/ps","-p",str(os.getpid()),"-o","command="],text=True).strip()\n'
+    'suffix = " " + globals().get("_d5_process_entry", sys.argv[0]) + " payload"\n'
+    'assert command.endswith(suffix), command\nprint(command[:-len(suffix)])\n')
    for name in originals:
     code = ('import os,sys;os.' + name +
      '(sys.executable,["fixture-argv-zero",sys.argv[1],"payload"]' +
@@ -187,11 +190,12 @@ class TestU8Wiring(unittest.TestCase):
      command = [sys.executable, '-c', code, str(target)]
      plain = subprocess.run(command, capture_output=True, text=True, timeout=30)
      self.assertEqual(plain.returncode, 0, plain.stderr)
-     self.assertEqual(json.loads(plain.stdout), [True, [str(target), 'payload'], 'retained'])
+     self.assertEqual(json.loads(plain.stdout.splitlines()[0]), [True, [str(target), 'payload'], 'retained'])
      with inactive():
       pinned = subprocess.run(command, capture_output=True, text=True, timeout=30)
      self.assertEqual(pinned.returncode, 0, pinned.stderr)
-     self.assertEqual(json.loads(pinned.stdout), [False, [str(target), 'payload'], 'retained'])
+     self.assertEqual(json.loads(pinned.stdout.splitlines()[0]), [False, [str(target), 'payload'], 'retained'])
+     self.assertEqual(pinned.stdout.splitlines()[1], plain.stdout.splitlines()[1])
      for entry, original in originals.items():
       self.assertIs(getattr(os, entry), original)
    self.assertEqual(sorted(p.name for p in root.iterdir() if p.is_file()),
