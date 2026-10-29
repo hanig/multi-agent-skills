@@ -237,7 +237,6 @@ class TestTrackerField(unittest.TestCase):
         self.assertIn('could not backfill tracker labels', err.getvalue())
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
 from tests.d5_test_support import inactive_class
 inactive_class(TestTrackerField)
 
