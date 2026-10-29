@@ -598,7 +598,12 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(S.acknowledgment_status(self.state_dir)[0], {})
         line, = [line for line in result.stdout.splitlines() if 'linear_sync.py' in line and ' drain ' in line]
         command = shlex.split(line)
-        self.assertEqual(command, [sys.executable,
+        from tests.d5_test_support import inactive
+        with inactive(environ=self.env) as environment:
+            interpreter = subprocess.check_output(
+                [sys.executable, '-c', 'import sys; print(sys.executable)'],
+                env=environment, text=True).strip()
+        self.assertEqual(command, [interpreter,
                                   str(SCRIPTS.parents[1] / 'hanig-project/scripts/linear_sync.py'), 'drain',
                                   '--binding', str(self.plan_path.parent / '.hanig/linear-binding.json'),
                                   '--state-dir', str(self.state_dir)])

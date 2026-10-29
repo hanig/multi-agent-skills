@@ -1483,30 +1483,5 @@ class TestFindingsMustBeAbleToReachTheReport(unittest.TestCase):
         self.assertIn("Not every project has any", doc)
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestEffortIsPerModelNotPerProject)
-inactive_class(TestTheRefusalWhenPaseoIsAbsent)
-inactive_class(TestOutputsMustLandInTheWriteRoot)
-inactive_class(TestASlurmCommandIsTheWork)
-inactive_class(TestACodeUnitNeedsAPullRequestTarget)
-inactive_class(TestTheSurveyFlagsWhatMustNotBeOverwritten)
-inactive_class(TestACodePromptIsAPrompt)
-inactive_class(TestTheDefaultAgent)
-inactive_class(TestPerAttemptBranchesRemoveTheSharedCheckoutConstraint)
-inactive_class(TestRoundTwoFindings)
-inactive_class(TestArrayAndOneWriteRoot)
-inactive_class(TestPathsTheCommandNames)
-inactive_class(TestTheSchemaIsReadableInOneGo)
-inactive_class(TestRoundOneOfThisBatch)
-inactive_class(TestModeAdviceMatchesTheProvider)
-inactive_class(TestTheCheapFixForAWrongPartitionIsWrittenDown)
-inactive_class(TestTheSurveySaysWhetherMemoryMustBeAsked)
-inactive_class(TestTheSurveySaysWhoMayChargeAPartition)
-inactive_class(TestValidateFindsTheSurveyItself)
-inactive_class(TestTheSurveyShapeIsTheRealOne)
-inactive_class(TestFindingsMustBeAbleToReachTheReport)
-
-
 if __name__ == "__main__":
     unittest.main()
