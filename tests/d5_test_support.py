@@ -80,6 +80,7 @@ class inactive:
         original = module.d5_active
         self._audit(original)
         self.popen = subprocess.Popen
+        self.execs = {name: getattr(os, name) for name in ("execv", "execve")}
         try:
             for target, attribute in self.covered:
                 self._install(target)
@@ -91,10 +92,22 @@ class inactive:
                 def __init__(self, args, *positional, **kwargs):
                     super().__init__(pin._command(args, kwargs), *positional, **kwargs)
             subprocess.Popen = Child
+            for name, original in self.execs.items():
+                setattr(os, name, self._exec(original))
         except BaseException:
             self.__exit__(*sys.exc_info())
             raise
         return dict(os.environ if self.environ is None else self.environ)
+
+    def _exec(self, original):
+        def launch(path, args, *environment):
+            if not args:
+                return original(path, args, *environment)
+            # The executable, not a caller-selected argv[0], selects Python.
+            command = self._command([path] + list(args[1:]), {})
+            command[0] = args[0]
+            return original(path, command, *environment)
+        return launch
 
     def _command(self, args, options):
         if options.get('shell') or not isinstance(args, (list, tuple)) or not args:
@@ -133,6 +146,8 @@ class inactive:
 
     def __exit__(self, kind, value, traceback):
         subprocess.Popen = self.popen
+        for name, original in self.execs.items():
+            setattr(os, name, original)
         for target, previous_class, raw, previous, off in reversed(self.targets):
             target.__class__ = previous_class
             vars(target)['d5_active'] = raw
