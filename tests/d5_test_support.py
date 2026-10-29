@@ -108,20 +108,18 @@ class inactive:
         if index >= len(command):
             return args
         if command[index] == '-c' and index + 1 < len(command):
-            if not command[index + 1].startswith('# d5-test-bootstrap\n'):
-                command[index + 1] = child_bootstrap(self.source) + command[index + 1]
+            command[index + 1] = child_bootstrap(self.source) + command[index + 1]
             return command
         script = os.path.abspath(os.path.join(options.get('cwd') or os.curdir,
                                              os.fspath(command[index])))
-        # Nested pins must not bootstrap an already prepared child twice.
-        if os.path.basename(script).startswith('.d5-test-'):
-            return args
         if not os.path.isfile(script):
             return args
         source = os.path.join(os.path.dirname(script), 'd5_activation.py')
         if not os.path.isfile(source):
             source = self.source
-        fd, wrapper = tempfile.mkstemp(prefix='.d5-test-', suffix='.py', dir=os.path.dirname(script))
+        # Preserve suffix-based entry selection in existing startup fixtures.
+        fd, wrapper = tempfile.mkstemp(prefix='.d5-test-', suffix='-' + os.path.basename(script),
+                                       dir=os.path.dirname(script))
         self.files.append(wrapper)
         with os.fdopen(fd, 'w') as stream:
             stream.write('import os, sys\nos.unlink(__file__)\n' + child_bootstrap(source) +
