@@ -169,6 +169,30 @@ class TestU8Wiring(unittest.TestCase):
     self.assertIs(activation.d5_active(), True)
     self.assertIs(registry.d5_active(), True)
 
+  def test_child_hook_keeps_its_file_and_refusal(self):
+    from tests.d5_test_support import inactive
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      (root / 'flag').write_text('injected')
+      (root / 'sitecustomize.py').write_text(
+        'from pathlib import Path\nimport os, subprocess\n'
+        'os.environ["FIXTURE_FAULT"] = Path(__file__).with_name("flag").read_text()\n'
+        'def reject(*a, **k): raise RuntimeError("unexpected spawn")\n'
+        'subprocess.Popen = reject\n')
+      effect = root / 'effect'
+      write = f'from pathlib import Path; Path({str(effect)!r}).write_text("sent")'
+      probe = ('import os,subprocess,sys; print(os.environ["FIXTURE_FAULT"]); '
+               f'subprocess.run([sys.executable,"-c",{write!r}],check=True)')
+      env = {'PYTHONPATH': tmp}
+      with inactive(environ=env) as child:
+        for e in (env, child):
+          r = subprocess.run([sys.executable, '-c', probe], env=e,
+                    capture_output=True, text=True, timeout=30)
+          self.assertEqual(r.stdout.strip(), 'injected', r.stderr)
+          self.assertNotEqual(r.returncode, 0)
+          self.assertIn('unexpected spawn', r.stderr)
+          self.assertFalse(effect.exists())
+
   def test_M5_replacement_needs_fresh_confirmation(self):
     fixture = lease_fixture.TestD5Lease()
     self.addCleanup(fixture.doCleanups)
