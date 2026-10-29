@@ -1,4 +1,4 @@
-"""Inert D5 lease management; no production callers, CLI or authorization.
+"""D5 lease management; no production callers, CLI or authorization.
 
 Registration owns placement and identity; R3/R2 serialize active mutations,
 and the record store owns replacement rules. Status reads atomic snapshots without creating locks
@@ -75,6 +75,10 @@ def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
                  if store.present(directory / store.RECORD_NAME, "record")
                  else d5_install.install_initial)
     with _grant_locked(directory):
+        if operation is d5_install.replace_authority:
+            previous = store.read(directory)
+            if confirmed_at <= previous["confirmed_at"]:
+                raise authority.AuthorityError("grant: fresh confirmation time required")
         return operation(directory, record)
 
 

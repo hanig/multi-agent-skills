@@ -20,6 +20,8 @@ import d5_lease as lease
 import d5_registry as registry
 import merge_unit
 
+PRODUCTION_ACTIVE = registry.d5_active
+
 ROOT = Path(__file__).resolve().parents[1]
 MANDATE = ROOT / 'docs/orchestrator-mandate.md'
 BASELINE = ROOT / 'tests/fixtures/d5/u8-mandate-baseline.json'
@@ -81,6 +83,19 @@ class TestU8Policy(unittest.TestCase):
 
 
 class TestU8Wiring(unittest.TestCase):
+    def test_M6_positive_submission_uses_production_activation(self):
+        from tests import test_d5_submission as t
+        fixture = t.TestSubmission()
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        # Restore the real delegate over the older fixture's active mock.
+        # Clock, identity and external submission remain synthetic inputs.
+        with mock.patch.object(registry, 'd5_active', PRODUCTION_ACTIVE):
+            self.assertIs(registry.d5_active(), True)
+            result = fixture.submit()
+        self.assertEqual(result.outcome, t.OK)
+        self.assertEqual([call[0] for call in fixture.boundary.calls], ['start', 'finish'])
+
     def test_M1_M6_default_production_guards_refuse_before_effects(self):
         self.assertIs(activation.d5_active(), True)
         self.assertIs(registry.d5_active(), True)
