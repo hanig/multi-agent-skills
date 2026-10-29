@@ -39,10 +39,6 @@ def _repo(path, commit=True):
     return path
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
 
     def _attempt(self, tmp):
@@ -114,7 +110,6 @@ class TestTheAnchorIsCapturedBeforeDispatch(unittest.TestCase):
             self.assertIn("nothing to transition FROM", err or "")
 
 
-@inactive_class
 class TestTheAnchorCannotBeMovedAfterwards(unittest.TestCase):
 
     def test_it_is_written_once_and_never_rewritten(self):
@@ -154,7 +149,6 @@ class TestTheAnchorCannotBeMovedAfterwards(unittest.TestCase):
                 os.path.join(t, "runs", "u1", "launch-att1.json")))
 
 
-@inactive_class
 class TestDispatchAnchorsFirst(unittest.TestCase):
 
     def test_the_immutable_worktree_intent_is_captured_before_paseo_runs(self):
@@ -179,6 +173,13 @@ class TestDispatchAnchorsFirst(unittest.TestCase):
         self.assertLess(pos["_capture_code_launch"], pos["run"],
                         "the agent is dispatched before its baseline is "
                         "captured, so the baseline is not a baseline")
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestTheAnchorIsCapturedBeforeDispatch)
+inactive_class(TestTheAnchorCannotBeMovedAfterwards)
+inactive_class(TestDispatchAnchorsFirst)
 
 
 if __name__ == "__main__":
