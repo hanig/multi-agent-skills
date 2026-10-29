@@ -1339,6 +1339,8 @@ class TestValidateFindsTheSurveyItself(SurveyCase):
     def test_dispatch_validates_against_the_survey_too(self):
         """A refusal that only fires when someone runs the optional command
         is a refusal that fires after the DAG is live."""
+        from tests.d5_test_support import for_case
+        for_case(self)
         import subprocess
         with tempfile.TemporaryDirectory() as d:
             p = self._project(d, survey_doc(mem_flag_required=True))
