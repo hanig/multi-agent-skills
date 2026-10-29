@@ -125,9 +125,11 @@ class inactive:
         self.files.append(wrapper)
         with os.fdopen(fd, 'w') as stream:
             stream.write('import os, sys\nos.unlink(__file__)\n' + child_bootstrap(source) +
-                         'import runpy\n'
-                         'sys.argv[0] = ' + repr(script) + '\n'
-                         'runpy.run_path(sys.argv[0], run_name="__main__")\n')
+                         'sys.argv[0] = ' + repr(os.fspath(command[index])) + '\n'
+                         '__file__ = os.path.abspath(sys.argv[0])\n'
+                         'with open(__file__, "rb") as _d5_stream:\n'
+                         '    _d5_program = compile(_d5_stream.read(), __file__, "exec")\n'
+                         'exec(_d5_program, globals())\n')
         command[index] = wrapper
         return command
 
