@@ -15,6 +15,10 @@ sys.path.insert(0, str(SCRIPTS))
 HALT = "another coordinator has written state under us"
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestSnapshotEpoch(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

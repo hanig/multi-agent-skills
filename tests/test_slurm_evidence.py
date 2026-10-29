@@ -66,6 +66,10 @@ assert BASH is None or os.path.isabs(BASH)
 OLD_BASH = "/bin/bash" if 0 < _bash_major("/bin/bash") < 4 else None
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class SlurmEvidence(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

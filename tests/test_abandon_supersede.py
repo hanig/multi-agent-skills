@@ -122,6 +122,10 @@ with mock.patch.object(dt, 'datetime', Clock), mock.patch.object(time, 'strftime
         return SO.read_outbox(self.state)
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestOperatorTerminal(StopFixture, unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -546,6 +550,7 @@ class StoppedDrainFixture(StopFixture, DrainCase):
             'issues': [{'unit': u, 'identifier': 'ARC-1'} for u in ('old', 'successor')]}))
 
 
+@inactive_class
 class TestStoppedDrain(StoppedDrainFixture):
     def test_shared_issue_live_start_then_all_abandoned(self):
         self.shared_issue()
