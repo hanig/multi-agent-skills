@@ -42,8 +42,10 @@ def inactive(owner=None, environ=None):
                 hook = Path(entry) / 'sitecustomize.py'
                 if entry and hook.is_file():
                     filename = repr(str(hook.resolve()))
-                    bootstrap += ('with open(' + filename + ', "rb") as fixture_hook:\n'
-                                  '    exec(compile(fixture_hook.read(), ' + filename + ', "exec"))\n')
+                    bootstrap += ('spec = importlib.util.spec_from_file_location("sitecustomize", ' + filename + ')\n'
+                                  'hook = importlib.util.module_from_spec(spec)\n'
+                                  'sys.modules["sitecustomize"] = hook\n'
+                                  'spec.loader.exec_module(hook)\n')
                     break
         Path(directory, 'sitecustomize.py').write_text(bootstrap)
         environment['PYTHONPATH'] = directory + os.pathsep + environment.get('PYTHONPATH', '')
