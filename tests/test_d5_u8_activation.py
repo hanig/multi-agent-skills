@@ -225,6 +225,86 @@ class TestU8Wiring(unittest.TestCase):
       self.assertTrue(r.stdout.endswith('{"ok": true}\n'))
      self.assertEqual(results[0].stdout, results[1].stdout)
 
+ def test_pin_preloaded_consumers_audit_reload_and_restoration(self):
+  import importlib
+  import types
+  from tests import d5_test_support as support
+  import swarm
+  import swarm_evidence
+  original, original_class, popen = activation.d5_active, type(activation), subprocess.Popen
+  path, meta = list(sys.path), list(sys.meta_path)
+  consumer = types.ModuleType('d5_uncovered_consumer')
+  with mock.patch.dict(sys.modules, {consumer.__name__: consumer}):
+   consumer.bound = original
+   with self.assertRaisesRegex(AssertionError, 'd5_uncovered_consumer.bound'):
+    with support.inactive():
+     self.fail('uncovered reference admitted')
+   del consumer.bound
+   for fail in (False, True):
+    try:
+     with support.inactive():
+      self.assertIs(swarm.D5, activation)
+      self.assertIs(swarm.D5.d5_active(), False)
+      importlib.reload(activation)
+      importlib.reload(swarm_evidence)
+      self.assertIs(swarm.D5.d5_active(), False)
+      consumer.bound = activation.d5_active
+      del consumer.bound
+      with support.inactive():
+       self.assertIs(swarm.D5.d5_active(), False)
+      consumer.bound = activation.d5_active
+      if fail:
+       raise RuntimeError('fixture interruption')
+    except RuntimeError:
+     self.assertTrue(fail)
+    self.assertIs(consumer.bound, original)
+    del consumer.bound
+    self.assertIs(activation.d5_active, original)
+    self.assertIs(type(activation), original_class)
+    self.assertIs(subprocess.Popen, popen)
+    self.assertEqual(sys.path, path)
+    self.assertEqual(sys.meta_path, meta)
+   with mock.patch.object(support.inactive, '_install', return_value=None):
+    with self.assertRaisesRegex(AssertionError, 'did not take effect'):
+     with support.inactive():
+      self.fail('no-op pin admitted')
+
+ def test_preloaded_child_and_original_hook_survive_pin(self):
+  import os
+  import venv
+  from tests.d5_test_support import inactive
+  with tempfile.TemporaryDirectory() as tmp:
+   root = Path(tmp)
+   venv.EnvBuilder(with_pip=False).create(root / 'venv')
+   executable = str(root / 'venv/bin/python')
+   env = dict(os.environ, PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1')
+   env.pop('PYTHONHOME', None)
+   env['PYTHONPATH'] = os.pathsep.join(str(p) for p in (
+    ROOT, ROOT / 'skills/hanig-swarm/scripts', ROOT / 'skills/hanig-orchestrate/scripts'))
+   site = subprocess.check_output([executable, '-c',
+    'import sysconfig; print(sysconfig.get_paths()["purelib"])'], env=env, text=True, timeout=30).strip()
+   preload = Path(site, 'd5-preload.pth')
+   preload.write_text('import swarm\n')
+   command = [executable, '-c', 'import json,swarm,d5_activation; print(json.dumps([swarm.D5.d5_active(),d5_activation.d5_active()]))']
+   plain = subprocess.run(command, env=env, capture_output=True, text=True, check=True, timeout=30)
+   with inactive(environ=env) as child:
+    wrapped = subprocess.run(command, env=child, capture_output=True, text=True, check=True, timeout=30)
+   self.assertEqual(json.loads(plain.stdout), [True, True])
+   self.assertEqual(json.loads(wrapped.stdout), [False, False])
+   preload.unlink()
+   hooks = root / 'hooks'
+   hooks.mkdir()
+   (hooks / 'importlib.py').write_text('project_marker = 1\n')
+   (hooks / 'sitecustomize.py').write_text('import os\nos.environ["D5_HOOK_MARKER"] = "ok"\n')
+   env['PYTHONPATH'] = str(hooks)
+   env.pop('D5_HOOK_MARKER', None)
+   command = [executable, '-c', 'import os; assert os.environ["D5_HOOK_MARKER"] == "ok"; print("ok")']
+   plain = subprocess.run(command, env=env, capture_output=True, text=True, check=True, timeout=30)
+   with inactive(environ=env) as child:
+    wrapped = subprocess.run(command, env=child, capture_output=True, text=True, check=True, timeout=30)
+   self.assertEqual(plain.stdout, wrapped.stdout)
+   self.assertEqual(wrapped.stdout.strip(), 'ok')
+
  def test_M5_replacement_needs_fresh_confirmation(self):
   fixture = lease_fixture.TestD5Lease()
   self.addCleanup(fixture.doCleanups)
