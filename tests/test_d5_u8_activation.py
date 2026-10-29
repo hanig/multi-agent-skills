@@ -169,6 +169,35 @@ class TestU8Wiring(unittest.TestCase):
   self.assertIs(activation.d5_active(), True)
   self.assertIs(registry.d5_active(), True)
 
+ def test_child_exec_bootstrap_and_identity_restoration(self):
+  import os
+  from tests.d5_test_support import inactive
+  originals = {name: getattr(os, name) for name in ('execv', 'execve')}
+  with tempfile.TemporaryDirectory() as tmp:
+   root = Path(tmp)
+   (root / 'd5_activation.py').write_bytes(Path(activation.__file__).read_bytes())
+   target = root / 'exec_target.py'
+   target.write_text('import d5_activation, json, os, sys\n'
+    'print(json.dumps([d5_activation.d5_active(), sys.argv, os.environ.get("FIXTURE_EXEC")]))\n')
+   for name in originals:
+    code = ('import os,sys;os.' + name +
+     '(sys.executable,["fixture-argv-zero",sys.argv[1],"payload"]' +
+     (',dict(os.environ)' if name == 'execve' else '') + ')')
+    with self.subTest(entry=name), mock.patch.dict(os.environ, {'FIXTURE_EXEC': 'retained'}):
+     command = [sys.executable, '-c', code, str(target)]
+     plain = subprocess.run(command, capture_output=True, text=True, timeout=30)
+     self.assertEqual(plain.returncode, 0, plain.stderr)
+     self.assertEqual(json.loads(plain.stdout), [True, [str(target), 'payload'], 'retained'])
+     with inactive():
+      pinned = subprocess.run(command, capture_output=True, text=True, timeout=30)
+     self.assertEqual(pinned.returncode, 0, pinned.stderr)
+     self.assertEqual(json.loads(pinned.stdout), [False, [str(target), 'payload'], 'retained'])
+     for entry, original in originals.items():
+      self.assertIs(getattr(os, entry), original)
+   self.assertEqual(sorted(p.name for p in root.iterdir() if p.is_file()),
+                    ['d5_activation.py', 'exec_target.py'])
+  self.assertIs(activation.d5_active(), True)
+
  def test_child_hook_keeps_its_file_and_refusal(self):
   import os
   from tests.d5_test_support import inactive
