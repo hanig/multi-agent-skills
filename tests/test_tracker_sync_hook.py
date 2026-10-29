@@ -1632,5 +1632,10 @@ class TrackerSyncHookProvenance(unittest.TestCase):
                 proc.communicate(timeout=15)
 
 
+# These legacy cases retain their pre-cutover premise, including CLI children.
+from tests.fixtures.d5.inactive import legacy_module
+setUpModule, tearDownModule = legacy_module(globals())
+
+
 if __name__ == "__main__":
     unittest.main()

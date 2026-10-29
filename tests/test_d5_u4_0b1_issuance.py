@@ -302,6 +302,7 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
             self.test_M6_inactive_issuance_matches_unit_base_capture()
             history.assert_not_called()
 
+    @mock.patch.object(registry, "d5_active", new=lambda: False)
     def test_M6_inactive_issuance_matches_unit_base_capture(self):
         baseline = json.loads((fixtures.ROOT / "tests/fixtures/d5/"
                                "u4_0b1_inactive_base.json").read_text())
