@@ -42,6 +42,7 @@ class TestD5VersionGate(unittest.TestCase):
                          self.assertRaisesRegex(R.AuthorityError, "unsupported Git version"):
                         call("/unused", "p", "/unused-state")
 
+    @mock.patch.object(R, "d5_active", new=lambda: False)
     def test_activation_and_plan_validation_precede_envelope(self):
         with mock.patch.object(R, "_git", side_effect=AssertionError("Git")):
             with self.assertRaisesRegex(R.AuthorityError, "D5 is not active"):
@@ -230,6 +231,7 @@ class TestD5Registry(unittest.TestCase):
         self.assertIsNone(R.lookup(self.repo, "p", self.state))
         self.assertEqual(self.tree(), before)
 
+    @mock.patch.object(R, "d5_active", new=lambda: False)
     def test_register_refuses_before_activation(self):
         before = self.tree()
         self.assertFalse(R.d5_active())
