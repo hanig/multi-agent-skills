@@ -47,6 +47,10 @@ def run(tmp, *argv):
         capture_output=True, text=True, cwd=tmp)
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestDrainRestartReconciliation(unittest.TestCase):
     """The first failure scenario: mutation landed and acknowledgment died."""
 
@@ -162,6 +166,7 @@ class TestDrainRestartReconciliation(unittest.TestCase):
             self.assertEqual(S.acknowledgment_status(directory)[0], {})
 
 
+@inactive_class
 class TestIntentEnvelope(unittest.TestCase):
     def test_every_intent_carries_the_versioned_drain_contract(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -275,6 +280,7 @@ class TestIntentEnvelope(unittest.TestCase):
         return S.read_outbox(directory)[0]
 
 
+@inactive_class
 class TestIdempotency(unittest.TestCase):
     def test_the_same_transition_never_yields_two_intents(self):
         """The point of the key. A drain that retries after a partial failure
@@ -306,6 +312,7 @@ class TestIdempotency(unittest.TestCase):
                              "an intent was appended twice")
 
 
+@inactive_class
 class TestNothingClosesOnASelfReport(unittest.TestCase):
     def test_a_close_intent_carries_the_verdict(self):
         """A unit reporting success is exactly what this family refuses to
@@ -378,6 +385,7 @@ class TestNothingClosesOnASelfReport(unittest.TestCase):
                          f"{unreachable}")
 
 
+@inactive_class
 class TestTheTrackerIsNeverAuthoritative(unittest.TestCase):
     def test_swarm_has_no_network_code(self):
         """Structural. The coordinator runs on a shared login node; it holds no
@@ -438,6 +446,7 @@ if ok:
 """
 
 
+@inactive_class
 class TestOnlyOneControllerRuns(unittest.TestCase):
     """The property five hand-rolled lease versions were trying to provide,
     now stated against the OS lock. These are unchanged in intent from the
@@ -504,6 +513,7 @@ class TestOnlyOneControllerRuns(unittest.TestCase):
                 S.release_lease(a)
 
 
+@inactive_class
 class TestThePlanDigestCoversDispatch(unittest.TestCase):
     """Four reviewers broke the inclusion list by naming fields it forgot."""
 
@@ -547,6 +557,7 @@ class TestThePlanDigestCoversDispatch(unittest.TestCase):
 
 
 
+@inactive_class
 class TestTheWedges(unittest.TestCase):
     """Two reviewers found states from which a unit could never be dispatched
     or judged again. Each is an honest-work failure: the job is fine, the
@@ -609,6 +620,7 @@ class TestTheWedges(unittest.TestCase):
                          "the coordinator must not block on the engine")
 
 
+@inactive_class
 class TestTheRefusalsNameAnAction(unittest.TestCase):
     def test_the_plan_change_refusal_offers_a_non_destructive_remedy(self):
         """The old remedy was 'start a new state directory', which
@@ -621,6 +633,7 @@ class TestTheRefusalsNameAnAction(unittest.TestCase):
         self.assertNotIn("start a new state directory", seg)
 
 
+@inactive_class
 class TestThePipelinePredicate(unittest.TestCase):
     """The pipeline path had NEVER run for real. Its first live run sat
     INCOMPLETE with its declared output on disk, because check_unit demanded a
@@ -762,6 +775,7 @@ exit 0
 """
 
 
+@inactive_class
 class TestTheCodePredicate(unittest.TestCase):
     """The `code` path had never run either. Running it for real found four
     separate breaks in one dispatch: the agent ran in the coordinator's
@@ -959,6 +973,7 @@ def _reseal(attempt, state_obj, uid):
         _P(attempt).name: hashlib.sha256(raw).hexdigest()}
 
 
+@inactive_class
 class TestGatedPromotion(unittest.TestCase):
     """Plan step 3, criteria d-g. Outputs live in the exclusive write root;
     reaching a shared canonical tree is a separate, approved, recorded step,
@@ -1240,6 +1255,7 @@ class TestGatedPromotion(unittest.TestCase):
                           "the record must say the evidence was weak, or it "
                           "reads as stronger than it is")
 
+@inactive_class
 class TestStatusIsTheNotificationChannel(unittest.TestCase):
     def _st(self, state, halted=None):
         plan = {"name": "p", "units": [
@@ -1311,6 +1327,7 @@ class TestStatusIsTheNotificationChannel(unittest.TestCase):
                                  f"durable state only")
 
 
+@inactive_class
 class TestTheThreeWeakPointsIFlagged(unittest.TestCase):
     """Written by attacking my own least-confident code before the review came
     back. Two of the three were real."""
@@ -1397,6 +1414,7 @@ class TestTheThreeWeakPointsIFlagged(unittest.TestCase):
 
 
 
+@inactive_class
 class TestThePromotionDestination(unittest.TestCase):
     """promote_to is a path taken from the plan and written to, on the one
     surface where this tool writes where other people read. Three ways it went
@@ -1448,6 +1466,7 @@ class TestThePromotionDestination(unittest.TestCase):
         self.assertIn("relative", str(cm.exception))
 
 
+@inactive_class
 class TestDirectoryOutputs(unittest.TestCase):
     def test_a_nested_edit_is_caught_where_size_and_mtime_are_blind(self):
         """A directory's own size and mtime say NOTHING about a nested file:
@@ -1501,6 +1520,7 @@ class TestDirectoryOutputs(unittest.TestCase):
                 "the published tree was overwritten by the tampered one")
 
 
+@inactive_class
 class TestTheTwoWaysAUnitCanBeUnjudgeable(unittest.TestCase):
     """A clean exit with no output, and no accounting row at all, are
     different failures needing opposite actions from an operator. Calling both
@@ -1555,6 +1575,7 @@ class TestTheTwoWaysAUnitCanBeUnjudgeable(unittest.TestCase):
         self.assertIn("log", seg, "it must name where the real answer is")
 
 
+@inactive_class
 class TestNoStateChangeEscapesTheOutbox(unittest.TestCase):
     """Found by running a real failing DAG on lambda and then reading the
     outbox. A unit that exited 0 and wrote nothing reached FAILED through the
@@ -1649,6 +1670,7 @@ class TestNoStateChangeEscapesTheOutbox(unittest.TestCase):
                              "an unchanged unit emitted twice")
 
 
+@inactive_class
 class TestRound2ReviewFindings(unittest.TestCase):
     """A four-reviewer implementation review returned REVIEW_FAIL with a
     CRITICAL. These pin each confirmed finding against the failure described."""
@@ -1819,6 +1841,7 @@ class TestRound2ReviewFindings(unittest.TestCase):
                                  want, f"for {cmd!r}")
 
 
+@inactive_class
 class TestTheLockIsArbitratedByTheOS(unittest.TestCase):
     """The sixth lease. Five hand-rolled versions preceded it and two
     independent reviews found a CRITICAL in each of the last two. These test
@@ -1955,6 +1978,7 @@ class TestTheLockIsArbitratedByTheOS(unittest.TestCase):
                              f"descriptive lease file")
 
 
+@inactive_class
 class TestPlanIsRefusedForTheWrongCluster(unittest.TestCase):
     """Plan criterion 5(f). A project runs on ONE server and its plan carries
     that server's sbatch flags, so a plan written for lambda and run on
@@ -2003,6 +2027,7 @@ class TestPlanIsRefusedForTheWrongCluster(unittest.TestCase):
         self.assertEqual(S.partition_problems([{"id": "a"}], known={"cpu"}), [])
 
 
+@inactive_class
 class TestLockErrorsAreNotAllContention(unittest.TestCase):
     """Found by following the instruction I gave the reviewers rather than
     waiting for their answer. A bare `except OSError` reported every failure
@@ -2071,6 +2096,7 @@ class TestLockErrorsAreNotAllContention(unittest.TestCase):
                 S.release_lease(d)
 
 
+@inactive_class
 class TestRound3ReviewFindings(unittest.TestCase):
     """Round 3 returned REVIEW_FAIL. Its largest finding (every flock error
     read as contention) was already fixed before the verdict landed, which is
@@ -2207,6 +2233,7 @@ class TestRound3ReviewFindings(unittest.TestCase):
                       "papered over")
 
 
+@inactive_class
 class TestUnknownIsNotTheSameAsLookItUp(unittest.TestCase):
     """Found by running the suite on andromeda, where it failed while passing
     on a laptop. `known=None` meant BOTH "could not be determined" and "go
@@ -2236,6 +2263,7 @@ class TestUnknownIsNotTheSameAsLookItUp(unittest.TestCase):
                          "None must not mean 'look it up' as well as 'unknown'")
 
 
+@inactive_class
 class TestAUnitCanFindWhatItConsumes(unittest.TestCase):
     """Found by running a DAG whose downstream unit actually READS its
     upstream's output, which none of the earlier tests did. Nothing told a
@@ -2279,6 +2307,7 @@ class TestAUnitCanFindWhatItConsumes(unittest.TestCase):
         self.assertIn("SWARM_UNIT_DIR", src)
 
 
+@inactive_class
 class TestADryRunCannotWedgeARealProject(unittest.TestCase):
     """A reviewer flagged this weeks ago and I recorded it without fixing it.
     It then bit the first real user on their first run: a dry run against the
@@ -2339,6 +2368,7 @@ class TestADryRunCannotWedgeARealProject(unittest.TestCase):
             self.assertIn("submitted dry-", r.stdout, r.stdout)
 
 
+@inactive_class
 class TestRetryExposureIsDeclared(unittest.TestCase):
     """Plan step 8. A unit is the retry boundary and nothing said so, which
     produced a five-unit plan whose hash stage risked ~4 TiB of re-reading.
@@ -2430,6 +2460,7 @@ class TestRetryExposureIsDeclared(unittest.TestCase):
                              f"exposure is being inferred from {proxy!r}")
 
 
+@inactive_class
 class TestLiveConcurrencyIsBounded(unittest.TestCase):
     """Splitting a unit for retry safety turns one reader into sixteen. Sol
     caught that my own advice, taken alone, traded one problem for a worse one
@@ -2500,6 +2531,7 @@ class TestLiveConcurrencyIsBounded(unittest.TestCase):
             self.assertEqual(r.stdout.count("submitted dry-"), 5, r.stdout)
 
 
+@inactive_class
 class TestTheNewRefusalsDoNotCryWolf(unittest.TestCase):
     """This range added four ways to reject a plan, the largest single
     increase in refusals the validator has had. A gate that blocks honest work
@@ -2554,6 +2586,7 @@ class TestTheNewRefusalsDoNotCryWolf(unittest.TestCase):
                 self.fail(f"refused a legitimate plan ({name}): {e}")
 
 
+@inactive_class
 class TestConcurrencyDoesNotDeadlock(unittest.TestCase):
     def _run(self, tmp, plan, *argv):
         (tmp / "plan.json").write_text(json.dumps(plan))
@@ -2586,6 +2619,7 @@ class TestConcurrencyDoesNotDeadlock(unittest.TestCase):
                           f"the slot was never released:\n{r.stdout}")
 
 
+@inactive_class
 class TestPreemptionUnderTheNewDefault(unittest.TestCase):
     """max_attempts now defaults to 1, so a SINGLE preemption ends a unit.
     That is the intended policy, but the old message said "preempted 1 times,
@@ -2605,6 +2639,7 @@ class TestPreemptionUnderTheNewDefault(unittest.TestCase):
         self.assertIn("preempted {policy} times, giving up", seg)
 
 
+@inactive_class
 class TestRetryBudgetBehaviour(unittest.TestCase):
     """BEHAVIOURAL, not constant-checking. A reviewer showed my earlier test
     asserted only that DEFAULT_MAX_ATTEMPTS == 1, so reverting the line in
@@ -2745,6 +2780,7 @@ class TestRetryBudgetBehaviour(unittest.TestCase):
             self.assertIn("REFUSING to dry-run", r.stdout, r.stdout)
 
 
+@inactive_class
 class TestClosureAuthorityIsFixedByKind(unittest.TestCase):
     """Plan step 9, stage 1. A merged PR is the right evidence for CODE and
     the wrong evidence for a 1.42 TiB hash. If GitHub closes an issue the
@@ -2808,6 +2844,7 @@ class TestClosureAuthorityIsFixedByKind(unittest.TestCase):
         self.assertIn("Say so loudly and reopen it.", step)
 
 
+@inactive_class
 class TestADefaultChangeIsMadeVisible(unittest.TestCase):
     """max_attempts went from 3 to 1, so a plan that still VALIDATES may
     behave differently than it used to. Validating is not the same as
@@ -2854,6 +2891,7 @@ class TestADefaultChangeIsMadeVisible(unittest.TestCase):
             self.assertNotIn(proxy, code)
 
 
+@inactive_class
 class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
     """A reviewer showed my stage-1 fix was COSMETIC: I rewrote the tracker
     intent but left the unit DONE in durable state, so dependents dispatched
@@ -2978,6 +3016,7 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
             self.assertEqual(close[0]["evidence"]["receipt"], receipt)
 
 
+@inactive_class
 class TestApprovalDoesNotCarryOntoChangedWork(unittest.TestCase):
     """An approval covers the work the human SAW. Carrying it forward
     unconditionally let a changed plan be filed on a yes given for something
@@ -3023,6 +3062,7 @@ class TestApprovalDoesNotCarryOntoChangedWork(unittest.TestCase):
                          "required")
 
 
+@inactive_class
 class TestBothPartitionSpellings(unittest.TestCase):
     def test_a_separate_argument_partition_is_recognised(self):
         """Reading only `--partition=cpu` reported a unit that plainly
@@ -3044,6 +3084,7 @@ class TestBothPartitionSpellings(unittest.TestCase):
                                      known={"cpu"}), [("a", "nope")], sbatch)
 
 
+@inactive_class
 class TestAStalledDAGIsDiagnosable(unittest.TestCase):
     """I claimed to the reviewers that a READY_FOR_PR unit is diagnosable from
     `status` alone. It was not: the dependent showed a bare "-" and the code
@@ -3111,6 +3152,7 @@ class TestAStalledDAGIsDiagnosable(unittest.TestCase):
             self.assertNotIn("NEEDS YOU", r.stdout)
 
 
+@inactive_class
 class TestAPersistedDoneIsCorrected(unittest.TestCase):
     """Three reviewers found this independently, and it is the THIRD time in a
     row I fixed a forward path and left the stored state alone. Converting
@@ -3210,6 +3252,7 @@ class TestAPersistedDoneIsCorrected(unittest.TestCase):
             self.assertNotIn("closed by a merged pull request", r.stdout)
 
 
+@inactive_class
 class TestEveryPartitionSpelling(unittest.TestCase):
     def test_all_five_forms_parse(self):
         """`-pcpu` was missed, which made the advisory line claim a unit
@@ -3228,6 +3271,7 @@ class TestEveryPartitionSpelling(unittest.TestCase):
         self.assertIsNone(S.declared_partition({"sbatch": ["--time", "5"]}))
 
 
+@inactive_class
 class TestAPlanThatCannotRunIsRefused(unittest.TestCase):
     """The best finding of the whole project, and it came from Hani watching a
     real run rather than from any reviewer.
@@ -3308,6 +3352,7 @@ class TestAPlanThatCannotRunIsRefused(unittest.TestCase):
 
 
 
+@inactive_class
 class TestListFieldsMustBeLists(unittest.TestCase):
     """A string where a list belongs is iterated character by character.
 
@@ -3349,6 +3394,7 @@ class TestListFieldsMustBeLists(unittest.TestCase):
 
 
 
+@inactive_class
 class TestUnresolvedInputsRoundTwo(unittest.TestCase):
     """Two holes a reviewer found in the first version of this check."""
 

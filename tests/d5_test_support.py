@@ -6,16 +6,19 @@ while the opted-in context is live. Production wiring tests do not opt in.
 """
 from contextlib import ExitStack, contextmanager
 import os
+from functools import wraps
 from pathlib import Path
 import tempfile
 from unittest import mock
 
 
 @contextmanager
-def inactive():
+def inactive(owner=None):
     import d5_activation
     with ExitStack() as stack:
         stack.enter_context(mock.patch.object(d5_activation, 'd5_active', return_value=False))
+        if owner is not None and owner is not d5_activation:
+            stack.enter_context(mock.patch.object(owner, 'd5_active', return_value=False))
         directory = stack.enter_context(tempfile.TemporaryDirectory(prefix='d5-inactive-test-'))
         # Test-owned sitecustomize carries the same premise into legacy CLI
         # fixtures. Explicit active mocks in D5 children still take precedence.
@@ -36,3 +39,15 @@ def for_case(case):
     context = inactive()
     context.__enter__()
     case.addCleanup(context.__exit__, None, None, None)
+
+
+def inactive_class(cls):
+    """Pin only this legacy class, including setUp, tearDown and children."""
+    original = cls.setUp
+
+    @wraps(original)
+    def setup(self):
+        for_case(self)
+        original(self)
+    cls.setUp = setup
+    return cls
