@@ -258,7 +258,6 @@ class TestExternalPathPolicy(Base):
             ["git", "-C", str(repo), "status", "--porcelain", "-z"])
         env = paseo_stub_path(
             self.tmp, dict(ENV, XDG_STATE_HOME=str(self.tmp / "state-home")))
-        env["PYTHONPATH"] = os.environ["PYTHONPATH"]
         result = subprocess.run(
             [sys.executable, str(SWARM), "run", str(plan_path), "--dry-run"],
             cwd=repo, env=env, capture_output=True, text=True)
