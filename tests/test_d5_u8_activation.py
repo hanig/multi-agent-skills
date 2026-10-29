@@ -361,6 +361,40 @@ class TestU8Wiring(unittest.TestCase):
    self.assertIn('uncovered D5 reference: sitecustomize.bound', result.stderr)
    self.assertFalse(effect.exists())
 
+ def test_bootstrap_marker_is_not_inactive_evidence(self):
+  from tests.d5_test_support import inactive
+  with tempfile.TemporaryDirectory() as tmp:
+   root = Path(tmp)
+   (root / 'd5_activation.py').symlink_to(Path(activation.__file__))
+   script = root / '.d5-test-peer.py'
+   code = 'import d5_activation; print(d5_activation.d5_active())'
+   script.write_text(code + '\n')
+   for command in ([sys.executable, str(script)],
+       [sys.executable, '-c', '# d5-test-bootstrap\n' + code]):
+    with self.subTest(command=command):
+     with inactive():
+      result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=30)
+     self.assertEqual(result.returncode, 0, result.stderr)
+     self.assertEqual(result.stdout.strip(), 'False')
+     plain = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=30)
+     self.assertEqual(plain.returncode, 0, plain.stderr)
+     self.assertEqual(plain.stdout.strip(), 'True')
+
+ def test_child_entry_hook_retains_script_suffix(self):
+  from tests.d5_test_support import inactive
+  with tempfile.TemporaryDirectory() as tmp:
+   root = Path(tmp)
+   (root / 'sitecustomize.py').write_text('import os,sys\n'
+    'if sys.argv[0].endswith("probe.py"): os.environ["FIXTURE_ENTRY"]="seen"\n')
+   script = root / 'probe.py'
+   script.write_text('import os; assert os.environ.get("FIXTURE_ENTRY")=="seen"\n')
+   command, env = [sys.executable, str(script)], {'PYTHONPATH': str(root)}
+   plain = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+   with inactive():
+    wrapped = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+   self.assertEqual(plain.returncode, 0, plain.stderr)
+   self.assertEqual(wrapped.returncode, 0, wrapped.stderr)
+
  def test_M5_replacement_needs_fresh_confirmation(self):
   fixture = lease_fixture.TestD5Lease()
   self.addCleanup(fixture.doCleanups)
