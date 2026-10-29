@@ -136,7 +136,7 @@ class TestD5Lease(unittest.TestCase):
         with mock.patch.object(registry, "d5_active", return_value=True):
             first = self.grant()
             raw = (directory / store.RECORD_NAME).read_bytes()
-            second = self.grant(owner_response="Nouvelle confirmation\n", expires_at=300)
+            second = self.grant(owner_response="Nouvelle confirmation\n", confirmed_at=102, expires_at=300)
         self.assertNotEqual(first["grant_id"], second["grant_id"])
         self.assertEqual((directory / "superseded" / (first["grant_id"] + ".json")).read_bytes(), raw)
         self.assertEqual(authority.decode((directory / store.RECORD_NAME).read_bytes()), second)
@@ -220,7 +220,7 @@ class TestD5Lease(unittest.TestCase):
             self.assertFalse((path.parent / "superseded").exists())
             # The permanent lock must be released: sequential replacement
             # remains allowed by the store's consent rules.
-            replacement = self.grant()
+            replacement = self.grant(confirmed_at=102)
             self.assertNotEqual(replacement["grant_id"], record["grant_id"])
 
     def test_revoke_without_record_returns_store_domain_error(self):
