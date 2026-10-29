@@ -225,9 +225,12 @@ class TestCustodyStore(unittest.TestCase):
         raw = self.path.read_bytes()
         args = {key: first[key] for key in ("issued_at", "confirmed_at", "expires_at", "scope")}
         args.update(first["confirmation"])
-        for fresh in (False, True):
-            with self.subTest(fresh=fresh):
-                if fresh:
+        for extend in (False, True):
+            with self.subTest(extended_bounds=extend):
+                # Each public replacement now needs its own confirmation,
+                # including when the bounds and response words are unchanged.
+                args["confirmed_at"] = first["confirmed_at"] + 1
+                if extend:
                     args["owner_response"] += " fresh"
                     args["expires_at"] += 1
                     args["issued_at"] += 1
