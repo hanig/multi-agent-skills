@@ -15,10 +15,6 @@ sys.path.insert(0, str(SCRIPTS))
 import reconcile as R
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class ReconcileTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -338,6 +334,11 @@ print(json.dumps(pages[int(cursor)]))
         self.assertEqual(self.run_cli("--since", "2026-01-01")[0], 2)
         (self.state / R.S.STATE_FILE).write_text('{"units": {}}')
         self.assertEqual(self.run_cli()[0], 2)
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(ReconcileTests)
 
 
 if __name__ == "__main__":
