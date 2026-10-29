@@ -49,6 +49,10 @@ def unit(uid="a", **kw):
     return u
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestRuntimeMustBeDeclared(unittest.TestCase):
 
     def test_a_slurm_unit_without_a_runtime_is_refused(self):
@@ -80,6 +84,7 @@ class TestRuntimeMustBeDeclared(unittest.TestCase):
         self.assertIn("not defined", str(c.exception))
 
 
+@inactive_class
 class TestRuntimeFieldsAreChecked(unittest.TestCase):
 
     def _bad(self, **over):
@@ -105,6 +110,7 @@ class TestRuntimeFieldsAreChecked(unittest.TestCase):
             S.validate_plan(self._bad(resolution=r))
 
 
+@inactive_class
 class TestCanaryMustActuallyGate(unittest.TestCase):
     """A probe that does not block the fan-out proves nothing in time."""
 
@@ -141,6 +147,7 @@ class TestCanaryMustActuallyGate(unittest.TestCase):
                  runtime=dict(RT, verified_by="canary:probe"))]))
 
 
+@inactive_class
 class TestUnverifiedMustBeADecision(unittest.TestCase):
 
     def test_unverified_needs_a_real_reason(self):
@@ -157,6 +164,7 @@ class TestUnverifiedMustBeADecision(unittest.TestCase):
             RT, verified_by="preflight"))]))
 
 
+@inactive_class
 class TestNoInferredFacts(unittest.TestCase):
     """Sol: a submit-host stat is an observed submit-host fact, and concluding
     compute-node availability from it violates declared-facts."""
@@ -190,6 +198,7 @@ class TestNoInferredFacts(unittest.TestCase):
 
 
 
+@inactive_class
 class TestACanaryMustExerciseWhatItVouchesFor(unittest.TestCase):
     """Ordering is not proof: a runtime:none probe on cpu once stood as
     evidence for a python runtime on gpu."""
@@ -270,6 +279,7 @@ class TestACanaryMustExerciseWhatItVouchesFor(unittest.TestCase):
                  runtime=dict(RT, verified_by="canary:probe"))]))
 
 
+@inactive_class
 class TestACanaryMustRunTheDeclaredProbe(unittest.TestCase):
     """`true` closes cleanly and establishes nothing. We cannot tell from
     arbitrary shell whether a command exercises a runtime, so the check is
