@@ -305,6 +305,14 @@ class TestU8Wiring(unittest.TestCase):
     wrapped = subprocess.run(command, env=child, capture_output=True, text=True, check=True, timeout=30)
    self.assertEqual(plain.stdout, wrapped.stdout)
    self.assertEqual(wrapped.stdout.strip(), 'ok')
+   script = root / 'probe.py'
+   script.write_text(command[2] + '\n')
+   command = [executable, str(script)]
+   plain = subprocess.run(command, env=env, capture_output=True, text=True, check=True, timeout=30)
+   with inactive(environ=env) as child:
+    wrapped = subprocess.run(command, env=child, capture_output=True, text=True, check=True, timeout=30)
+   self.assertEqual(plain.stdout, wrapped.stdout)
+   self.assertEqual(wrapped.stdout.strip(), 'ok')
 
  def test_child_script_bootstrap_preserves_context_and_grandchildren(self):
   from tests.d5_test_support import inactive
@@ -333,7 +341,7 @@ class TestU8Wiring(unittest.TestCase):
    self.assertEqual(run(), plain)
    self.assertIs(plain[0], True)
    self.assertIs(pinned[0], False)
-   self.assertEqual(pinned[1][1:], plain[1][1:])
+   self.assertEqual(pinned[1], plain[1])
    self.assertEqual(pinned[2:], plain[2:])
    self.assertEqual(list(tools.glob('.d5-test-*')), [])
 
