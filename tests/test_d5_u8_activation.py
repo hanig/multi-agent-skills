@@ -1,6 +1,7 @@
 """U8 cutover policy and real default wiring; external services are never used."""
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import io
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -10,7 +11,7 @@ from unittest import mock
 
 from tests.test_d5_u4_1_active_surface import SurfaceFixture, S_ENTRIES, M_ENTRIES
 from tests.test_d5_u4_0b1_issuance import no_effects
-from tests.test_d5_lease import TestD5Lease as LeaseFixture
+from tests import test_d5_lease as lease_fixture
 from tests.fixtures.d5.ready import ready
 import d5_activation as activation
 import d5_authority as authority
@@ -46,7 +47,11 @@ def preserve(text):
 
 class TestU8Policy(unittest.TestCase):
     def test_M3_preserves_grants_bounds_stops_and_judgment(self):
-        preserve(MANDATE.read_text())
+        text = MANDATE.read_text()
+        preserve(text)
+        lines = [line for line in section(text, 'Adjudication policy') if line.strip()]
+        self.assertEqual(hashlib.sha256('\n'.join(lines).encode()).hexdigest(),
+                         json.loads(BASELINE.read_text())['adjudication_sha256'])
 
     def test_M3_delete_old_bound_and_duplicate_heading_mutations(self):
         text = MANDATE.read_text()
@@ -97,7 +102,7 @@ class TestU8Wiring(unittest.TestCase):
                         self.assertIn('D5 active:', str(result) + out.getvalue() + err.getvalue())
 
     def test_M5_no_grant_from_conversational_receipt(self):
-        fixture = LeaseFixture()
+        fixture = lease_fixture.TestD5Lease()
         self.addCleanup(fixture.doCleanups)
         fixture.setUp()
         entry = ready(fixture, fixture.repo, 'p', fixture.state)
