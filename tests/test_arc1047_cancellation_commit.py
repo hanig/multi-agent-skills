@@ -7,10 +7,6 @@ import unittest
 from tests import test_arc683_merge_precondition as preconditions
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestCancellationCommit(unittest.TestCase):
     def setUp(self):
         self.precondition = preconditions.TestMergePrecondition()
@@ -234,6 +230,11 @@ if sys.argv[0].endswith('merge_unit.py'):
         self.assertIn('unresolved outcome', result.stderr)
         self.assertEqual(len(self.f.calls(['pr', 'merge'])), 1)
         self.assertEqual(self.f.receipts(), [])
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestCancellationCommit)
 
 
 if __name__ == '__main__':

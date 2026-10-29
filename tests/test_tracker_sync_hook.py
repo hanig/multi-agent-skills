@@ -155,10 +155,6 @@ def injected_context(stdout):
     return context
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TrackerSyncHookDelivery(unittest.TestCase):
     def test_settings_wire_the_hook_as_a_post_tool_use_hook(self):
         commands = wired_commands()
@@ -409,7 +405,6 @@ PROBE_HANGS_WITH_CHILD = """
 """
 
 
-@inactive_class
 class TrackerSyncHookOutboxReporting(unittest.TestCase):
     """What the hook says about the outbox it read, or failed to read.
 
@@ -641,7 +636,6 @@ class TrackerSyncHookOutboxReporting(unittest.TestCase):
             "the direct child leaves it alive holding the output pipe" % pid)
 
 
-@inactive_class
 class TrackerSyncHookInputContract(unittest.TestCase):
     """One hostile case per untrusted input, enumerated rather than found.
 
@@ -1431,7 +1425,6 @@ class TrackerSyncHookInputContract(unittest.TestCase):
         self.assertIn("total 0", context)
 
 
-@inactive_class
 class TrackerSyncHookProvenance(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="hook-provenance-")
@@ -1637,6 +1630,14 @@ class TrackerSyncHookProvenance(unittest.TestCase):
                 with open(os.path.join(self.tmp.name, "release-" + name), "w"):
                     pass
                 proc.communicate(timeout=15)
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TrackerSyncHookDelivery)
+inactive_class(TrackerSyncHookOutboxReporting)
+inactive_class(TrackerSyncHookInputContract)
+inactive_class(TrackerSyncHookProvenance)
 
 
 if __name__ == "__main__":
