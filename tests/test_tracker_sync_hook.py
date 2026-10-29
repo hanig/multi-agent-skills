@@ -1632,12 +1632,10 @@ class TrackerSyncHookProvenance(unittest.TestCase):
                 proc.communicate(timeout=15)
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TrackerSyncHookDelivery)
-inactive_class(TrackerSyncHookOutboxReporting)
-inactive_class(TrackerSyncHookInputContract)
-inactive_class(TrackerSyncHookProvenance)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TrackerSyncHookDelivery, TrackerSyncHookOutboxReporting, TrackerSyncHookInputContract,
+    TrackerSyncHookProvenance)
 
 
 if __name__ == "__main__":
