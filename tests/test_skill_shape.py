@@ -993,7 +993,7 @@ class TestAuthoredSkillShape(unittest.TestCase):
         }
         with self.subTest(reader="adjudication matrix"):
             self.assertIn(
-                "under the mandate's concurrence rule or its "
+                "under the mandate's judgment and conditional concurrence rule or its "
                 "supported-envelope exception",
                 declarations["adjudication.matrix"],
             )
@@ -1007,6 +1007,51 @@ class TestAuthoredSkillShape(unittest.TestCase):
             self.assertTrue(concurrence_lines[0].startswith(
                 "When the mandate requires concurrence, "),
                 concurrence_lines[0])
+
+    _PROTECTED_POLICY = (
+        "Hard constraint violations. Missing, fabricated or improperly bound evidence.\n"
+        "Unauthorized or destructive action. Failure of a declared acceptance criterion\n"
+        "or a required output. Compromised isolation, anchors, closure authority or\n"
+        "verifier authorization. An unsound shared test or guard that can contaminate\n"
+        "later decisions. Failure of a required check on the actual candidate merge.")
+
+    def test_orchestrate_judgment_keeps_nonoverridable_classes_binding(self):
+        mandate = (ROOT / "docs/orchestrator-mandate.md").read_bytes().decode("utf-8")
+        self.assertIn(self._PROTECTED_POLICY, mandate)
+        rules = {d["id"]: d["normative_text"] for d in
+                 DECLARATION_REGISTRY.load_registry(SKILLS / "hanig-orchestrate")}
+        self.assertIn("Never override a hard constraint, missing or fabricated evidence, "
+            "unauthorized or destructive action, failed required criterion or output, "
+            "compromised isolation or authority, an unsound shared guard, or a missing "
+            "candidate-merge check.", rules["adjudication.nonoverridable"])
+        for text in (mandate, rules["adjudication.concurrence"]):
+            self.assertIn('Judgment cannot waive the never-overridable classes; "Never overridable, whatever the relevance" remains binding.', text)
+            self.assertIn('Orchestrator judgment is available only to an orchestrator that did not author the affected design or implementation.', text)
+            self.assertIn("Task specifications the orchestrator writes for a unit are not authorship of that unit's implementation; authorship means the orchestrator wrote the code or design under review.", text)
+            self.assertIn('Otherwise the existing concurrence rule applies unchanged.', text)
+
+    def test_judgment_guard_ignores_separate_sections(self):
+        from unittest.mock import patch
+        check = self.test_orchestrate_judgment_keeps_nonoverridable_classes_binding
+        text = (ROOT / "docs/orchestrator-mandate.md").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(globals(), ROOT=Path(tmp)):
+            path = ROOT / "docs/orchestrator-mandate.md"
+            path.parent.mkdir()
+            for heading in ("# X", "## X", "### X", "#", "##", "###"):
+                for gap in ("\n", "\n\n"):
+                    with self.subTest(heading=heading, gap=gap):
+                        case = text.replace(self._PROTECTED_POLICY,
+                            self._PROTECTED_POLICY + gap + heading + "\n\nX.")
+                        self.assertNotEqual(case, text)
+                        path.write_text(case, encoding="utf-8")
+                        check()
+
+    def test_judgment_utf8(self):
+        done = subprocess.run([sys.executable, "-m", "unittest",
+            "tests.test_skill_shape.TestAuthoredSkillShape.test_judgment_guard_ignores_separate_sections"],
+            cwd=ROOT, env=dict(os.environ, LC_ALL="C", PYTHONUTF8="0"),
+            capture_output=True, encoding="utf-8", timeout=30)
+        self.assertFalse(done.returncode, done)
 
     def test_every_declaration_registry_has_a_closed_inventory(self):
         registry_skills = sorted(

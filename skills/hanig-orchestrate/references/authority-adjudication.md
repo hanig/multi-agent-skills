@@ -24,7 +24,7 @@ The decision record answers five questions:
 4. Which pre-existing policy authorizes leaving it?
 5. What observable result falsifies irrelevance?
 
-Those answers are mandatory fields of the reasoning record rather than persuasive substitutes for evidence. <!-- declaration: adjudication.record -->
+Judgment requires these answers and the phrase in adjudication.concurrence; neither substitutes for evidence. <!-- declaration: adjudication.record -->
 
 Hard constraints, required evidence and outputs, authority boundaries, shared guards, and candidate checks remain outside relevance exceptions. <!-- declaration: adjudication.nonoverridable -->
 

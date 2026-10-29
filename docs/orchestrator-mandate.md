@@ -57,6 +57,7 @@ mandate; do not generalise a tool's gate into a standing obligation to consult.
 - Run the review gate, and reproduce any finding before acting on it.
 - Open pull requests from an anchored attempt ref.
 - Merge pull requests that satisfy the adjudication policy below.
+- Use orchestrator judgment under the policy below; consult Sol only when unsure.
 - Defer a reproduced finding outside a task's declared supported envelope, without concurrence, under *Findings outside the supported envelope* below.
 - Record merge receipts, advance the DAG, drain tracker intents.
 - File, update and close issues in this project.
@@ -114,7 +115,13 @@ it is not a pass.
 
 ### The concurrence rule
 
-A confirmed finding may be dispositioned nonblocking only when **the
+Orchestrator judgment is available only to an orchestrator that did not author the affected design or implementation.
+
+Task specifications the orchestrator writes for a unit are not authorship of that unit's implementation; authorship means the orchestrator wrote the code or design under review.
+
+It may make confirmed, reproduced findings nonblocking on its own judgment when unlikely to change design or outcome, including owner-accepted tradeoffs, consulting Sol only when unsure. Otherwise the existing concurrence rule applies unchanged.
+
+A confirmed finding may then be dispositioned nonblocking only when **the
 orchestrator and GPT-Sol (the `sol` reviewer in `reviewers.json`) agree that
 it is not a deal breaker**. If they disagree, the change goes through another
 review cycle rather than merging. The one exception is *Findings outside the supported envelope*, below.
@@ -131,7 +138,15 @@ replaced GPT-Astra here on 2026-09-25, because Astra became the code author of
 every unit and an author does not accept its own rebuttal. If Sol authored the
 change, the disposition goes to the owner.
 
-Deadlock fails toward more work, not toward shipping.
+When Sol is consulted, deadlock fails toward more work, not toward shipping.
+
+Judgment cannot waive the never-overridable classes; "Never overridable, whatever the relevance" remains binding.
+Honesty, reproduce-before-acting, green CI and merge checks remain binding.
+Every judgment disposition records the five answers below and
+"decided by orchestrator judgment, Sol not consulted".
+
+Fast progress is an explicit goal: within these bounds, prefer disposition and
+merge over repair when findings would not change design or outcome.
 
 ### What a nonblocking disposition must answer, on the record
 
