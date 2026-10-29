@@ -20,7 +20,7 @@ E, C, S = t.ledger, t.completion, t.submission
 Denied = t.authority.AuthorityError
 
 FIXTURES = Path(__file__).parent / "fixtures/d5"
-DEFAULT_ACTIVE = lambda: False  # Explicit pre-cutover fixture, not the production default.
+DEFAULT_ACTIVE = t.registry.d5_active
 
 
 def tree_bytes(root):

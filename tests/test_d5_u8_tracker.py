@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -81,7 +82,58 @@ class TestTrackerMatrix(unittest.TestCase):
                         self.assertEqual(receipts, 0 if active else 1)
                         if active:
                             self.assertIn('D5 active:', case.stdout + case.stderr)
+                            case.fake.mutations.clear()
+                            self.assertEqual(case.drain(), 3)
+                            self.assertGreater(len(case.fake.mutations), 0)
+                            self.assertEqual(case.receipts(), [])
         print('U8 tracker transport matrix: ' + json.dumps(rows, sort_keys=True))
+
+    def test_swarm_cli_tracker_routes(self):
+        rows = []
+        S, SO = outbox.S, outbox.SO
+        for active in (False, True):
+            for route in ('outbox', 'seq-floor', 'receipt', 'backfill'):
+                with self.subTest(active=active, route=route), tempfile.TemporaryDirectory() as tmp:
+                    case = outbox.OutboxFixture(tmp)
+                    plan = Path(tmp) / 'plan.json'
+                    plan.write_text(json.dumps({'name': 'fixture', 'units': []}))
+                    common = ['--state-dir', str(case.state_dir)]
+                    argv = {
+                        'outbox': ['outbox', '--json'],
+                        'seq-floor': ['seq-floor', '--floor', '3', '--approver',
+                                      'Operator', '--reason', 'fixture recovery'],
+                        'receipt': ['outbox', '--record-receipt', case.key, '--ref', 'fixture'],
+                        'backfill': ['advance', str(plan), '--max-new-dispatches', '0'],
+                    }[route] + common
+                    before, output = case.tree(), io.StringIO()
+                    with ExitStack() as stack:
+                        stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=active))
+                        stack.enter_context(mock.patch.object(sys, 'argv', ['swarm.py'] + argv))
+                        stack.enter_context(mock.patch.object(S.CP, 'resolve_paths', return_value=(
+                            case.state_dir, Path(tmp) / 'runs', [])))
+                        stack.enter_context(mock.patch.object(S.SR, 'apply_agent_resolution'))
+                        stack.enter_context(mock.patch.object(subprocess, 'Popen',
+                            side_effect=AssertionError('no external process in tracker probe')))
+                        stack.enter_context(redirect_stdout(output))
+                        stack.enter_context(redirect_stderr(output))
+                        backfill = stack.enter_context(mock.patch.object(SO,
+                            'backfill_tracker_intents', wraps=SO.backfill_tracker_intents))
+                        try:
+                            S.main()
+                        except SystemExit as exc:
+                            result = exc.code
+                        except S.PlanError as exc:
+                            result = str(exc)
+                    if active:
+                        self.assertIn('D5 active:', str(result))
+                        self.assertEqual(case.tree(), before)
+                        backfill.assert_not_called()
+                    else:
+                        self.assertEqual(result, 0, output.getvalue())
+                        if route == 'backfill':
+                            backfill.assert_called_once()
+                    rows.append(dict(active=active, route=route, outcome=result))
+        print('U8 swarm CLI tracker matrix: ' + json.dumps(rows, sort_keys=True))
 
     def test_swarm_outbox_sequence_backfill_and_receipt_routes(self):
         rows = []
