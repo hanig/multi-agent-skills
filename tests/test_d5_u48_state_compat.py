@@ -135,7 +135,7 @@ class TestInactive(unittest.TestCase):
 class TestPreparedState(unittest.TestCase):
     def setUp(self):
         self.c = legacy.TestMergeUnit()
-        self.c.setUp()
+        self.c.prepare_active_fixture()
         self.addCleanup(self.c.doCleanups)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
