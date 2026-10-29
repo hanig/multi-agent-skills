@@ -177,6 +177,7 @@ class TestD5Routing(unittest.TestCase):
         self.fixture.anchor.assert_called_once_with()
         self.assertFalse((self.directory / "authority.drain.lock").exists())
 
+    @mock.patch.object(registry, "d5_active", new=lambda: False)
     def test_inactive_delegates_are_not_called(self):
         # R9-BYPASS-INACTIVE: unrelated environment/CLI input cannot activate.
         before = self.fixture.tree()
