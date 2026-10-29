@@ -686,7 +686,7 @@ class TestRemoteVerification(unittest.TestCase):
         # the interpreter preserves it. Both paths execute every harness case.
         control = self.f.directory / 'argv0-control.py'
         control.write_text(observe +
-            'suffix = " -u " + sys.argv[0]\n'
+            'suffix = " -u " + globals().get("_d5_process_entry", sys.argv[0])\n'
             'assert command.endswith(suffix), command\n'
             'print(command[:-len(suffix)])\n')
         result = subprocess.run([sys.executable, '-c',
@@ -697,7 +697,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertTrue(native_argv0, result.stdout)
         assertion = ('assert command.startswith(%r + " "), command\n' % expected
                      if native_argv0 == expected else
-                     'assert command == %r + " -u " + sys.argv[0], command\n' % native_argv0)
+                     'assert command == %r + " -u " + globals().get("_d5_process_entry", sys.argv[0]), command\n' % native_argv0)
         body = observe + assertion + ('assert sys.version_info[:2] == %r, sys.version\n'
                                       % (sys.version_info[:2],))
         for location in self.locations():
