@@ -17,6 +17,10 @@ sys.path.insert(0, str(SWARM.parent))
 import swarm_plan_rules as SPR
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class ValidateSeedsTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

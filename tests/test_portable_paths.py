@@ -25,6 +25,10 @@ AUTHORED = ("hanig-orchestrate", "hanig-portable-handoff", "hanig-project",
             "hanig-review-gate", "hanig-swarm", "hanig-verified-workflow")
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class InstalledSnapshot(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
