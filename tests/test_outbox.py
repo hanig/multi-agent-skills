@@ -3400,51 +3400,14 @@ class TestUnresolvedInputsRoundTwo(unittest.TestCase):
             self._u("user", needs=["mid"], inputs=["generated.txt"])]))
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestDrainRestartReconciliation)
-inactive_class(TestIntentEnvelope)
-inactive_class(TestIdempotency)
-inactive_class(TestNothingClosesOnASelfReport)
-inactive_class(TestTheTrackerIsNeverAuthoritative)
-inactive_class(TestOnlyOneControllerRuns)
-inactive_class(TestThePlanDigestCoversDispatch)
-inactive_class(TestTheWedges)
-inactive_class(TestTheRefusalsNameAnAction)
-inactive_class(TestThePipelinePredicate)
-inactive_class(TestTheCodePredicate)
-inactive_class(TestGatedPromotion)
-inactive_class(TestStatusIsTheNotificationChannel)
-inactive_class(TestTheThreeWeakPointsIFlagged)
-inactive_class(TestThePromotionDestination)
-inactive_class(TestDirectoryOutputs)
-inactive_class(TestTheTwoWaysAUnitCanBeUnjudgeable)
-inactive_class(TestNoStateChangeEscapesTheOutbox)
-inactive_class(TestRound2ReviewFindings)
-inactive_class(TestTheLockIsArbitratedByTheOS)
-inactive_class(TestPlanIsRefusedForTheWrongCluster)
-inactive_class(TestLockErrorsAreNotAllContention)
-inactive_class(TestRound3ReviewFindings)
-inactive_class(TestUnknownIsNotTheSameAsLookItUp)
-inactive_class(TestAUnitCanFindWhatItConsumes)
-inactive_class(TestADryRunCannotWedgeARealProject)
-inactive_class(TestRetryExposureIsDeclared)
-inactive_class(TestLiveConcurrencyIsBounded)
-inactive_class(TestTheNewRefusalsDoNotCryWolf)
-inactive_class(TestConcurrencyDoesNotDeadlock)
-inactive_class(TestPreemptionUnderTheNewDefault)
-inactive_class(TestRetryBudgetBehaviour)
-inactive_class(TestClosureAuthorityIsFixedByKind)
-inactive_class(TestADefaultChangeIsMadeVisible)
-inactive_class(TestACodeUnitIsNotDoneUntilMerged)
-inactive_class(TestApprovalDoesNotCarryOntoChangedWork)
-inactive_class(TestBothPartitionSpellings)
-inactive_class(TestAStalledDAGIsDiagnosable)
-inactive_class(TestAPersistedDoneIsCorrected)
-inactive_class(TestEveryPartitionSpelling)
-inactive_class(TestAPlanThatCannotRunIsRefused)
-inactive_class(TestListFieldsMustBeLists)
-inactive_class(TestUnresolvedInputsRoundTwo)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestDrainRestartReconciliation, TestIntentEnvelope, TestIdempotency,
+    TestNothingClosesOnASelfReport, TestTheTrackerIsNeverAuthoritative, TestThePipelinePredicate,
+    TestTheCodePredicate, TestGatedPromotion, TestTheThreeWeakPointsIFlagged, TestDirectoryOutputs,
+    TestNoStateChangeEscapesTheOutbox, TestRound2ReviewFindings, TestADryRunCannotWedgeARealProject,
+    TestConcurrencyDoesNotDeadlock, TestRetryBudgetBehaviour, TestClosureAuthorityIsFixedByKind,
+    TestACodeUnitIsNotDoneUntilMerged, TestAStalledDAGIsDiagnosable, TestAPersistedDoneIsCorrected)
 
 
 if __name__ == "__main__":

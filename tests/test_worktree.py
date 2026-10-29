@@ -254,6 +254,8 @@ class TestTheFeatureIsReachableAtAll(Base):
     """
 
     def _allocate(self, repo=None):
+        from tests.d5_test_support import for_case
+        for_case(self)
         root = os.path.join(self.tmp, "root")
         argv = [sys.executable, str(SCRIPTS / "unit.py"), "allocate",
                 "--root", root, "--task", "u1", "--kind", "code",
