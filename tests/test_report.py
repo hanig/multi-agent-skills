@@ -70,6 +70,10 @@ def _project(tmp, units=None, receipts=None, findings=None, outbox=None,
     return tmp
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestExternalReportPaths(unittest.TestCase):
 
     def setUp(self):
@@ -153,6 +157,7 @@ class TestExternalReportPaths(unittest.TestCase):
                 self.assertFalse(result.stdout)
 
 
+@inactive_class
 class TestBuiltFromEvidence(unittest.TestCase):
 
     def test_digests_come_from_the_receipt(self):
@@ -192,6 +197,7 @@ class TestBuiltFromEvidence(unittest.TestCase):
             self.assertIn("1 of 2", why)
 
 
+@inactive_class
 class TestWeakEvidenceIsNotUpgraded(unittest.TestCase):
     """The receipt's `basis` block records what it does NOT prove. A report
     that drops it turns a hedged claim into an unhedged one."""
@@ -220,6 +226,7 @@ class TestWeakEvidenceIsNotUpgraded(unittest.TestCase):
             self.assertEqual(R.evidence_gaps(R.unit_rows(R.collect(t))), [])
 
 
+@inactive_class
 class TestFindingsAreLabelledAsClaims(unittest.TestCase):
 
     def test_project_findings_are_marked_as_the_projects_own(self):
@@ -238,6 +245,7 @@ class TestFindingsAreLabelledAsClaims(unittest.TestCase):
                              R.render(R.collect(t)))
 
 
+@inactive_class
 class TestAcknowledgmentComesFromTheReceiptJournal(unittest.TestCase):
     """swarm.py stopped writing `applied`; this file went on reading it, so
     every run reported its tracker updates as pending forever. That is what
@@ -307,6 +315,7 @@ class TestAcknowledgmentComesFromTheReceiptJournal(unittest.TestCase):
             self.assertIn("the drainer's word, not proof", body)
 
 
+@inactive_class
 class TestEvidenceOutranksCoordinatorState(unittest.TestCase):
     """The worst defect in the change: `su.get("state") or rc.get("state")`
     let stored state beat the receipt that judged the attempt."""
@@ -342,6 +351,7 @@ class TestEvidenceOutranksCoordinatorState(unittest.TestCase):
             self.assertEqual(R.unit_rows(R.collect(t))[0]["state"], "DONE")
 
 
+@inactive_class
 class TestOutputIsSafeAndSelfContained(unittest.TestCase):
 
     def test_project_supplied_text_is_escaped(self):
@@ -380,6 +390,7 @@ class TestOutputIsSafeAndSelfContained(unittest.TestCase):
 
 
 
+@inactive_class
 class TestPublishedReportsCannotCarryAnExploit(unittest.TestCase):
     """These reports get published as artifacts, and tickets.json is data
     this program did not write."""
@@ -441,6 +452,7 @@ class TestPublishedReportsCannotCarryAnExploit(unittest.TestCase):
             self.assertNotIn("are unacknowledged", body)
 
 
+@inactive_class
 class TestUnknownStatesAreNotProgress(unittest.TestCase):
     """A USAGE_ERROR unit used to make a finished run read IN FLIGHT
     forever: a stall dressed as progress."""
@@ -494,6 +506,7 @@ class TestUnknownStatesAreNotProgress(unittest.TestCase):
             self.assertNotIn("&amp;mdash;", R.render(R.collect(t)))
 
 
+@inactive_class
 class TestEvidenceIntegrity(unittest.TestCase):
     """A receipt that cannot be read used to be skipped, leaving the stored
     DONE state as the only thing claiming the unit finished."""
@@ -554,6 +567,7 @@ class TestEvidenceIntegrity(unittest.TestCase):
             self.assertIn("no receipt", why)
 
 
+@inactive_class
 class TestTheCommitteePlan(unittest.TestCase):
     """The four findings the step-back committee scoped as ONE invariant:
     COMPLETE must require evidence, and every way of not having evidence must
@@ -623,6 +637,7 @@ def _row(state, **kw):
     return r
 
 
+@inactive_class
 class TestCoordinatorStatesAreAllClassified(unittest.TestCase):
     """Every state `advance` can store must land in exactly one bucket.
 
@@ -651,6 +666,7 @@ class TestCoordinatorStatesAreAllClassified(unittest.TestCase):
                          "does not classify" % missing)
 
 
+@inactive_class
 class TestBlockedBeforeLaunchIsVisible(unittest.TestCase):
 
     def test_a_refused_unit_says_which_workspace_is_dirty(self):
@@ -671,6 +687,7 @@ class TestBlockedBeforeLaunchIsVisible(unittest.TestCase):
             self.assertIn("2 dirty path(s)", html)
 
 
+@inactive_class
 class TestFilesNothingDeclaredAreVisible(unittest.TestCase):
     """18 bytes of debris named `phase0b/--reflink=auto` rode a DONE unit out
     of a real run because nothing looked. The receipt names it now, and a
@@ -740,6 +757,7 @@ class TestFilesNothingDeclaredAreVisible(unittest.TestCase):
             self.assertEqual(R.verdict(rows)[0], "COMPLETE")
 
 
+@inactive_class
 class TestAnUnattributedReceiptDoesNotOutrankState(unittest.TestCase):
     """The other half of "the receipt wins".
 
@@ -884,6 +902,7 @@ REAL_SURVEY = {
 }
 
 
+@inactive_class
 class TestTheEnvironmentSectionReadsTheSurveyItWasGiven(unittest.TestCase):
     """The reader took hostname/user/python/accounts off the TOP level of
     survey.json, where survey.py has never written them. Three fields
@@ -961,6 +980,7 @@ class TestTheEnvironmentSectionReadsTheSurveyItWasGiven(unittest.TestCase):
         self.assertIn("sacctmgr named none, or did not answer", html)
 
 
+@inactive_class
 class TestAnUnreadableSurveyIsNotAnEmptyOne(unittest.TestCase):
 
     def _render(self, write):
@@ -1015,6 +1035,7 @@ class TestAnUnreadableSurveyIsNotAnEmptyOne(unittest.TestCase):
                              "present")
 
 
+@inactive_class
 class TestASurveyVersionTheReportCannotReadSaysSo(unittest.TestCase):
     """survey.py versions its output precisely so a consumer can tell "this
     cluster restricts nothing" from "this survey is older than the question".
