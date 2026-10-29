@@ -53,6 +53,8 @@ class TestProcess(unittest.TestCase):
     eq = unittest.TestCase.assertEqual
 
     def setUp(self):
+        from tests.fixtures.d5.inactive import for_case
+        for_case(self)
         isolate_pool(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
