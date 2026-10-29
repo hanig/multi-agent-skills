@@ -92,7 +92,7 @@ class TestRoutes(unittest.TestCase):
         self.assertIs(S.D5, activation)
         self.assertIs(M.D5, activation)
         self.assertEqual(Path(activation.__file__).resolve(), ROOT / routes['activation'])
-        self.assertIs(activation.d5_active(), False)
+        self.assertIs(activation.d5_active(), True)
         self.assertIs(M.merge_launch_admitted(), False)
 
 
