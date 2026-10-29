@@ -186,8 +186,9 @@ class TestU8Wiring(unittest.TestCase):
      (hook / ('__init__.py' if mode == 'package' else 'sitecustomize.py')).write_text(
       'from pathlib import Path\nimport os, subprocess\n'
       'os.environ["FIXTURE_FAULT"] = Path(__file__).with_name("flag").read_text()\n'
-      'def reject(*a, **k): raise RuntimeError("unexpected spawn")\n'
-      'subprocess.Popen = reject\n')
+      'class Reject(subprocess.Popen):\n'
+      ' def __init__(self, *a, **k): raise RuntimeError("unexpected spawn")\n'
+      'subprocess.Popen = Reject\n')
     stack.callback(os.chdir, Path.cwd())
     os.chdir(root)
     effect = root / 'effect'
