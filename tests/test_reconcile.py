@@ -336,7 +336,6 @@ print(json.dumps(pages[int(cursor)]))
         self.assertEqual(self.run_cli()[0], 2)
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
 from tests.d5_test_support import inactive_class
 inactive_class(ReconcileTests)
 
