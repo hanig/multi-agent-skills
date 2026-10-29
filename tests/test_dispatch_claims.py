@@ -125,6 +125,10 @@ class ClaimCase(unittest.TestCase):
         return state["units"][uid]
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestOneLiveClaimPerOutputDestination(ClaimCase):
 
     def test_a_unit_id_live_in_another_state_directory_is_refused(self):
@@ -210,6 +214,7 @@ class TestOneLiveClaimPerOutputDestination(ClaimCase):
         self.assertEqual((d1, d2), (1, 1), "\n".join(report))
 
 
+@inactive_class
 class TestUnknownIsNotFree(ClaimCase):
     """`survey.py`'s three-state rule, applied where it decides a dispatch.
     "The scheduler does not list it" and "the scheduler could not be asked"
@@ -316,6 +321,7 @@ class TestUnknownIsNotFree(ClaimCase):
         self.assertIn("unreadable", "\n".join(report))
 
 
+@inactive_class
 class TestAClaimDoesNotWedgeItsOwnProject(ClaimCase):
 
     def test_a_coordinator_reclaims_its_own_claim_after_a_crash(self):
@@ -376,6 +382,7 @@ class TestAClaimDoesNotWedgeItsOwnProject(ClaimCase):
                          "in a shared registry could only refuse honest work")
 
 
+@inactive_class
 class TestTheClaimVocabularyIsExplicit(unittest.TestCase):
 
     def test_the_three_states_are_never_collapsed(self):
@@ -411,6 +418,7 @@ SUBSTITUTES = ("git show 0000000000000000000000000000000000000000:",
                "add a separate worktree at")
 
 
+@inactive_class
 class TestTheProtocolForbidsGitStash(unittest.TestCase):
     """C12 shipped with three review findings, all against "can an agent
     actually FOLLOW this", and no test asserts that it can. What IS
@@ -483,6 +491,7 @@ class TestTheProtocolForbidsGitStash(unittest.TestCase):
         self.assertIsNone(S._code_protocol_problem(prompt, INTENT))
 
 
+@inactive_class
 class TestTheProtocolReservesMergingForTheOrchestrator(unittest.TestCase):
     RULES = {
         "worker stop instruction": "After opening the pull request, STOP.",
@@ -538,6 +547,7 @@ GATE_CLAUSE = "Before opening a pull request, run this repository's review gate.
 PUSH_CLAUSE = "Push after every meaningful edit."
 
 
+@inactive_class
 class TestTheProtocolRequiresReviewAndPush(unittest.TestCase):
     def test_author_comes_from_coordinator_intent(self):
         cases = (
@@ -609,6 +619,7 @@ class TestTheProtocolRequiresReviewAndPush(unittest.TestCase):
                         S.validate_plan(plan_of(unit))
 
 
+@inactive_class
 class TestReviewAndPushBeforeAgentCreation(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="protocol-dispatch-"))
@@ -703,6 +714,7 @@ class TestReviewAndPushBeforeAgentCreation(unittest.TestCase):
         self.assertEqual(prompt.count("--author p/prior"), 1)
 
 
+@inactive_class
 class TestRecoveryCommandsPreserveContent(unittest.TestCase):
     """Execute the recovery block delivered to workers, against a real remote."""
 
@@ -800,6 +812,7 @@ class TestRecoveryCommandsPreserveContent(unittest.TestCase):
         self.assertEqual(git(self.remote, "for-each-ref", self.recovery_ref), "")
 
 
+@inactive_class
 class TestTheCoordinatorRunsNoStashOfItsOwn(unittest.TestCase):
     """The refusal below must not fire on a stash the coordinator itself
     parked. It cannot, because the coordinator parks none -- which is a claim
@@ -831,6 +844,7 @@ class TestTheCoordinatorRunsNoStashOfItsOwn(unittest.TestCase):
                     % (path.name, node.lineno))
 
 
+@inactive_class
 class TestANonEmptyStashStackRefusesACodeDispatch(unittest.TestCase):
     """C10 refuses a dirty tree at second zero. This is the same shape for
     the one piece of Git state that CROSSES the per-attempt worktree
@@ -922,6 +936,7 @@ class TestANonEmptyStashStackRefusesACodeDispatch(unittest.TestCase):
         self.assertIn("cannot be shown to be empty", problem)
 
 
+@inactive_class
 class TestTheRunReportSaysWhichPreflightRefused(unittest.TestCase):
     """A zero dirty count rendered as "uncommitted changes" sent a reader to
     clean a workspace that was already clean."""

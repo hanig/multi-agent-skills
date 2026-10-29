@@ -27,6 +27,10 @@ def setUpModule():
     isolated_module_path()
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestStateEpoch(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

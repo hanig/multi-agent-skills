@@ -101,6 +101,36 @@ class TestU8Wiring(unittest.TestCase):
                         self.assertEqual(effects, ([], []))
                         self.assertIn('D5 active:', str(result) + out.getvalue() + err.getvalue())
 
+    def test_helper_silently_global_is_detected(self):
+        # Import and explicit use must leave unrelated production tests active.
+        import importlib
+        from tests import d5_test_support as support
+        importlib.reload(support)
+        self.assertIs(activation.d5_active(), True)
+        with support.inactive():
+            self.assertIs(activation.d5_active(), False)
+        self.assertIs(activation.d5_active(), True)
+        self.assertIs(registry.d5_active(), True)
+
+    def test_M5_replacement_needs_fresh_confirmation(self):
+        fixture = lease_fixture.TestD5Lease()
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        entry = ready(fixture, fixture.repo, 'p', fixture.state)
+        first = fixture.grant()
+        before = fixture.tree()
+        for changes in ({}, {'expires_at': 201},
+                        {'owner_response': 'copied receipt with changed words'}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(
+                    authority.AuthorityError, 'fresh confirmation'):
+                fixture.grant(**changes)
+            self.assertEqual(fixture.tree(), before)
+        second = fixture.grant(confirmed_at=102, expires_at=201,
+                               owner_response='Fresh confirmation\n')
+        self.assertNotEqual(first['grant_id'], second['grant_id'])
+        self.assertEqual(store.read(Path(entry['record_dir'])), second)
+        self.assertEqual(second['confirmation']['owner_response'], 'Fresh confirmation\n')
+
     def test_M5_no_grant_from_conversational_receipt(self):
         fixture = lease_fixture.TestD5Lease()
         self.addCleanup(fixture.doCleanups)
@@ -115,7 +145,8 @@ class TestU8Wiring(unittest.TestCase):
             with self.subTest(missing=missing), self.assertRaises(TypeError):
                 lease.grant(fixture.repo, 'p', fixture.state, **args)
             self.assertFalse((directory / store.RECORD_NAME).exists())
-        for changes in ({'owner_response': ''}, {'displayed_bounds': ''},
+        for changes in ({'owner_response': ''}, {'displayed_bounds': ''}, {'owner_response': ' \t\n'},
+                        {'displayed_bounds': ' \t\n'},
                         {'expires_at': 100 + 86401}):
             with self.subTest(changes=changes), self.assertRaises(authority.AuthorityError):
                 fixture.grant(**changes)
