@@ -37,6 +37,10 @@ def inactive_script_capture(script=None):
             c.operator = script
         c.env['HANIG_ORCHESTRATE_DIR'] = str(legacy.OPERATOR.parent.parent)
         c.env['PYTHONPATH'] = str(legacy.OPERATOR.parent)
+        # Python may report a resolved launcher path in its child process.
+        child_python = subprocess.check_output(
+            [sys.executable, '-c', 'import sys; print(sys.executable)'],
+            env=c.env, text=True).strip()
         before = tree_bytes(c.state_dir)
         result = c.invoke()
         c.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -50,12 +54,13 @@ def inactive_script_capture(script=None):
             c.assertTrue(receipt['by'])
             receipt.update(at='<time>', by='<operator>')
         encoded = json.dumps(captured, sort_keys=True)
-        for old, new in ((str(c.directory), '<fixture>'), (c.head, '<head>'),
+        for old, new in ((child_python, '<python>'), (sys.executable, '<python>'),
+                         (str(c.directory), '<fixture>'), (c.head, '<head>'),
                          (c.merged, '<merge>'), (c.base, '<base>'),
                          (c.merged[:12], '<merge-short>'),
                          (c.intent()['operation_id'], '<operation>'),
                          (str(legacy.SCRIPTS), '<swarm-scripts>'),
-                         (str(legacy.SCRIPTS.parents[1]), '<skills>'), (sys.executable, '<python>')):
+                         (str(legacy.SCRIPTS.parents[1]), '<skills>')):
             encoded = encoded.replace(old, new)
         for line in (c.state_dir / legacy.S.OUTBOX).read_text().splitlines():
             encoded = encoded.replace(json.loads(line)['key'], '<outbox-key>')
