@@ -299,16 +299,5 @@ class TestACanaryMustRunTheDeclaredProbe(unittest.TestCase):
             unit("work", needs=["probe"],
                  runtime=dict(RT, verified_by="canary:probe"))]))
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestRuntimeMustBeDeclared)
-inactive_class(TestRuntimeFieldsAreChecked)
-inactive_class(TestCanaryMustActuallyGate)
-inactive_class(TestUnverifiedMustBeADecision)
-inactive_class(TestNoInferredFacts)
-inactive_class(TestACanaryMustExerciseWhatItVouchesFor)
-inactive_class(TestACanaryMustRunTheDeclaredProbe)
-
-
 if __name__ == "__main__":
     unittest.main()

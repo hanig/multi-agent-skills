@@ -175,11 +175,10 @@ class TestDispatchAnchorsFirst(unittest.TestCase):
                         "captured, so the baseline is not a baseline")
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestTheAnchorIsCapturedBeforeDispatch)
-inactive_class(TestTheAnchorCannotBeMovedAfterwards)
-inactive_class(TestDispatchAnchorsFirst)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestTheAnchorIsCapturedBeforeDispatch, TestTheAnchorCannotBeMovedAfterwards,
+    TestDispatchAnchorsFirst)
 
 
 if __name__ == "__main__":

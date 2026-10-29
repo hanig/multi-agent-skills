@@ -894,21 +894,5 @@ class TestOneWayToGetTheBase(unittest.TestCase):
         self.assertIn("may not reconstruct repository", src)
         self.assertNotIn("base = recorded or base", src)
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestAuthorizationComesFromTheBase)
-inactive_class(TestPinningIsByContent)
-inactive_class(TestAdmissionIsBound)
-inactive_class(TestTheRequirementIsDeclared)
-inactive_class(TestRoundOneFindings)
-inactive_class(TestCodexCannotRewriteItsOwnExam)
-inactive_class(TestAnUnreadablePolicyRefuses)
-inactive_class(TestTheBaseComesFromCoordinatorState)
-inactive_class(TestThePolicyIsNotOptional)
-inactive_class(TestAdmissionRechecksTheVerifier)
-inactive_class(TestTheBoundaryIsStated)
-inactive_class(TestOneWayToGetTheBase)
-
-
 if __name__ == "__main__":
     unittest.main()

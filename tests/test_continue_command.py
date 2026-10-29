@@ -247,7 +247,6 @@ class ContinueCommandTests(unittest.TestCase):
         self.assert_refusal("inputs")
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
 from tests.d5_test_support import inactive_class
 inactive_class(ContinueCommandTests)
 
