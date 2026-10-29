@@ -1,6 +1,8 @@
 """Explicit pre-cutover premise for legacy tests, including their Python children.
 
-No installed skill reads this fixture. Production wiring tests do not use it.
+Opt in with inactive() around a test, or for_case(self) in a legacy fixture.
+Importing this module never changes activation. Children inherit the pin only
+while the opted-in context is live. Production wiring tests do not opt in.
 """
 from contextlib import ExitStack, contextmanager
 import os
@@ -34,23 +36,3 @@ def for_case(case):
     context = inactive()
     context.__enter__()
     case.addCleanup(context.__exit__, None, None, None)
-
-
-def legacy_module(namespace):
-    """Keep existing module hooks and assertions; scope the inactive premise."""
-    before = namespace.get('setUpModule', lambda: None)
-    after = namespace.get('tearDownModule', lambda: None)
-    contexts = []
-
-    def setup():
-        before()
-        context = inactive()
-        context.__enter__()
-        contexts.append(context)
-
-    def teardown():
-        try:
-            contexts.pop().__exit__(None, None, None)
-        finally:
-            after()
-    return setup, teardown
