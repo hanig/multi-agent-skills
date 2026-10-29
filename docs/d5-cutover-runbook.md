@@ -42,7 +42,7 @@ discover whether a queued operation was sent. Preserve the queue and reconcile
 external outcomes read-only before any later authorized replay.
 
 **Park existing writes.** Pre-D5 items lack D5 plan identity, scope and
-provenance. U6's row-75 drain refuses. Preserve them unprovenanced and parked
+provenance. U6's `merge_unit.print_tracker_drain` route refuses. Preserve them unprovenanced and parked
 until a separately authorized post-D5 unit handles them.
 
 **P1 is a hard precondition:** before any change makes any row-75 route stop

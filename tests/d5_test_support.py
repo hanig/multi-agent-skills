@@ -8,14 +8,17 @@ from contextlib import ExitStack, contextmanager
 import os
 from functools import wraps
 from pathlib import Path
+import sys
 import tempfile
 from unittest import mock
 
 
 @contextmanager
 def inactive(owner=None):
-    import d5_activation
     with ExitStack() as stack:
+        scripts = Path(__file__).resolve().parents[1] / 'skills/hanig-swarm/scripts'
+        stack.enter_context(mock.patch.object(sys, 'path', [str(scripts)] + sys.path))
+        import d5_activation
         stack.enter_context(mock.patch.object(d5_activation, 'd5_active', return_value=False))
         if owner is not None and owner is not d5_activation:
             stack.enter_context(mock.patch.object(owner, 'd5_active', return_value=False))
