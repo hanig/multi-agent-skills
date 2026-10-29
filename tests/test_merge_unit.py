@@ -87,6 +87,17 @@ class TestMergeUnit(unittest.TestCase):
         # This fixture exercises pre-cutover behavior; active wiring has U8 tests.
         from tests.d5_test_support import for_case
         for_case(self)
+        self.prepare_fixture()
+
+    def prepare_active_fixture(self):
+        """Build legacy state, then restore active wiring before the test runs."""
+        from tests.d5_test_support import inactive
+        import d5_activation
+        with inactive():
+            self.prepare_fixture()
+        self.assertIs(d5_activation.d5_active(), True)
+
+    def prepare_fixture(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.directory = Path(self.tmp.name).resolve()
