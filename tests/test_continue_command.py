@@ -14,10 +14,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SWARM = ROOT / "skills/hanig-swarm/scripts/swarm.py"
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class ContinueCommandTests(unittest.TestCase):
     def setUp(self):
         with mock.patch.dict(os.environ, {k: v for k, v in os.environ.items()
@@ -249,6 +245,11 @@ class ContinueCommandTests(unittest.TestCase):
         self.unit["inputs"] = "not a list"
         self.save()
         self.assert_refusal("inputs")
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(ContinueCommandTests)
 
 
 if __name__ == "__main__":
