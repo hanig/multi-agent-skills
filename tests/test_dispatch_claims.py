@@ -971,20 +971,10 @@ class TestTheRunReportSaysWhichPreflightRefused(unittest.TestCase):
         self.assertIn("3 dirty path(s)", html)
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestOneLiveClaimPerOutputDestination)
-inactive_class(TestUnknownIsNotFree)
-inactive_class(TestAClaimDoesNotWedgeItsOwnProject)
-inactive_class(TestTheClaimVocabularyIsExplicit)
-inactive_class(TestTheProtocolForbidsGitStash)
-inactive_class(TestTheProtocolReservesMergingForTheOrchestrator)
-inactive_class(TestTheProtocolRequiresReviewAndPush)
-inactive_class(TestReviewAndPushBeforeAgentCreation)
-inactive_class(TestRecoveryCommandsPreserveContent)
-inactive_class(TestTheCoordinatorRunsNoStashOfItsOwn)
-inactive_class(TestANonEmptyStashStackRefusesACodeDispatch)
-inactive_class(TestTheRunReportSaysWhichPreflightRefused)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestOneLiveClaimPerOutputDestination, TestUnknownIsNotFree, TestAClaimDoesNotWedgeItsOwnProject,
+    TestReviewAndPushBeforeAgentCreation, TestANonEmptyStashStackRefusesACodeDispatch)
 
 
 if __name__ == "__main__":

@@ -3738,13 +3738,10 @@ class TestSlurmPolicy(unittest.TestCase):
                 RV.read_policy(tmp)
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestRemoteVerification)
-inactive_class(TestWriteOnceRemoteEvidence)
-inactive_class(TestSlurmLifecycle)
-inactive_class(TestSlurmReconciliation)
-inactive_class(TestSlurmPolicy)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestRemoteVerification, TestWriteOnceRemoteEvidence, TestSlurmLifecycle,
+    TestSlurmReconciliation, TestSlurmPolicy)
 
 
 if __name__ == '__main__':

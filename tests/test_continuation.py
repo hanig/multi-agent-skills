@@ -242,11 +242,9 @@ class TestItIsNotAUnitState(unittest.TestCase):
         self.assertIn("fails for missing production evidence", src)
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestOnlyOneConditionTriggersIt)
-inactive_class(TestTheBoundIsDeclaredAndChecked)
-inactive_class(TestItIsNotAUnitState)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestOnlyOneConditionTriggersIt, TestTheBoundIsDeclaredAndChecked, TestItIsNotAUnitState)
 
 
 if __name__ == "__main__":

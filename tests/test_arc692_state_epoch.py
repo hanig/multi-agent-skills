@@ -328,7 +328,6 @@ class TestStateEpoch(unittest.TestCase):
         self.assertFalse(self.first.renew_lease(self.state_dir))
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
 from tests.d5_test_support import inactive_class
 inactive_class(TestStateEpoch)
 

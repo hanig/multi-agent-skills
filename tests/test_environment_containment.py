@@ -683,5 +683,9 @@ class TestEnvironmentContainment(unittest.TestCase):
             self.assertEqual(S.validate_plan({"units": [unit]})["units"], 1)
 
 
+from tests.d5_test_support import inactive_classes
+inactive_classes(TestEnvironmentContainment)
+
+
 if __name__ == "__main__":
     unittest.main()

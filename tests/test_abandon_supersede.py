@@ -728,10 +728,9 @@ class TestStoppedDrain(StoppedDrainFixture):
         self.assertIn('RUNNING: working\n', self.stdout)
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestOperatorTerminal)
-inactive_class(TestStoppedDrain)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestOperatorTerminal, TestStoppedDrain)
 
 
 if __name__ == '__main__':
