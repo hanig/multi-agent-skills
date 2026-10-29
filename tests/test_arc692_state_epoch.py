@@ -27,10 +27,6 @@ def setUpModule():
     isolated_module_path()
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestStateEpoch(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -330,6 +326,11 @@ class TestStateEpoch(unittest.TestCase):
         self.assertFalse(self.epoch_path.exists())
         self.assertNotIn("epoch", self.read())
         self.assertFalse(self.first.renew_lease(self.state_dir))
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestStateEpoch)
 
 
 if __name__ == "__main__":
