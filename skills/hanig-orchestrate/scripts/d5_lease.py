@@ -66,6 +66,9 @@ def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
                                                "displayed_bounds": displayed_bounds},
               "custody": None, "invalidation": None}
     authority.validate(record)
+    for key, value in record["confirmation"].items():
+        if not value or value.isspace():
+            raise authority.AuthorityError("confirmation." + key + ": fresh confirmation required")
     entry = readiness.bound(ready, _registered(checkout, plan_id, state_dir))
     directory = Path(entry["record_dir"])
     operation = (d5_install.replace_authority

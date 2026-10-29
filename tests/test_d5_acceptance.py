@@ -65,7 +65,7 @@ from tests import test_d5_process as p
 import d5_custody as custody
 import d5_install as install
 
-DEFAULT_ACTIVE = t.registry.d5_active
+DEFAULT_ACTIVE = lambda: False  # Explicit pre-cutover fixture, not the production default.
 PEER = str(Path(__file__).parent / 'fixtures/d5/r10_peer.py')
 
 
