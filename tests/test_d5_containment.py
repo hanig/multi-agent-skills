@@ -95,10 +95,10 @@ class TestMergeAdmission(unittest.TestCase):
                 output = io.StringIO()
                 with no_effects() as effects, redirect_stderr(output):
                     for call in calls:
-                        with self.assertRaisesRegex(M.Refusal, 'U7.*executable binding'):
+                        with self.assertRaisesRegex(M.Refusal, 'executable binding.*U8 cutover'):
                             call()
                     self.assertEqual(M.main(fixture.margv), 1)
-                    self.assertIn('U7', output.getvalue())
+                    self.assertIn('U8 cutover', output.getvalue())
                     self.assertIn('executable binding', output.getvalue())
                     self.assertEqual(effects, ([], []))
                 for probe in probes:
