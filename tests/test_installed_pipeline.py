@@ -14,6 +14,8 @@ import tempfile
 import time
 import unittest
 
+from tests.d5_test_support import child_bootstrap
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "installed_pipeline"
@@ -98,6 +100,14 @@ class InstalledPipeline(unittest.TestCase):
 
     def select_store(self, store):
         self.store = store
+        # This legacy grading fixture keeps its isolated installed-only runner;
+        # explicitly deliver the shared premise after its existing audit guards.
+        runner = (FIXTURES / "python_runner.py").read_text()
+        anchor = '    spec = importlib.util.spec_from_file_location("__main__", script)\n'
+        self.assertEqual(runner.count(anchor), 1)
+        pin = child_bootstrap(store / "hanig-swarm/scripts/d5_activation.py")
+        (self.base / "python_runner.py").write_text(runner.replace(
+            anchor, '    exec(' + repr(pin) + ', {})\n' + anchor))
         self.env.update({
             "PIPELINE_STORE": str(store),
             "HANIG_SWARM_DIR": str(store / "hanig-swarm"),
@@ -171,9 +181,10 @@ class InstalledPipeline(unittest.TestCase):
             self.assertTrue(trace["source_guard_exercised"])
             self.assertTrue(trace["proc_guard_exercised"])
             modules = trace["modules"]
+            self.assertIn("d5_activation", modules)
             self.assertTrue(Path(modules["__main__"]).is_relative_to(self.store))
             scripts.add(Path(modules["__main__"]).name)
-            for name in ("unit", "swarm", "worktree", "coordinator_paths", "skill_paths"):
+            for name in ("unit", "swarm", "worktree", "coordinator_paths", "skill_paths", "d5_activation"):
                 if name in modules:
                     self.assertTrue(Path(modules[name]).is_relative_to(self.store), modules)
         self.assertEqual(scripts, {"swarm.py", "unit.py", "report.py"})

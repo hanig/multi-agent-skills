@@ -33,6 +33,8 @@ class TestNoProducedChange(unittest.TestCase):
             capture_output=True, text=True).stdout.strip()
 
     def setUp(self):
+        from tests.d5_test_support import for_case
+        for_case(self)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name).resolve()

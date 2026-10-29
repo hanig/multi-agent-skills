@@ -818,11 +818,9 @@ class TestDeadlineBreach(unittest.TestCase):
         self.assertEqual(deadline_intents, [])
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestDeadlineDeclaration)
-inactive_class(TestStatusCarriesTime)
-inactive_class(TestDeadlineBreach)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestDeadlineDeclaration, TestStatusCarriesTime, TestDeadlineBreach)
 
 
 if __name__ == "__main__":
