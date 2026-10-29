@@ -18,17 +18,19 @@ import unittest
 from unittest import mock
 
 from tests import test_arc683_shared_guard as fixtures
+from tests.d5_test_support import child_bootstrap
 
 S, V = fixtures.S, fixtures.V
 RV = V.RV
 PYTHON = '#!' + sys.executable + '\n'
+INACTIVE_CHILD = child_bootstrap(Path(S.__file__).with_name('d5_activation.py'))
 
 def read_json(path):
     return json.loads(path.read_text())
 
 
 SSH = r'''
-import io, json, os, pathlib, subprocess, sys, tarfile
+import io, json, os, pathlib, shlex, subprocess, sys, tarfile
 args = sys.argv[1:]
 assert args[:2] == ['-oBatchMode=yes', '-oConnectTimeout=15']
 assert args[2] == 'fixture-host'
@@ -68,18 +70,18 @@ if "tarfile" in command:
                     member.size = len(data)
                 dest.addfile(member, io.BytesIO(data))
         raw = dst.getvalue()
-    result = subprocess.run(['/bin/sh', '-c', command], input=raw,
+    result = subprocess.run(shlex.split(command), input=raw,
                             stdout=subprocess.DEVNULL if mode in ('ssh-lost-response', 'ssh-lost-both') else None)
     if mode in ('ssh-lost-response', 'ssh-lost-both', 'ssh-complete-255'): raise SystemExit(255)
 else:
     if pathlib.Path(os.environ['REMOTE_MODE']).read_text() in ('cleanup-ssh-fail', 'ssh-lost-both'):
         raise SystemExit(255)
-    result = subprocess.run(['/bin/sh', '-c', command])
+    result = subprocess.run(shlex.split(command))
 raise SystemExit(result.returncode)
 '''
 
 SBATCH = r'''
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, shlex, subprocess, sys
 with open(os.environ['SCHED_LOG'], 'a') as log:
     log.write(json.dumps(['sbatch'] + sys.argv[1:]) + '\n')
 assert '--no-requeue' in sys.argv
@@ -87,18 +89,21 @@ request = json.loads((pathlib.Path(sys.argv[-1]).parent / 'request.json').read_t
 import hashlib
 assert '--job-name=verify-' + hashlib.sha256(request['launch_id'].encode()).hexdigest() in sys.argv
 assert '--worker' in pathlib.Path(sys.argv[-1]).read_text()
+script = pathlib.Path(sys.argv[-1]).read_text()
+assert script.startswith('#!/bin/sh\nexec ')
+worker_argv = shlex.split(script.split('\n', 1)[1])[1:]
 assert '--partition=fixture-cpu' in sys.argv
 assert '--mem=2G' in sys.argv
 assert '--time=00:05:00' in sys.argv
 if pathlib.Path(os.environ['REMOTE_MODE']).read_text() not in ('slurm-missing', 'slurm-pending', 'slurm-running', 'slurm-lost-job-id'):
-    result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
+    result = subprocess.run(worker_argv, capture_output=True)
     assert result.returncode == 0 or pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-worker-died', result.stderr
     if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-supervisor-died':
         import signal
         os.kill(os.getppid(), signal.SIGKILL)
     if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-forced-requeue':
         pathlib.Path(os.environ['REMOTE_MODE']).write_text('pass')
-        result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)
+        result = subprocess.run(worker_argv, capture_output=True)
         assert result.returncode == 0, result.stderr
 print('accepted-with-lost-response' if pathlib.Path(os.environ['REMOTE_MODE']).read_text() == 'slurm-lost-job-id' else '321')
 '''
@@ -144,7 +149,7 @@ class TestRemoteVerification(unittest.TestCase):
                             'p=Path(os.environ["REMOTE_MODE"])\n'
                             'if p.read_text() == "slurm-pending": p.write_text("slurm-cancelled")\n')):
             program = self.f.bin / name
-            program.write_text(PYTHON + body)
+            program.write_text(PYTHON + (INACTIVE_CHILD if name in ("ssh", "sbatch") else "") + body)
             program.chmod(0o755)
         self.policy = {'schema_version': 1,
                        'local': {'python': sys.executable, 'git': str((self.f.bin / 'git').resolve())},
@@ -161,7 +166,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def write_ssh(self, body):
-        (self.f.bin / 'ssh').write_text(PYTHON + body)
+        (self.f.bin / 'ssh').write_text(PYTHON + INACTIVE_CHILD + body)
 
     def locations(self):
         yield 'remote'
@@ -246,7 +251,7 @@ class TestRemoteVerification(unittest.TestCase):
             'from pathlib import Path\np=Path(%r)\n'
             'p.write_text(str(int(p.read_text())+1) if p.exists() else "1")\n' % str(counter))
         wrapper = self.f.directory / 'declared-python-wrapper'
-        wrapper.write_text(PYTHON + 'import os,sys\n'
+        wrapper.write_text(PYTHON + INACTIVE_CHILD + 'import os,sys\n'
                            'os.execv(%r, [%r]+sys.argv[1:])\n' % (sys.executable, sys.executable))
         wrapper.chmod(0o755)
         original = json.loads(json.dumps(self.policy))
@@ -409,7 +414,7 @@ class TestRemoteVerification(unittest.TestCase):
         (stage / 'request.json').unlink()
         # Every frame is complete but its SSH process exits 255; the later
         # missing claim/header must not erase the first completed failure.
-        old = "    result = subprocess.run(['/bin/sh', '-c', command])"
+        old = "    result = subprocess.run(shlex.split(command))"
         self.assertIn(old, SSH)
         persisted = self.f.directory / 'claim-fsynced'
         audit = ("if \"'claim-1.json', 0,\" in __import__('shlex').split(command)[-1]:\n"
@@ -498,7 +503,7 @@ class TestRemoteVerification(unittest.TestCase):
     def test_python_shebang_and_no_shebang_use_declared_interpreter(self):
         log = self.f.directory / 'python-invocations'
         wrapper = self.f.directory / 'declared-python'
-        wrapper.write_text(PYTHON + 'import os, sys\n'
+        wrapper.write_text(PYTHON + INACTIVE_CHILD + 'import os, sys\n'
                            'with open(%r, "a") as log: log.write(repr(sys.argv) + "\\n")\n'
                            'os.execv(%r, [%r] + sys.argv[1:])\n'
                            % (str(log), sys.executable, sys.executable))
@@ -1546,7 +1551,7 @@ class TestRemoteVerification(unittest.TestCase):
     def test_slurm_complete_reingest_frames_with_transport_error_still_admit(self):
         write_ssh = self.write_ssh
         def transport_after_frames(script):
-            call = "    result = subprocess.run(['/bin/sh', '-c', command])"
+            call = "    result = subprocess.run(shlex.split(command))"
             disconnect = ("\n    if 'request-header' in command:\n"
                           "        for record in pathlib.Path(os.environ['REMOTE_LEDGER_DIR']).glob('*.json'):\n"
                           "            for run in json.loads(record.read_text())['runs']:\n"
@@ -1565,7 +1570,7 @@ class TestRemoteVerification(unittest.TestCase):
         self.authorize_both(PYTHON + 'raise SystemExit(0)\n')
         # Model an older supervisor that publishes completion but leaves the
         # final scheduler observation to the coordinator's cleanup connection.
-        launch = "    result = subprocess.run(['/bin/sh', '-c', command], input=raw,"
+        launch = "    result = subprocess.run(shlex.split(command), input=raw,"
         delayed = ("    dst = io.BytesIO()\n"
                    "    with tarfile.open(fileobj=io.BytesIO(raw)) as source, tarfile.open(fileobj=dst, mode='w') as dest:\n"
                    "        for member in source:\n"
@@ -1824,7 +1829,7 @@ class TestRemoteVerification(unittest.TestCase):
         for name in ('python', 'git'):
             actual = self.policy['verification_host'][name]
             wrapper = self.f.directory / ('declared-' + name)
-            wrapper.write_text(PYTHON + 'import json, os, sys\n'
+            wrapper.write_text(PYTHON + (INACTIVE_CHILD if name == "python" else "") + 'import json, os, sys\n'
                                'with open(%r, "a") as log: log.write(json.dumps([%r] + sys.argv[1:]) + "\\n")\n'
                                'os.execv(%r, [%r] + sys.argv[1:])\n'
                                % (str(log), name, actual, actual))
@@ -1968,13 +1973,13 @@ class TestRemoteVerification(unittest.TestCase):
         (site / 'sitecustomize.py').write_text(
             'import subprocess, sys\n'
             'if sys.argv[0].endswith("merge_unit.py"):\n'
-            '    original = subprocess.Popen\n'
-            '    def launch(argv, *args, **kwargs):\n'
-            '        if "-c" in argv and any("pinned-verifier-" in x for x in argv):\n'
-            '            argv = list(argv)\n'
-            '            argv[argv.index("-c") + 6] = "/missing-fixture-executable"\n'
-            '        return original(argv, *args, **kwargs)\n'
-            '    subprocess.Popen = launch\n')
+            '    class Launch(subprocess.Popen):\n'
+            '        def __init__(self, argv, *args, **kwargs):\n'
+            '            if "-c" in argv and any("pinned-verifier-" in x for x in argv):\n'
+            '                argv = list(argv)\n'
+            '                argv[argv.index("-c") + 6] = "/missing-fixture-executable"\n'
+            '            super().__init__(argv, *args, **kwargs)\n'
+            '    subprocess.Popen = Launch\n')
         self.f.env['PYTHONPATH'] = str(site)
         result = self.verify()
         self.assertNotEqual(result.returncode, 0)
