@@ -90,6 +90,8 @@ CLOSED_DECLARATIONS = {
         placement.reference-dialect capability.host-policy
         capability.dependencies paths.skill-directory authority.source
         authority.confirmation authority.narrow-mode authority.revocation
+        authority.lease authority.session-cap authority.admission
+        authority.rollover authority.worker-delegation
         role.supervision delegation.whole-loop delegation.prompt
         delegation.preamble delegation.contract
         delegation.configuration delegation.continuation retry.boundary
