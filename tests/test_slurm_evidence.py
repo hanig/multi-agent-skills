@@ -1491,7 +1491,6 @@ class SlurmEvidence(unittest.TestCase):
         self.assertTrue(any("unobserved requeue" in note for note in self.notes))
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
 from tests.d5_test_support import inactive_class
 inactive_class(SlurmEvidence)
 
