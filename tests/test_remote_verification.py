@@ -124,10 +124,6 @@ if state in ('PENDING', 'RUNNING', 'COMPLETING'):
 '''
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestRemoteVerification(unittest.TestCase):
     def setUp(self):
         self.shared = fixtures.TestSharedGuard()
@@ -2111,7 +2107,6 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertIn('tree digest', result.stderr)
 
 
-@inactive_class
 class TestWriteOnceRemoteEvidence(unittest.TestCase):
     def test_completed_receipt_cannot_be_replaced(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2127,7 +2122,6 @@ class TestWriteOnceRemoteEvidence(unittest.TestCase):
             self.assertEqual(list(Path(directory).iterdir()), [path])
 
 
-@inactive_class
 class TestSlurmLifecycle(unittest.TestCase):
     """Fast scheduler processes on a replaced PATH; no SSH or real scheduler."""
     def setUp(self):
@@ -2829,7 +2823,6 @@ else:
         self.assertFalse(self.stage.exists())
 
 
-@inactive_class
 class TestSlurmReconciliation(unittest.TestCase):
     """Run the coordinator's locked retrieval against a local scheduler fixture."""
     def setUp(self):
@@ -3713,7 +3706,6 @@ class TestSlurmReconciliation(unittest.TestCase):
                 self.assertNotIn('recovery_authority', read_json(self.path)['runs'][0])
 
 
-@inactive_class
 class TestSlurmPolicy(unittest.TestCase):
     def test_slurm_requires_all_plain_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3742,6 +3734,15 @@ class TestSlurmPolicy(unittest.TestCase):
             path.write_text(json.dumps(policy))
             with self.assertRaisesRegex(ValueError, 'direct executor'):
                 RV.read_policy(tmp)
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestRemoteVerification)
+inactive_class(TestWriteOnceRemoteEvidence)
+inactive_class(TestSlurmLifecycle)
+inactive_class(TestSlurmReconciliation)
+inactive_class(TestSlurmPolicy)
 
 
 if __name__ == '__main__':
