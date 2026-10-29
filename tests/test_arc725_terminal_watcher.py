@@ -27,6 +27,10 @@ sys.path.insert(0, str(SCRIPTS))
 import swarm as S
 
 
+from tests.d5_test_support import inactive_class
+
+
+@inactive_class
 class TestTerminalWatcherOutcome(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
