@@ -34,6 +34,13 @@ read-only checklist. No automated route scanner or state mutation is involved.
 
 ## Queued writes and rollback
 
+**After activation, do not run `linear_sync drain` until a P1 unit delivers
+tracker lease authority.** Measured with synthetic transports: active
+`linear_sync drain` sends mutations, then receipt recording refuses, so repeated
+drains re-send idempotent mutations with no recorded receipt. Do not drain to
+discover whether a queued operation was sent. Preserve the queue and reconcile
+external outcomes read-only before any later authorized replay.
+
 **Park existing writes.** Pre-D5 items lack D5 plan identity, scope and
 provenance. U6's row-75 drain refuses. Preserve them unprovenanced and parked
 until a separately authorized post-D5 unit handles them.

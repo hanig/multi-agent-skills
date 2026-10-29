@@ -108,7 +108,7 @@ class FakePaseo:
 class TestPerAttemptWorktrees(unittest.TestCase):
     def setUp(self):
         # This fixture exercises pre-cutover behavior; active wiring has U8 tests.
-        from tests.fixtures.d5.inactive import for_case
+        from tests.d5_test_support import for_case
         for_case(self)
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
