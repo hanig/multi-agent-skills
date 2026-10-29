@@ -79,7 +79,8 @@ class TestU8Policy(unittest.TestCase):
                        'Already-submitted effects may finish',
                        'restoring old\nbytes does not resurrect it',
                        'Only the OWNER merges',
-                       'P1 is a hard precondition'):
+                       'P1 is a hard precondition',
+                       'before running linear_sync drain'):
             with self.subTest(clause=clause):
                 self.assertIn(clause, text)
 
@@ -90,8 +91,7 @@ class TestU8Wiring(unittest.TestCase):
         fixture = t.TestSubmission()
         self.addCleanup(fixture.doCleanups)
         fixture.setUp()
-        # Restore the real delegate over the older fixture's active mock.
-        # Clock, identity and external submission remain synthetic inputs.
+        # Real activation; synthetic clock, identity and submission.
         with mock.patch.object(registry, 'd5_active', PRODUCTION_ACTIVE):
             self.assertIs(registry.d5_active(), True)
             result = fixture.submit()
@@ -149,7 +149,7 @@ class TestU8Wiring(unittest.TestCase):
             self.assertEqual(effects, ([], []))
 
     def test_helper_silently_global_is_detected(self):
-        # Import and explicit use must leave unrelated production tests active.
+        # Import and use must restore the active default.
         import importlib
         from tests import d5_test_support as support
         importlib.reload(support)
@@ -194,8 +194,7 @@ class TestU8Wiring(unittest.TestCase):
         fixture.setUp()
         entry = ready(fixture, fixture.repo, 'p', fixture.state)
         directory = Path(entry['record_dir'])
-        # No importer or conversational fallback: every required grant field
-        # comes through the real API and schema before any record is installed.
+        # Required fields reach the real API/schema before installation.
         for missing in ('expires_at', 'owner_response', 'displayed_bounds'):
             args = dict(fixture.args)
             del args[missing]
@@ -212,7 +211,6 @@ class TestU8Wiring(unittest.TestCase):
         self.assertEqual(store.read(directory), record)
         self.assertEqual(record['session_cap'], 1)
         self.assertEqual(record['confirmation']['owner_response'], fixture.args['owner_response'])
-        # An old receipt is neither new authority nor a mandate digest match.
         self.assertEqual(authority.evaluate(record, 150, b'old mandate')[0], 'mandate_changed')
 
 

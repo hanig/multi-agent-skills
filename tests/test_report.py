@@ -1071,27 +1071,5 @@ class TestASurveyVersionTheReportCannotReadSaysSo(unittest.TestCase):
                       "writes")
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestExternalReportPaths)
-inactive_class(TestBuiltFromEvidence)
-inactive_class(TestWeakEvidenceIsNotUpgraded)
-inactive_class(TestFindingsAreLabelledAsClaims)
-inactive_class(TestAcknowledgmentComesFromTheReceiptJournal)
-inactive_class(TestEvidenceOutranksCoordinatorState)
-inactive_class(TestOutputIsSafeAndSelfContained)
-inactive_class(TestPublishedReportsCannotCarryAnExploit)
-inactive_class(TestUnknownStatesAreNotProgress)
-inactive_class(TestEvidenceIntegrity)
-inactive_class(TestTheCommitteePlan)
-inactive_class(TestCoordinatorStatesAreAllClassified)
-inactive_class(TestBlockedBeforeLaunchIsVisible)
-inactive_class(TestFilesNothingDeclaredAreVisible)
-inactive_class(TestAnUnattributedReceiptDoesNotOutrankState)
-inactive_class(TestTheEnvironmentSectionReadsTheSurveyItWasGiven)
-inactive_class(TestAnUnreadableSurveyIsNotAnEmptyOne)
-inactive_class(TestASurveyVersionTheReportCannotReadSaysSo)
-
-
 if __name__ == "__main__":
     unittest.main()

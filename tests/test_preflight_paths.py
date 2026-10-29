@@ -106,6 +106,8 @@ class Base(unittest.TestCase):
             clear=True)
         state_env.start()
         self.addCleanup(state_env.stop)
+        from tests.d5_test_support import for_case
+        for_case(self)
 
 
 def _state_with_seal(uid, attempt, seal, facts=None):
@@ -676,14 +678,10 @@ class TestContainmentCoversAWorkspaceThatDoesNotExistYet(unittest.TestCase):
         self.assertEqual(state, Path(self.tmp / "state").resolve())
 
 
-# These named classes exercise legacy behavior with D5 explicitly inactive.
-from tests.d5_test_support import inactive_class
-inactive_class(TestExternalPathPolicy)
-inactive_class(TestCanonicalDirtyPredicate)
-inactive_class(TestPreflightIsTheLaunchChokepoint)
-inactive_class(TestRefusalIsCarriedNotRederived)
-inactive_class(TestARefusedAttemptCannotBeBound)
-inactive_class(TestContainmentCoversAWorkspaceThatDoesNotExistYet)
+from tests.d5_test_support import inactive_classes
+inactive_classes(
+    TestRefusalIsCarriedNotRederived, TestARefusedAttemptCannotBeBound,
+    TestContainmentCoversAWorkspaceThatDoesNotExistYet)
 
 
 if __name__ == "__main__":
