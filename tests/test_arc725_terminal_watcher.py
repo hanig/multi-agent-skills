@@ -27,10 +27,6 @@ sys.path.insert(0, str(SCRIPTS))
 import swarm as S
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestTerminalWatcherOutcome(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -652,6 +648,11 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
         self.assertFalse(external.exists())
 
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestTerminalWatcherOutcome)
 
 
 if __name__ == "__main__":
