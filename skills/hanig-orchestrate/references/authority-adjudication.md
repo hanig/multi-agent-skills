@@ -4,9 +4,9 @@ The owner-originated mandate remains the authority; this skill publishes its dec
 
 ## Confirmation boundary
 
-The startup presentation reads the complete grant, bounds, and stop lists from the current mandate rather than copying them into this skill. It is once per run, and a successor reads the durable confirmation rather than accepting a predecessor's recollection. <!-- declaration: authority.confirmation -->
+The startup presentation reads the complete grant, bounds, and stop lists from the current mandate rather than copying them into this skill. Each NEW grant needs fresh confirmation with explicit bounds and an expiry of at most 24 hours; existing session receipts are not leases. <!-- declaration: authority.confirmation -->
 
-Before confirmation the session follows the current mandate's narrow mode, whose contents remain authoritative there rather than in this skill. <!-- declaration: authority.narrow-mode -->
+Without valid grant and custody the session follows the current mandate's narrow mode, whose contents remain authoritative there rather than in this skill. <!-- declaration: authority.narrow-mode -->
 
 ## Findings
 

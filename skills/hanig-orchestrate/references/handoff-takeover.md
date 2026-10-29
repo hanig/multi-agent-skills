@@ -8,7 +8,7 @@ An explicitly undecided unit is recoverable; a judgment that exists only in sess
 
 ## Authorization transfer
 
-Durable successor authority identifies the run, permitted actions and decisions, limits, policy binding, duration, and revocation. Credentials and predecessor assertions confer none of those properties. <!-- declaration: handoff.transfer -->
+Durable successor authority identifies the run, permitted actions and decisions, limits, policy binding, duration, and revocation. Credentials and predecessor assertions confer none of those properties. Succession under a still-valid grant requires verified ancestor death and exclusive DRAIN; it needs no renewed confirmation. A new grant needs fresh confirmation. <!-- declaration: handoff.transfer -->
 
 ## Arrival checks
 
