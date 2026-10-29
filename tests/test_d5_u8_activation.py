@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -116,14 +118,54 @@ class TestU8Wiring(unittest.TestCase):
                         self.assertEqual(effects, ([], []))
                         self.assertIn('D5 active:', str(result) + out.getvalue() + err.getvalue())
 
+    def test_M6_direct_roots_use_production_activation(self):
+        from tests.test_d5_containment import cli_probe
+        for tool, commands in {'unit': ('allocate', 'bind', 'check'),
+                               'remote_verify': ('worker', 'supervise')}.items():
+            for command in commands:
+                with self.subTest(tool=tool, command=command):
+                    result = cli_probe(tool, command, None)
+                    self.assertIn('D5 active:', str(result['outcome']))
+                    self.assertEqual(result['outcome'][0], 'SystemExit')
+                    for channel in ('launches', 'writes', 'transports'):
+                        self.assertEqual(result[channel], [], result)
+                    self.assertTrue(result['protected_unchanged'])
+
+    def test_M6_outbox_helpers_and_merge_receipt_use_production_activation(self):
+        from tests import test_d5_u6_tracker_reject as t
+        import swarm_evidence
+        for route in t.ENTRIES:
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as tmp:
+                case = t.OutboxFixture(tmp)
+                before = case.tree()
+                with no_effects() as effects:
+                    with self.assertRaisesRegex(t.SO.OutboxError, 'D5 active:'):
+                        case.call(route)
+                    self.assertEqual(effects, ([], []))
+                self.assertEqual(case.tree(), before)
+        with no_effects() as effects:
+            with self.assertRaisesRegex(t.SO.OutboxError, 'D5 active:'):
+                swarm_evidence.admit_merge('unused', 'u', 'a' * 40)
+            self.assertEqual(effects, ([], []))
+
     def test_helper_silently_global_is_detected(self):
         # Import and explicit use must leave unrelated production tests active.
         import importlib
         from tests import d5_test_support as support
         importlib.reload(support)
+        def child_active():
+            code = ('import sys; sys.path.insert(0, sys.argv[1]); '
+                    'import d5_activation; print(d5_activation.d5_active())')
+            result = subprocess.run([sys.executable, '-c', code,
+                str(ROOT / 'skills/hanig-swarm/scripts')],
+                capture_output=True, text=True, check=True, timeout=30)
+            return result.stdout.strip()
+        self.assertEqual(child_active(), 'True')
         self.assertIs(activation.d5_active(), True)
         with support.inactive():
             self.assertIs(activation.d5_active(), False)
+            self.assertEqual(child_active(), 'False')
+        self.assertEqual(child_active(), 'True')
         self.assertIs(activation.d5_active(), True)
         self.assertIs(registry.d5_active(), True)
 
