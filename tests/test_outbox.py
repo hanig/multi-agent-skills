@@ -3406,7 +3406,7 @@ inactive_classes(
     TestNothingClosesOnASelfReport, TestTheTrackerIsNeverAuthoritative, TestThePipelinePredicate,
     TestTheCodePredicate, TestGatedPromotion, TestTheThreeWeakPointsIFlagged, TestDirectoryOutputs,
     TestNoStateChangeEscapesTheOutbox, TestRound2ReviewFindings, TestADryRunCannotWedgeARealProject,
-    TestConcurrencyDoesNotDeadlock, TestRetryBudgetBehaviour, TestClosureAuthorityIsFixedByKind,
+    TestConcurrencyDoesNotDeadlock, TestLiveConcurrencyIsBounded, TestRetryBudgetBehaviour, TestClosureAuthorityIsFixedByKind,
     TestACodeUnitIsNotDoneUntilMerged, TestAStalledDAGIsDiagnosable, TestAPersistedDoneIsCorrected)
 
 
