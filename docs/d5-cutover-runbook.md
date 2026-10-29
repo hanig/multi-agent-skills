@@ -5,7 +5,8 @@ Title: D5 preparatory cutover runbook
 Purpose: Bound the U7 race evidence and list the human checks and owner decisions before U8.
 
 The owner's 2026-10-28 "Drop U5, shrink U7" decision drops U5 because U6
-closes row 75. U8 remains owner-controlled; [the mandate](orchestrator-mandate.md) is unchanged.
+closes row 75. Only the owner merges U8, which couples [the amended mandate](orchestrator-mandate.md)
+with activation. Merge launch remains closed.
 
 ## Quiescence and human inventory
 
@@ -41,8 +42,9 @@ until a separately authorized post-D5 unit handles them.
 refusing, a prior unit must deliver per-item lease authority (the original U5
 M1-M5 scope) AND migration or disposition of the pre-D5 queue. Activation leaves U6 in place.
 
-Preparatory rollback is to leave `merge_launch_admitted()` **False** and **not
-merge U8**. Preserve unresolved records. This is not a post-activation cancellation procedure.
+Rollback: do not merge U8, or revert its merge. `merge_launch_admitted()`
+remains **False**. Preserve unresolved records; rollback is not cancellation
+or permission to replay uncertain effects.
 
 ## What the seven scenarios measure
 
@@ -92,8 +94,7 @@ context-compaction testing.
   and context-compaction behavior. 
 - gh executable identity and integrity are not bound; a same-UID actor can
   replace the executable or its path. No hashing or path guard is supplied.
-  The refusal text still calls binding a U7 obligation; the owner decision
-  carries it to U8 as a non-claim.
+  U8 retains closed merge admission because that obligation is undelivered.
 - The carried OD5 tracker lease precondition is vacuous only while U6 refuses.
   Tracker sends have no per-item lease fencing. Separately, the merge caller's
   OD5 obligation to hold the coordinator lease throughout submit still applies:
@@ -111,7 +112,9 @@ context-compaction testing.
   admission-refusal wording before admitting merge launch.
 - Review the lease non-claims and keep P1 binding on every future U6 lift.
 - Check that **U6's refusal is still in place at activation** on every row-75
-  route; U8 must not enable tracker enqueue, send, drain or acknowledgment writes.
+  route that currently refuses; U8 must not lift those refusals. Direct
+  linear_sync mutators are an explicit enforcement gap (ARC-3766-OD1a),
+  measured separately; activation is not a general tracker fence.
   Review parked items separately.
 - Review R2's unresolved pre-launch gap and the simulated-death evidence limits.
   Confirm quiescence, prepared-state eligibility and candidate checks on U8.
