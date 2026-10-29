@@ -122,10 +122,6 @@ with mock.patch.object(dt, 'datetime', Clock), mock.patch.object(time, 'strftime
         return SO.read_outbox(self.state)
 
 
-from tests.d5_test_support import inactive_class
-
-
-@inactive_class
 class TestOperatorTerminal(StopFixture, unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -550,7 +546,6 @@ class StoppedDrainFixture(StopFixture, DrainCase):
             'issues': [{'unit': u, 'identifier': 'ARC-1'} for u in ('old', 'successor')]}))
 
 
-@inactive_class
 class TestStoppedDrain(StoppedDrainFixture):
     def test_shared_issue_live_start_then_all_abandoned(self):
         self.shared_issue()
@@ -731,6 +726,12 @@ class TestStoppedDrain(StoppedDrainFixture):
         self.assertIn('ABANDONED: old: No longer needed', self.stdout)
         self.assertIn('SUPERSEDED: replaced: Replaced implementation (successor: successor)', self.stdout)
         self.assertIn('RUNNING: working\n', self.stdout)
+
+
+# These named classes exercise legacy behavior with D5 explicitly inactive.
+from tests.d5_test_support import inactive_class
+inactive_class(TestOperatorTerminal)
+inactive_class(TestStoppedDrain)
 
 
 if __name__ == '__main__':
