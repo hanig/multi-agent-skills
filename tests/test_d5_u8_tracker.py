@@ -2,6 +2,7 @@
 from contextlib import ExitStack, redirect_stdout, redirect_stderr
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -83,9 +84,14 @@ class TestTrackerMatrix(unittest.TestCase):
                         if active:
                             self.assertIn('D5 active:', case.stdout + case.stderr)
                             case.fake.mutations.clear()
-                            self.assertEqual(case.drain(), 3)
-                            self.assertGreater(len(case.fake.mutations), 0)
+                            repeated = case.drain()
+                            rows.append(dict(active=active, route='drain-repeat',
+                                             exit=repeated, mutations=len(case.fake.mutations),
+                                             receipts=len(case.receipts())))
+                            self.assertEqual(repeated, 3)
+                            self.assertEqual(len(case.fake.mutations), 0)
                             self.assertEqual(case.receipts(), [])
+                            self.assertIn('D5 active:', case.stdout + case.stderr)
         print('U8 tracker transport matrix: ' + json.dumps(rows, sort_keys=True))
 
     def test_swarm_cli_tracker_routes(self):
@@ -96,7 +102,8 @@ class TestTrackerMatrix(unittest.TestCase):
                 with self.subTest(active=active, route=route), tempfile.TemporaryDirectory() as tmp:
                     case = outbox.OutboxFixture(tmp)
                     plan = Path(tmp) / 'plan.json'
-                    plan.write_text(json.dumps({'name': 'fixture', 'units': []}))
+                    plan.write_text(json.dumps({'name': 'fixture', 'units': [dict(
+                        id='u', kind='slurm', command='true', outputs=['out'], runtime='none')]}))
                     common = ['--state-dir', str(case.state_dir)]
                     argv = {
                         'outbox': ['outbox', '--json'],
@@ -109,6 +116,7 @@ class TestTrackerMatrix(unittest.TestCase):
                     with ExitStack() as stack:
                         stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=active))
                         stack.enter_context(mock.patch.object(sys, 'argv', ['swarm.py'] + argv))
+                        stack.enter_context(mock.patch.dict(os.environ, {'PATH': str(case.tools)}))
                         stack.enter_context(mock.patch.object(S.CP, 'resolve_paths', return_value=(
                             case.state_dir, Path(tmp) / 'runs', [])))
                         stack.enter_context(mock.patch.object(S.SR, 'apply_agent_resolution'))
