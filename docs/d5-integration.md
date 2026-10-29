@@ -79,7 +79,9 @@ locking, consent rules and predecessor archive. Two initial grants that both
 observe no record select `store.create`; one refuses. Grant mutations also
 hold a permanent `grant.lock` with a nonblocking exclusive lock, so a caller
 seeing a newly published record while its writer still holds the store lock
-refuses instead of waiting to replace it. Sequential replacement stays allowed.
+refuses instead of waiting to replace it. The public grant API requires a later
+confirmation timestamp for each replacement, including unchanged bounds;
+blank confirmation fields refuse. Exact nonblank receipt bytes are retained.
 Revocation requires registration and uses the store's terminal transition.
 
 `register`, `grant` and `revoke` now reach their prepared checks through the

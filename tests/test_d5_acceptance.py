@@ -11,7 +11,7 @@ Trusted local participants, stable record/lock inodes, registered checkout at
 its original path, explicit fixture adapters, and managed exec children.
 Host identity, activation and time are synthetic in active scenarios; registry,
 store, ledger, admission, protocol locks and subprocess consumers are real.
-The default-inactive checks restore the unpatched activation function. R1 uses
+The inactive checks use an explicit fixture shared with their child. R1 uses
 authority.start.lock / authority.drain.lock and may repair owner modes to 0600;
 STATE remains store-owned authority.lock. Events/pipes establish ordering;
 nonblocking flock probes establish exclusion. Timeouts are watchdogs.
@@ -65,7 +65,7 @@ from tests import test_d5_process as p
 import d5_custody as custody
 import d5_install as install
 
-DEFAULT_ACTIVE = lambda: False  # Explicit pre-cutover fixture, not the production default.
+from tests.d5_test_support import inactive
 PEER = str(Path(__file__).parent / 'fixtures/d5/r10_peer.py')
 
 
@@ -77,7 +77,7 @@ class TestAcceptance(unittest.TestCase):
     finish = p.TestProcess.finish
 
     def setUp(self):
-        self.assertIs(DEFAULT_ACTIVE(), False)
+        self.assertIs(t.registry.d5_active(), True)
         self.eq(p.process.DESIGNATED_BOOTSTRAPS, frozenset())
         self.c = t.TestSubmission()
         self.addCleanup(self.c.doCleanups)
@@ -352,7 +352,7 @@ class TestAcceptance(unittest.TestCase):
             (lambda: p.process.protected_spawn(c.directory, -1, p.BOOTSTRAP),
              t.authority.AuthorityError, 'D5 protected bootstrap is not designated')]
         before = self.snapshot()
-        with mock.patch.object(t.registry, 'd5_active', DEFAULT_ACTIVE):
+        with inactive(t.registry):
             self.assertIs(t.registry.d5_active(), False)
             self.eq(p.process.DESIGNATED_BOOTSTRAPS, frozenset())
             for index, (call, kind, message) in enumerate(table):
