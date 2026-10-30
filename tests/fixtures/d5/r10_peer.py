@@ -11,13 +11,14 @@ import d5_effect_child as child
 
 
 def inactive(directory, fd):
-    assert t.registry.d5_active() is False
+    state = t.ledger.readiness.installation(directory)["state_dir"]
+    assert t.registry.d5_active(state) is False
     boundary = t.DeterministicBoundary()
     before = os.get_inheritable(fd)
     with mock.patch.object(t.protocol, 'pin', wraps=t.protocol.pin) as pin, \
             mock.patch.object(os, 'dup', wraps=os.dup) as duplicate:
         try:
-            child.bootstrap(fd, directory, 'fixture', 'p', 'fixture',
+            child.bootstrap(fd, directory, 'fixture', 'p', state,
                 grant_id='a' * 32, session_id='native', anchor=t.ANCHOR, generation=1,
                 operation=t.submission.Operation('inactive', 'fixture', b'{}', b'local'),
                 boundary=boundary)

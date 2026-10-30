@@ -28,7 +28,7 @@ import d5_host as host
 import d5_lease as lease
 import d5_protocol_locks as protocol
 import d5_registry as registry
-from tests.fixtures.d5.ready import ready, missing_installation, classification_only
+from tests.fixtures.d5.ready import ready, missing_installation, classification_only, InstallationWitnesses
 from tests.test_d5_locks import isolate_pool
 
 MANDATE = b"fixture mandate\r\n\xff"
@@ -78,6 +78,8 @@ class TestSubmission(unittest.TestCase):
         self.clock = self.stack.enter_context(mock.patch.object(admission.time, "time", return_value=150))
         self.args = self.repo, "p", self.state_dir
         self.entry = ready(self, *self.args)
+        self.installation = InstallationWitnesses(self.entry)
+        self.addCleanup(self.installation.close)
         self.directory = Path(self.entry["record_dir"])
         self.scope = dict(plans=["p"], repositories=["r"], actions=["write"], trackers=["t"])
         lease.grant(*self.args, issued_at=100, confirmed_at=100, expires_at=200,
@@ -604,7 +606,7 @@ class TestSubmission(unittest.TestCase):
                     self.eq([c[0] for c in c.boundary.calls], calls)
                     self.eq([r["state"] for r in c.rows()], [] if state is None else [state])
                     self.eq(c.probe("drain"), drain)
-                    c.active.return_value = True
+                    c.installation.present = True
                     if attempts:
                         if state in ("not_submitted", "completed"):
                             with self.refuse(ledger.EffectError, ledger.CONFLICT):

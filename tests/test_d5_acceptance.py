@@ -65,7 +65,7 @@ from tests import test_d5_process as p
 import d5_custody as custody
 import d5_install as install
 
-from tests.d5_test_support import inactive
+from tests.fixtures.d5.ready import missing_installation
 PEER = str(Path(__file__).parent / 'fixtures/d5/r10_peer.py')
 
 
@@ -77,7 +77,7 @@ class TestAcceptance(unittest.TestCase):
     finish = p.TestProcess.finish
 
     def setUp(self):
-        self.assertIs(t.registry.d5_active(), True)
+        self.assertIs(t.registry.d5_active(c.state_dir), True)
         self.eq(p.process.DESIGNATED_BOOTSTRAPS, frozenset())
         self.c = t.TestSubmission()
         self.addCleanup(self.c.doCleanups)
@@ -348,12 +348,12 @@ class TestAcceptance(unittest.TestCase):
                 owner_response='fixture', displayed_bounds='fixture')]
         table = [(call, t.authority.AuthorityError, 'D5 is inactive') for call in ordinary]
         table += [(call, t.authority.AuthorityError, 'D5 is not active') for call in routed]
-        table += [(lambda: t.completion.bind(None), t.ledger.EffectError, 'D5 inactive'),
+        table += [(lambda: t.completion.bind(None), t.ledger.EffectError, t.completion.MISMATCH),
             (lambda: p.process.protected_spawn(c.directory, -1, p.BOOTSTRAP),
              t.authority.AuthorityError, 'D5 protected bootstrap is not designated')]
         before = self.snapshot()
-        with inactive(t.registry):
-            self.assertIs(t.registry.d5_active(), False)
+        with missing_installation(c.entry):
+            self.assertIs(t.registry.d5_active(c.state_dir), False)
             self.eq(p.process.DESIGNATED_BOOTSTRAPS, frozenset())
             for index, (call, kind, message) in enumerate(table):
                 with self.subTest(entry=index), \
@@ -393,7 +393,7 @@ class TestAcceptance(unittest.TestCase):
         attempt = t.ledger.prepare(*c.args, **dict(request, correlation={'request_id': 'uncertain'}))
         cap, uncertain = t.completion.bind(receipt), t.completion.bind(attempt)
         before = self.snapshot()
-        with inactive(t.registry), \
+        with missing_installation(c.entry), \
                 mock.patch.object(t.protocol, 'pin', wraps=t.protocol.pin) as pin:
             for call in (lambda: cap.complete(t.OK), uncertain.uncertain):
                 with self.assertRaisesRegex(t.ledger.EffectError, '^D5 inactive$'):

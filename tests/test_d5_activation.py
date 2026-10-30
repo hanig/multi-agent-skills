@@ -160,6 +160,24 @@ class TestD5Activation(unittest.TestCase):
                     self.assertEqual(p.returncode, 0, p.stderr)
                     self.assertEqual(p.stdout.strip(), str(activation.d5_active(directory)))
 
+    def test_implicit_lookup_matches_operated_state(self):
+        """PD2 / implicit-lookup-differs: early lookup must name the operated state."""
+        import coordinator_paths as paths
+        repo, other = self.root / 'repo', self.root / 'other'
+        for directory in (repo, other):
+            subprocess.run(['git', 'init', str(directory)], check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        nested = repo / 'nested'
+        nested.mkdir()
+        for cwd in (repo, nested):
+            for xdg in (self.root / 'xdg', repo, other):
+                with self.subTest(cwd=cwd.name, xdg=xdg.name), \
+                        mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(xdg)}), \
+                        mock.patch.object(Path, 'home', return_value=self.root / 'home'):
+                    plan = {'units': [{'repo': str(other)}]}
+                    operated = paths.resolve_paths(plan=plan, cwd=cwd)[0]
+                    self.assertEqual(paths.pre_git_default_state(cwd), operated)
+
     def test_no_tracked_readiness(self):
         names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).split(b'\0')
         forbidden = {readiness.MARKER, readiness.INSTALLATION, readiness.SENTINEL}
