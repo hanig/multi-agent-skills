@@ -225,8 +225,8 @@ class BudgetIssueLinear(BudgetPaging, IssueLinear):
 
 
 class IssueCase(AuditCase):
-    def prepare_fixture(self):
-        super().prepare_fixture()
+    def setUp(self):
+        super().setUp()
         self.patch.stop()
         self.fake = IssueLinear()
         patch = mock.patch.object(API, 'transport', self.fake)

@@ -30,7 +30,7 @@ import child_environment as CE
 POLICY = "verification-execution.json"
 BUNDLE_REF = "refs/heads/verification-candidate"
 FILES = ("candidate.bundle", "request.json", "remote_verify.py", "verify.py",
-         "child_environment.py", "d5_activation.py")
+         "child_environment.py", "d5_activation.py", "d5_installation.py")
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
             "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED"}
 CLEANUP_RETRY_SECONDS = 20
@@ -634,7 +634,7 @@ def supervise(stage):
         script = stage / "job.sh"
         script.write_text("#!/bin/sh\nexec " + shlex.join([
             remote["python"], str(stage / "remote_verify.py"),
-            "--worker", str(stage)]) + "\n")
+            "--worker", str(stage), "--state-dir", request.get("state_dir", "")]) + "\n")
         rc, out, err = _command([
             "sbatch", "--parsable", "--no-requeue", "--job-name=" + slurm_job_name(request),
             "--partition=" + cfg["partition"],
@@ -671,7 +671,7 @@ def supervise(stage):
 
 # The fixed bootstrap reads only this allowlist, never tar-supplied paths/modes.
 # It executes the coordinator harness outside the transferred candidate tree.
-BOOTSTRAP = """import os, pathlib, sys, tarfile
+BOOTSTRAP = """import json, os, pathlib, sys, tarfile
 stage = pathlib.Path(sys.argv[1])
 stage.mkdir(parents=False, exist_ok=False)
 with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:
@@ -684,7 +684,9 @@ with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as archive:
             import shutil
             shutil.copyfileobj(source, dest)
     if seen != set(%r): raise SystemExit('incomplete verification transfer')
-os.execv(sys.executable, [sys.executable, str(stage / 'remote_verify.py'), '--supervise', str(stage)])
+request = json.loads((stage / 'request.json').read_text())
+os.execv(sys.executable, [sys.executable, str(stage / 'remote_verify.py'), '--supervise', str(stage),
+                         '--state-dir', request.get('state_dir', '')])
 """ % (FILES, FILES)
 
 
@@ -1420,6 +1422,10 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
     """
     if state_dir is None:
         raise ValueError("remote verification requires coordinator evidence storage")
+    import d5_activation
+    if d5_activation.d5_active(state_dir):
+        raise ValueError("D5 active: remote verification is refused before staging; "
+                         "inspect d5_install readiness")
     if journal_entries is None:
         raise ValueError("remote verification requires coordinator journal entries")
     with binding_lock(state_dir, unit, basis) as path:
@@ -1451,7 +1457,8 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
             launch_id = uuid.uuid4().hex
             stage = remote["workdir_root"].rstrip("/") + "/verify-" + launch_id
             request = {"basis": basis, "checks": checks, "verification_host": remote,
-                       "timeout": timeout, "launch_id": launch_id}
+                       "timeout": timeout, "launch_id": launch_id,
+                       "state_dir": str(state_dir)}
             run = {"launch_id": launch_id, "stage": stage, "verification_host": remote,
                    "request": request, "receipts": {}, "reconciled": False, "published": False,
                    "witness_required": True}
@@ -1733,18 +1740,19 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--worker")
     group.add_argument("--supervise")
+    parser.add_argument("--state-dir", default=None, help="Originating coordinator state; audit-only on a remote host")
     args = parser.parse_args()
     previous_bytecode_setting = sys.dont_write_bytecode
     try:
         sys.dont_write_bytecode = True
         import d5_activation
-        active = d5_activation.d5_active()
+        active = args.state_dir is not None and d5_activation.d5_active(args.state_dir)
     except Exception as exc:
         sys.exit("D5 activation unavailable: " + type(exc).__name__)
     finally:
         sys.dont_write_bytecode = previous_bytecode_setting
     if active:
-        sys.exit("D5 active: remote verification is refused before first effect")
+        sys.exit("D5 active: remote verification is refused before first effect; inspect d5_install readiness")
     stage = Path(args.worker or args.supervise)
     if args.worker:
         return worker(stage)

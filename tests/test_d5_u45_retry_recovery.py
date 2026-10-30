@@ -12,7 +12,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.d5_test_support import inactive
 from tests import test_merge_unit as legacy
 from tests import test_d5_submission as t
 from tests.test_d5_u4_0b1_issuance import no_effects
@@ -39,10 +38,9 @@ def inactive_script_capture(script=None):
         c.env['HANIG_ORCHESTRATE_DIR'] = str(legacy.OPERATOR.parent.parent)
         c.env['PYTHONPATH'] = str(legacy.OPERATOR.parent)
         # Python may report a resolved launcher path in its child process.
-        with inactive(environ=c.env) as environment:
-            child_python = subprocess.check_output(
-                [sys.executable, '-c', 'import sys; print(sys.executable)'],
-                env=environment, text=True).strip()
+        child_python = subprocess.check_output(
+            [sys.executable, '-c', 'import sys; print(sys.executable)'],
+            env=environment, text=True).strip()
         before = tree_bytes(c.state_dir)
         result = c.invoke()
         c.assertEqual(result.returncode, 0, result.stdout + result.stderr)

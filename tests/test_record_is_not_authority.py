@@ -1072,9 +1072,5 @@ class TestAWithdrawnSealDoesNotLingerAsAuthority(unittest.TestCase):
         self.assertIn("claim by", why)
 
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(TestTheSealActuallyTravels, TestReceiptProvenanceIsActuallyRecorded, TestOnlyAReceiptTheCheckReportedWritingIsAttested)
-
-
 if __name__ == "__main__":
     unittest.main()

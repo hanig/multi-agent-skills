@@ -117,7 +117,7 @@ class Result:
 def submit(checkout, plan_id, state_dir, *, grant_id, session_id, anchor,
            generation, operation, boundary):
     """Admit one operation; refuse ambient START."""
-    if not registry.d5_active():
+    if not registry.d5_active(state_dir):
         raise AuthorityError("D5 is inactive")
     ready = readiness.require(state_dir)
     if not isinstance(boundary, Boundary):

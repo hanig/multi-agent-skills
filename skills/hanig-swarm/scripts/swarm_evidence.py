@@ -745,7 +745,7 @@ def admit_merge(state_dir, unit, produced, expect_repo=None, repo=None,
     Coordinator closure consumption remains outside that restricted profile;
     neither a legacy attestation nor a D5 receipt enables DONE here.
     """
-    if D5.d5_active():
+    if D5.d5_active(state_dir):
         raise OutboxError("D5 active: merge receipt consumption is outside the supported merge profile")
     if not produced:
         return None, ("this attempt has no produced commit, so there is "
@@ -863,8 +863,9 @@ def _authority_result_sink():
 
 
 def _check(unit_dir, launch_facts=None, artifact_basis=None,
-           isolation_facts=None, isolation_required=False):
-    argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir)]
+           isolation_facts=None, isolation_required=False, *, state_dir):
+    argv = [sys.executable, str(_HERE / "unit.py"), "check", str(unit_dir),
+            "--state-dir", str(state_dir)]
     if U.SACCT_UNAVAILABLE:
         argv.append("--skip-sacct")
     # The separate judge receives the complete authority snapshot directly

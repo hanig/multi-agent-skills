@@ -32,8 +32,9 @@ import d5_registry as registry
 import d5_readiness as readiness
 
 
-def _active():
-    if not registry.d5_active():
+def _active(directory):
+    installed = readiness.installation(directory)
+    if not registry.d5_active(installed["state_dir"]):
         raise store.AuthorityError("D5 is inactive")
 
 
@@ -52,7 +53,6 @@ def _bound(path, cwd):
 
 @contextmanager
 def _installation(directory, mandate_path=None):
-    _active()
     paths = [os.fspath(directory)]
     if mandate_path is not None:
         paths.append(os.fspath(mandate_path))
@@ -61,9 +61,10 @@ def _installation(directory, mandate_path=None):
     cwd = os.getcwdb() if any(not os.path.isabs(p) for p in paths) else b""
     directory = _bound(paths[0], cwd)
     mandate_path = _bound(paths[1], cwd) if len(paths) == 2 else None
+    _active(directory)
     with protocol.pin(directory) as record:
         with record.drain(shared=False), record.start():
-            _active()
+            _active(directory)
             yield directory, _anchor(), mandate_path
 
 
@@ -75,16 +76,15 @@ def install_initial(directory, record):
 
 def replace_authority(directory, record):
     """Apply the store's replacement rules to the freshly read predecessor."""
-    _active()
     directory = os.fsdecode(directory)
     if ".." in directory.split(os.sep):
         raise store.AuthorityError("D5 locator contains ..")
     directory = _bound(directory, os.getcwdb() if not os.path.isabs(directory) else b"")
     # Resolve the state binding by local IO before any record lock acquisition.
-    installed = readiness._validated(readiness._read(Path(directory) / readiness.INSTALLATION))
+    installed = readiness.installation(directory)
     with readiness.installer_lease(installed["state_dir"]) as state_dir:
         # Reload under the lease; an absent marker permits installer recovery.
-        installed = readiness._validated(readiness._read(Path(directory) / readiness.INSTALLATION))
+        installed = readiness.installation(directory)
         readiness._require(installed["state_dir"] == str(state_dir) and
                            Path(installed["record_dir"]).samefile(directory),
                            "replacement installation binding mismatch")

@@ -34,6 +34,7 @@ import stat
 import d5_admission as admission
 import d5_locks as locks
 import d5_registry as registry
+import d5_readiness as readiness
 
 
 class EffectError(ValueError):
@@ -53,8 +54,14 @@ def _require(condition, message=INVALID):
         raise EffectError(message)
 
 
-def _active():
-    _require(registry.d5_active(), "D5 inactive")
+def _active(state_dir):
+    readiness.refuse_broken(state_dir)
+    _require(registry.d5_active(state_dir), "D5 inactive")
+
+
+def _handle_active(handle):
+    _check_handle(handle)
+    _active(readiness.installation(handle._directory)["state_dir"])
 
 
 def _hex(value, width):
@@ -269,7 +276,7 @@ def _verifier(effect_id, binding, secret):
 
 
 def prepare(checkout, plan_id, state_dir, *, record_id, custody, kind, scope, correlation):
-    _active()
+    _active(state_dir)
     # Refuse before opening/creating the ledger, even through this lower seam.
     selected = _recording_authority({"kind": kind})
     _require(selected == "ledger")
@@ -311,7 +318,7 @@ def _checked(handle):
 
 def _classify(attempt, state):
     """Internal; exceptions mean unknown. Caller holds DRAIN."""
-    _active()
+    _handle_active(attempt)
     _require(type(attempt) is Attempt)
     if isinstance(state, BaseException):
         state = "unknown"
@@ -339,7 +346,7 @@ def _confirm(fd, name):
 
 
 def complete(receipt, outcome):
-    _active()
+    _handle_active(receipt)
     _require(type(receipt) is not Attempt, NOT_SUBMITTED)
     _require(type(receipt) is Receipt)
     _outcome(outcome)
@@ -361,7 +368,7 @@ def unresolved(checkout, plan_id, state_dir):
     Submitted entries are included; terminal entries remain on disk. Unreadable
     entries produce file/error diagnostics requiring reconciliation; bytes stay put.
     """
-    _active()
+    _active(state_dir)
     registration = registry.lookup(checkout, plan_id, state_dir)
     _require(registration is not None)
     result = []

@@ -918,14 +918,5 @@ class TestDoneCodeDrain(unittest.TestCase):
                              ["open_pr", "close"])
             self.assertNotEqual(intents[0]["key"], intents[1]["key"])
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TestStatusIsDerivedNotStored, TestReceiptAdmissionIsAtomic, TestJournalDurability,
-    TestReceiptsRequireAKnownIntent, TestReviewFindings, TestTheWireValueCarriesTheWeakness,
-    TestRoundThreeFindings, TestTheRefusalCannotBeBypassed, TestARefIsRequiredWhereItIsWritten,
-    TestAppendingAfterACrashDoesNotDestroyTwoRecords, TestHealingHappensUnderTheLock,
-    TestDoneCodeDrain)
-
-
 if __name__ == "__main__":
     unittest.main()

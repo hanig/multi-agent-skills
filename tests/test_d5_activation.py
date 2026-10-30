@@ -1,5 +1,8 @@
-"""Cold D5 activation and the existing registry patch point."""
+"""Installation-derived activation, broken-state corruption and real CLI guards."""
 import ast
+from contextlib import ExitStack
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -8,132 +11,160 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skills/hanig-swarm/scripts"
-SOURCE = SCRIPTS / "d5_activation.py"
-sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
+SCRIPTS = ROOT / 'skills/hanig-swarm/scripts'
+sys.path.insert(0, str(ROOT / 'skills/hanig-orchestrate/scripts'))
 import d5_registry as registry
 import d5_activation as activation
-
-
-# Setup happens before the observation window, in an isolated interpreter.
-# An audit hook covers source/cache reads and rejects other audited effects.
-# The import wrapper also catches imports of already-cached modules.
-COLD_PROBE = r'''
-import builtins
-import importlib.util
-import os
-import sys
-
-directory = sys.argv[1]
-source = os.path.join(directory, "d5_activation.py")
-cache = importlib.util.cache_from_source(source)
-sys.path[:] = [directory]
-before_modules = dict(sys.modules)
-before_path = list(sys.path)
-opened = []
-observing = True
-real_import = builtins.__import__
-
-def checked_import(name, globals=None, locals=None, fromlist=(), level=0):
-    if globals and globals.get("__name__") == "d5_activation":
-        raise AssertionError("activation imported " + name)
-    return real_import(name, globals, locals, fromlist, level)
-
-def audit(event, args):
-    if not observing:
-        return
-    if event == "open":
-        path, mode, flags = args
-        assert path in (source, cache), ("unexpected open", path)
-        assert not flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC
-                            | os.O_APPEND), ("write", path)
-        opened.append(path)
-    else:
-        assert event in {"import", "os.listdir", "compile", "exec", "marshal.loads"}, event
-
-builtins.__import__ = checked_import
-sys.addaudithook(audit)
-try:
-    import d5_activation
-    after_modules = dict(sys.modules)
-    after_path = list(sys.path)
-    assert d5_activation.d5_active() is True, "activation is not True"
-finally:
-    observing = False
-    builtins.__import__ = real_import
-
-assert set(after_modules) - set(before_modules) == {"d5_activation"}
-assert all(after_modules.get(name) is module for name, module in before_modules.items())
-assert after_path == before_path, "sys.path changed"
-assert sys.path == before_path, "predicate changed sys.path"
-assert sys.modules == after_modules, "predicate changed sys.modules"
-assert opened, "probe did not observe the source/cache loader"
-print("cold-import: OK")
-'''
-
-
-def cold_probe(directory):
-    return subprocess.run([sys.executable, "-I", "-S", "-B", "-c", COLD_PROBE,
-                           str(directory)], capture_output=True, text=True, timeout=30)
+import d5_readiness as readiness
+from tests.fixtures.d5.ready import ready_installation
 
 
 class TestD5Activation(unittest.TestCase):
-    def test_cold_import(self):
-        result = cold_probe(SCRIPTS)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout, "cold-import: OK\n")
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.empty = self.root / 'empty'
+        self.empty.mkdir()
 
-    def test_cold_import_without_siblings(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            (Path(temporary) / SOURCE.name).write_bytes(SOURCE.read_bytes())
-            result = cold_probe(temporary)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    def publish(self):
+        self.entry = ready_installation(self.root / 'installed')
+        return Path(self.entry['state_dir'])
 
-    def test_only_a_function_with_no_imports_or_definition_effects(self):
-        tree = ast.parse(SOURCE.read_text())
+    def test_activation_follows_installation(self):
+        self.assertFalse(activation.d5_active(self.empty))
+        state = self.publish()
+        self.assertTrue(activation.d5_active(state))
+        self.assertEqual(readiness.state(state), readiness.READY)
+        self.assertEqual(readiness.state(self.empty), readiness.NOT_INSTALLED)
+
+    def test_readiness_absent_is_inactive_and_legacy_proceeds(self):
+        p = subprocess.run([sys.executable, '-B', str(SCRIPTS / 'unit.py'),
+             'allocate', '--state-dir', str(self.empty), '--root', str(self.root / 'runs'),
+             '--task', 'legacy', '--kind', 'pipeline', '--output', 'out'],
+             capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(Path(p.stdout.strip()).is_dir())
+
+    def test_constant_activation_and_state_dir_isolation(self):
+        state = self.publish()
+        for directory, expected in [(self.empty, False), (state, True)] * 3:
+            self.assertIs(activation.d5_active(directory), expected)
+            self.assertIs(registry.d5_active(directory), expected)
+
+    def test_signature_requires_state_dir(self):
+        for fn in (activation.d5_active, registry.d5_active):
+            with self.assertRaises(TypeError):
+                fn()
+            with self.assertRaises(ValueError):
+                fn(None)
+
+    def test_no_cache(self):
+        state = self.root / 'installed' / 'state'
+        self.assertFalse(activation.d5_active(state))
+        self.publish()
+        self.assertEqual(readiness.state(state), readiness.READY)
+        with readiness.installer_lease(state):
+            readiness.withdraw(state)
+        self.assertTrue(activation.d5_active(state))
+        self.assertEqual(readiness.state(state), readiness.BROKEN)
+        ready_installation(self.root / 'installed', self.entry)
+        self.assertEqual(readiness.state(state), readiness.READY)
+
+    def test_broken_is_active_and_refuses(self):
+        for corruption in ('deleted', 'truncated', 'schema', 'binding', 'symlink', 'mid-publish'):
+            with self.subTest(corruption=corruption):
+                state = self.publish()
+                marker = state / readiness.MARKER
+                if corruption in ('deleted', 'mid-publish'):
+                    marker.unlink()
+                elif corruption == 'truncated':
+                    marker.write_text('{')
+                elif corruption == 'symlink':
+                    marker.unlink()
+                    marker.symlink_to(Path(self.entry['record_dir']) / readiness.INSTALLATION)
+                else:
+                    value = json.loads(marker.read_text())
+                    value['schema_version' if corruption == 'schema' else 'generation'] = 2
+                    marker.write_text(json.dumps(value))
+                self.assertTrue(activation.d5_active(state))
+                self.assertEqual(readiness.state(state), readiness.BROKEN)
+                with readiness.installer_lease(state), mock.patch.object(registry, '_git') as git:
+                    with self.assertRaisesRegex(registry.AuthorityError, 'd5_install'):
+                        registry.register(self.root, 'p', state)
+                    git.assert_not_called()
+                # Real publication repairs every corruption, including symlinks.
+                ready_installation(self.root / 'installed', self.entry)
+
+    def test_registry_requires_readiness(self):
+        state = self.publish()
+        (state / readiness.MARKER).unlink()
+        with readiness.installer_lease(state), mock.patch.object(registry, '_git') as git:
+            with self.assertRaisesRegex(registry.AuthorityError, 'd5_install'):
+                registry.register(self.root, 'p', state)
+            git.assert_not_called()
+
+    def test_publish_interruption_order(self):
+        state = self.publish()
+        real_publish = readiness.publish
+        calls = []
+        def interrupted(path, value):
+            real_publish(path, value)
+            calls.append(path.name)
+            self.assertEqual(readiness.state(state), readiness.BROKEN)
+            raise InterruptedError('synthetic interruption after first publication')
+        with readiness.installer_lease(state), mock.patch.object(readiness, 'publish', interrupted):
+            with self.assertRaises(InterruptedError):
+                readiness.publish_installation(self.entry)
+        self.assertEqual(calls, [readiness.SENTINEL])
+        self.assertTrue(activation.d5_active(state))
+
+    def test_single_implementation(self):
+        source = Path(activation.__file__).read_text()
+        tree = ast.parse(source)
         self.assertEqual(len(tree.body), 1)
-        function = tree.body[0]
-        self.assertIsInstance(function, ast.FunctionDef)
-        self.assertEqual(function.name, "d5_active")
-        self.assertEqual(function.decorator_list, [])
-        self.assertEqual(ast.dump(function.args), ast.dump(ast.arguments(
-            posonlyargs=[], args=[], vararg=None, kwonlyargs=[], kw_defaults=[],
-            kwarg=None, defaults=[])))
-        self.assertIsNone(function.returns)
-        self.assertEqual(getattr(function, "type_params", []), [])
-        self.assertEqual(ast.get_docstring(function),
-                         "U8 owns activation. There is no runtime override.")
-        self.assertFalse(any(isinstance(n, (ast.Import, ast.ImportFrom))
-                             for n in ast.walk(tree)))
+        self.assertIsInstance(tree.body[0], ast.FunctionDef)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                self.assertNotIn(node.attr, ('environ', 'getenv', 'argv', 'getcwd'))
+        tree = ast.parse(Path(registry.__file__).read_text())
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'd5_active')
+        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(ast.dump(calls[0]), ast.dump(ast.parse('d5_activation.d5_active(state_dir)').body[0].value))
 
-    def test_production_active(self):
-        self.assertIs(activation.d5_active(), True)
-        self.assertIs(registry.d5_active(), True)
+    def test_fresh_process_agreement(self):
+        state = self.publish()
+        code = ('from __future__ import annotations\n'
+                'import sys\nsys.path.insert(0, ' + repr(str(SCRIPTS)) + ')\n'
+                'import d5_activation\n'
+                'print(d5_activation.d5_active(sys.argv[1]))\n')
+        script = self.root / 'probe.py'
+        script.write_text(code)
+        linked = self.root / 'linked.py'
+        linked.symlink_to(script)
+        executable = self.root / 'renamed-runner'
+        executable.symlink_to(sys.executable)
+        entries = [[sys.executable, '-B', '-m', 'probe'],
+                   [sys.executable, '-B', '-c', code],
+                   [sys.executable, '-B', str(linked)],
+                   [str(executable), '-B', str(script)]]
+        nested = ('import subprocess,sys\nsubprocess.run(' + repr(entries[1]) +
+                  '+[sys.argv[1]], check=True)\n')
+        entries.append([sys.executable, '-B', '-c', nested])
+        for directory in (state, self.empty):
+            for command in entries:
+                with self.subTest(directory=directory, command=command[:3]):
+                    p = subprocess.run(command + [str(directory)], cwd=self.root,
+                         capture_output=True, text=True, timeout=30)
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertEqual(p.stdout.strip(), str(activation.d5_active(directory)))
 
-    def test_activation_patch_reaches_registry(self):
-        for value in (True, False):
-            with self.subTest(value=value), \
-                 mock.patch.object(activation, "d5_active", return_value=value) as predicate:
-                self.assertIs(registry.d5_active(), value)
-                predicate.assert_called_once_with()
-
-    def test_registry_patch_remains_local_and_reaches_consumer(self):
-        with mock.patch.object(registry, "d5_active", return_value=False) as predicate:
-            with self.assertRaisesRegex(registry.AuthorityError, "D5 is not active"):
-                registry._active()
-            predicate.assert_called_once_with()
-            self.assertIs(activation.d5_active(), True)
-        registry._active()
-
-    def test_import_mutations_fail_cold_probe(self):
-        for statement in ("import d5_registry", "import sys", "from os import path"):
-            with self.subTest(statement=statement), tempfile.TemporaryDirectory() as temporary:
-                (Path(temporary) / SOURCE.name).write_text(
-                    statement + "\n" + SOURCE.read_text())
-                result = cold_probe(temporary)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("activation imported", result.stderr)
+    def test_no_tracked_readiness(self):
+        names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).split(b'\0')
+        forbidden = {readiness.MARKER, readiness.INSTALLATION, readiness.SENTINEL}
+        self.assertFalse([n for n in names if os.fsdecode(n).split('/')[-1] in forbidden])
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

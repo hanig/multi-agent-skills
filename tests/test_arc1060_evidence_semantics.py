@@ -92,15 +92,13 @@ class TestEvidenceSemantics(unittest.TestCase):
         return self.f.invoke("--verify-integration")
 
     def swarm_verify(self):
-        from tests.d5_test_support import inactive
-        with inactive(environ=self.f.env) as environment:
-            return subprocess.run([
-                sys.executable, S.__file__,
-                "verify", "--state-dir", str(self.f.state_dir), "--unit", "u",
-                "--attempt", str(self.f.attempt), "--claim", V.INTEGRATION_CLAIM,
-                "--target-commit", self.f.base, "--verifier", V.MERGE_VERIFIER,
-                "--path", str(self.f.repo / V.MERGE_VERIFIER_PATH)],
-                env=environment, cwd=self.f.repo, capture_output=True, text=True, timeout=60)
+        return subprocess.run([
+            sys.executable, S.__file__,
+            "verify", "--state-dir", str(self.f.state_dir), "--unit", "u",
+            "--attempt", str(self.f.attempt), "--claim", V.INTEGRATION_CLAIM,
+            "--target-commit", self.f.base, "--verifier", V.MERGE_VERIFIER,
+            "--path", str(self.f.repo / V.MERGE_VERIFIER_PATH)],
+            env=self.f.env, cwd=self.f.repo, capture_output=True, text=True, timeout=60)
 
     def anchor_integration_program(self):
         self.integration_program(self.barrier())
