@@ -27,7 +27,7 @@ def main():
             with nullcontext(), \
                     mock.patch.object(ledger.registry, "lookup", return_value={
                         "registration_id": "a" * 32, "record_dir": directory}):
-                attempt = ledger.prepare("fixture", "p", "fixture", record_id="a" * 32,
+                attempt = ledger.prepare("fixture", "p", ledger.readiness.installation(directory)["state_dir"], record_id="a" * 32,
                     custody=dict(generation=1, session_id="fixture", anchor_pid=42, anchor_start_us=101),
                     kind="synthetic", scope=dict(plans=["p"], repositories=["r"], actions=["a"], trackers=[]),
                     correlation={"request_id": "M5"})
