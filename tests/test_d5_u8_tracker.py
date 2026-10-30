@@ -16,6 +16,7 @@ from tests import test_linear_file as filing
 from tests import test_linear_drain as drain
 from tests import test_d5_u6_tracker_reject as outbox
 import d5_activation as activation
+from tests.fixtures.d5.ready import ready_installation
 
 
 def fixture(case, cls):
@@ -46,8 +47,10 @@ class TestTrackerMatrix(unittest.TestCase):
      case = cls()
      stack.callback(case.doCleanups)
      case.prepare_fixture()
-     stack.enter_context(nullcontext())
-     self.assertIs(activation.d5_active(), active)
+     state_dir = case.state if route == "drain" else case.root / "d5-state"
+     if active:
+      ready_installation(case.root, state_dir=state_dir)
+     self.assertIs(activation.d5_active(state_dir), active)
      stack.enter_context(mock.patch.object(subprocess, 'run', side_effect=receipt_child))
      if route == 'new':
       rc = case.issue('new', '--independent', 'fixture')
@@ -110,6 +113,8 @@ class TestTrackerMatrix(unittest.TestCase):
       'receipt': ['outbox', '--record-receipt', case.key, '--ref', 'fixture'],
       'backfill': ['advance', str(plan), '--max-new-dispatches', '0'],
      }[route] + common
+     if active:
+      ready_installation(tmp, state_dir=case.state_dir)
      before, output = case.tree(), io.StringIO()
      with ExitStack() as stack:
       stack.enter_context(nullcontext())
@@ -147,6 +152,8 @@ class TestTrackerMatrix(unittest.TestCase):
    for route in outbox.ENTRIES:
     with self.subTest(active=active, route=route), tempfile.TemporaryDirectory() as tmp:
      case = outbox.OutboxFixture(tmp)
+     if active:
+      ready_installation(tmp, state_dir=case.state_dir)
      before = case.tree()
      with nullcontext():
       if active:

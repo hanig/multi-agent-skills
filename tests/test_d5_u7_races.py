@@ -41,6 +41,7 @@ import remote_verify
 import swarm_outbox as outbox
 import swarm_state as state
 import unit
+from tests.fixtures.d5.ready import ready_installation, missing_installation
 
 
 class World:
@@ -79,7 +80,8 @@ class World:
         self.ready = dict(registration_id='1' * 32, plan_id='p', state_dir=str(self.state),
             record_dir=str(self.directory), repo_key=[1, 2], state_key=[1, 3], record_key=key,
             schema_version=1, generation='2' * 32, profile=readiness.PROFILE)
-        self.patch(activation, 'd5_active', return_value=True)
+        self.ready.update(state_key=[self.state.stat().st_dev, self.state.stat().st_ino])
+        ready_installation(self.root, self.ready)
         self.patch(registry, 'lookup', return_value=dict(self.ready, checkout=str(self.root)))
         self.patch(readiness, 'require', side_effect=self.installed)
         self.patch(admission, '_mandate_bytes', return_value=self.mandate)
@@ -97,7 +99,7 @@ class World:
         store.create(self.directory, record)
         self.claim('A', self.anchor)
         # Park a real legacy outbox item; compare its exact contents at teardown.
-        with nullcontext():
+        with missing_installation(self.ready):
             outbox.emit_intent(self.state, 'p', 'u', 'SUBMITTED',
                                dict(attempt_dir='/fixture/attempt', job_id='1'))
         self.outbox_before = (self.state / outbox.OUTBOX).read_bytes()

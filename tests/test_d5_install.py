@@ -20,7 +20,7 @@ import d5_host as host
 import d5_locks as locks
 import d5_protocol_locks as protocol
 from tests.test_d5_authority import grant, MANDATE
-from tests.fixtures.d5.ready import ready
+from tests.fixtures.d5.ready import ready, ready_installation, InstallationWitnesses
 from tests.test_d5_locks import isolate_pool
 
 ANCHOR = host.ProcessIdentity(42, 9000001)
@@ -38,7 +38,6 @@ class TestInstall(unittest.TestCase):
         self.mandate.write_bytes(MANDATE)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.active = self.stack.enter_context(nullcontext())
         self.anchor = self.stack.enter_context(mock.patch.object(
             host, "session_anchor", return_value=("native", ANCHOR)))
         self.live = self.stack.enter_context(mock.patch.object(
@@ -57,6 +56,8 @@ class TestInstall(unittest.TestCase):
             with mock.patch.object(install.registry.CP, "_external_base",
                                    return_value=directory / "external"):
                 directory = Path(ready(self, repo, "p", state)["record_dir"])
+        if kind != "replace":
+            ready_installation(self.root, state_dir=self.root / (name + "-state"), record_dir=directory)
         if kind != "initial":
             store.create(directory, grant())
         return directory
@@ -219,13 +220,15 @@ class TestInstall(unittest.TestCase):
         for kind in KINDS:
             with self.subTest(kind=kind):
                 directory = self.directory(kind, kind)
-                self.active.return_value = False
+                witnesses = InstallationWitnesses(install.readiness.installation(directory))
+                self.addCleanup(witnesses.close)
+                witnesses.present = False
                 with mock.patch.object(protocol, "pin", side_effect=AssertionError("inactive pin")):
                     with self.assertRaisesRegex(store.AuthorityError, "^D5 is inactive$"):
                         self.call(kind, directory)
-                self.active.return_value = True
+                witnesses.present = True
                 with self.waiter(lambda: self.call(kind, directory), directory) as (results, errors):
-                    self.active.return_value = False
+                    witnesses.present = False
                 self.assertEqual(results, [])
                 self.assertEqual([str(e) for e in errors], ["D5 is inactive"])
 

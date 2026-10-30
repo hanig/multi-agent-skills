@@ -23,7 +23,7 @@ import d5_install as install
 import d5_lease as lease
 import d5_registry as registry
 from tests.test_d5_authority import MANDATE, grant
-from tests.fixtures.d5.ready import ready
+from tests.fixtures.d5.ready import ready, missing_installation, classification_only
 from tests.test_d5_locks import isolate_pool
 
 ANCHOR = host.ProcessIdentity(42, 9000001)
@@ -297,11 +297,11 @@ class TestCustodyAPI(unittest.TestCase):
                 for p in self.directory.rglob("*")}
 
     def test_inactive_refuses_without_changes(self):
-        self.register()
+        entry = self.register()
         before = self.tree()
-        self.assertFalse(registry.d5_active())
-        with nullcontext(), \
+        with missing_installation(entry), classification_only(self.state), \
                 mock.patch.object(registry, "lookup", side_effect=AssertionError("lookup")):
+            self.assertFalse(registry.d5_active(self.state))
             for operation in (self.claim, self.relinquish):
                 with self.assertRaisesRegex(authority.AuthorityError, "D5 is not active"):
                     operation()

@@ -233,7 +233,7 @@ class TestD5Registry(unittest.TestCase):
 
     def test_register_refuses_before_activation(self):
         before = self.tree()
-        self.assertFalse(R.d5_active())
+        self.assertFalse(R.d5_active(self.state))
         with self.assertRaisesRegex(R.AuthorityError, "D5 is not active"):
             R.register(self.repo, "p", self.state)
         self.assertEqual(self.tree(), before)
