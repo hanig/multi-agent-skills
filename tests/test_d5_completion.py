@@ -95,7 +95,9 @@ class TestCompletion(unittest.TestCase):
         alternate = self.directory / "alternate"
         alternate.mkdir(mode=0o700)
         self.registration["record_dir"] = str(alternate)
-        elsewhere = self.receipt()
+        installed = ready_installation(alternate, record_dir=alternate)
+        with mock.patch.object(self, "entry", installed):
+            elsewhere = self.receipt()
         self.registration["record_dir"] = str(self.directory)
         variants.append(replace(receipt, _directory=str(alternate), effect_id=elsewhere.effect_id))
         saved = self.snapshot()
@@ -190,15 +192,14 @@ class TestCompletion(unittest.TestCase):
         for state in ("submitted", "completed"):
             self.assertEqual(json.loads(self.path(receipt).read_bytes())["state"], state)
             before = self.snapshot()
-            corruption = missing_installation(self.entry)
-            corruption.__enter__()
-            self.addCleanup(corruption.__exit__, None, None, None)
-            with self.refuse("D5 inactive"):
-                capability.complete(self.outcome)
-            with self.refuse("D5 inactive"):
-                uncertainty.uncertain()
+            with missing_installation(self.entry):
+                inactive = self.snapshot()
+                with self.refuse("D5 inactive"):
+                    capability.complete(self.outcome)
+                with self.refuse("D5 inactive"):
+                    uncertainty.uncertain()
+                self.assertEqual(self.snapshot(), inactive)
             self.assertEqual(self.snapshot(), before)
-            corruption.__exit__(None, None, None)
             self.assertEqual(capability.complete(self.outcome), self.outcome)
         self.assertIsNone(uncertainty.uncertain())
         self.assertEqual(json.loads(self.path(attempt).read_bytes())["state"], "unknown")

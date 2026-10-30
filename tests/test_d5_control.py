@@ -24,7 +24,7 @@ import d5_protocol_locks as protocol
 import d5_registry as registry
 from tests import test_d5_locks as lock_tests
 from tests.test_d5_authority import grant
-from tests.fixtures.d5.ready import ready, classification_only, missing_installation
+from tests.fixtures.d5.ready import ready, ready_installation, classification_only, missing_installation
 
 PEER = ROOT / "tests/fixtures/d5/protocol_peer.py"
 MANDATE = b"fixture mandate\r\n\xff"
@@ -363,6 +363,7 @@ class TestD5Control(unittest.TestCase):
                 # A separate empty state avoids the existing state-identity conflict.
                 state = self.root / "unregistered-state"
                 state.mkdir()
+                ready_installation(self.root, state_dir=state)
                 args = self.repo, "unregistered", state
             with mock.patch.object(protocol, "pin", side_effect=AssertionError("protocol IO")):
                 for call in (lambda: control.revoke(*args, 150, "stop"),
