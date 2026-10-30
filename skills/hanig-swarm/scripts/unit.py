@@ -1625,8 +1625,11 @@ def main():
     c.add_argument("--sacct-status-fd", type=int, default=None, help=argparse.SUPPRESS)
     c.set_defaults(fn=cmd_check)
 
+    for command_parser in sub.choices.values():
+        command_parser.add_argument("--state-dir", default=None)
     args = ap.parse_args()
-    sys.exit(f"D5 active: unit {args.cmd} is refused before first effect" if D5.d5_active() else args.fn(args))
+    sys.exit(f"D5 active: unit {args.cmd} is refused before first effect; inspect d5_install readiness"
+             if args.state_dir is not None and D5.d5_active(args.state_dir) else args.fn(args))
 
 
 if __name__ == "__main__":

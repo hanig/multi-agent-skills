@@ -66,9 +66,9 @@ _ENTRY_FIELDS = {"registration_id", "repo_key", "plan_id", "state_key",
                  "checkout", "git_common_dir", "state_dir", "record_dir", "record_key"}
 
 
-def d5_active():
+def d5_active(state_dir):
     """U8 owns activation. There is no runtime override."""
-    return d5_activation.d5_active()
+    return d5_activation.d5_active(state_dir)
 
 
 def _require(condition, message):
@@ -76,8 +76,9 @@ def _require(condition, message):
         raise AuthorityError("registry: " + message)
 
 
-def _active():
-    _require(d5_active(), "D5 is not active")
+def _active(state_dir):
+    readiness.refuse_broken(state_dir)
+    _require(d5_active(state_dir), "D5 is not active")
 
 
 def _plan_id(value):
@@ -312,7 +313,7 @@ def _locked(root):
 
 def register(checkout, plan_id, state_dir):
     """Confirm an installed registration; ordinary entry cannot provision."""
-    _active()
+    _active(state_dir)
     ready = readiness.require(state_dir)
     _plan_id(plan_id)
     readiness.bound(ready, lookup(checkout, plan_id, state_dir))

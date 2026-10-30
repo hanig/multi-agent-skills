@@ -328,9 +328,5 @@ class TestStateEpoch(unittest.TestCase):
         self.assertFalse(self.first.renew_lease(self.state_dir))
 
 
-from tests.d5_test_support import inactive_class
-inactive_class(TestStateEpoch)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -161,6 +161,45 @@ def default_paths(cwd=None, worktrees=()):
     return project / "state", project / "runs"
 
 
+def pre_git_default_state(cwd=None):
+    """Locate the ordinary local default without starting Git.
+
+    This is an early D5 containment check, not path-policy validation. The
+    normal resolver still validates the selected paths before any mutation.
+    Supported D5 installations use the registry's standard Git layout.
+    """
+    here = _resolved(cwd or os.getcwd())
+    context = here
+    common = None
+    for candidate in (here,) + tuple(here.parents):
+        marker = candidate / ".git"
+        if marker.is_dir():
+            context, common = candidate, marker
+            break
+        if marker.is_file():
+            raw = marker.read_text().rstrip("\n")
+            if raw.startswith("gitdir: "):
+                context = candidate
+                gitdir = _resolved(candidate / raw[len("gitdir: "):])
+                commondir = gitdir / "commondir"
+                common = (_resolved(gitdir / commondir.read_text().rstrip("\n"))
+                          if commondir.is_file() else gitdir)
+                break
+    worktrees = [context]
+    if common is not None:
+        worktrees.append(common.parent)
+        linked = common / "worktrees"
+        if linked.is_dir():
+            for child in linked.iterdir():
+                pointer = child / "gitdir"
+                if pointer.is_file():
+                    worktrees.append(_resolved(pointer.read_text().rstrip("\n")).parent)
+    digest = hashlib.sha256(str(context).encode()).hexdigest()[:12]
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", context.name).strip("-.") or "project"
+    return (_external_base(worktrees) / "hanig-swarm" / "projects" /
+            (slug + "-" + digest) / "state")
+
+
 def resolve_paths(state_dir=None, root=None, plan=None, cwd=None,
                   extra_repos=(), need_root=False):
     """Resolve and validate paths without creating anything."""

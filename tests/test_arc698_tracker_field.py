@@ -237,9 +237,5 @@ class TestTrackerField(unittest.TestCase):
         self.assertIn('could not backfill tracker labels', err.getvalue())
 
 
-from tests.d5_test_support import inactive_class
-inactive_class(TestTrackerField)
-
-
 if __name__ == '__main__':
     unittest.main()

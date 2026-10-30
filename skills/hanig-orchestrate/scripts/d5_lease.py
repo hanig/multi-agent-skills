@@ -18,8 +18,9 @@ import d5_registry
 import d5_readiness as readiness
 
 
-def _active():
-    if not d5_registry.d5_active():
+def _active(state_dir):
+    readiness.refuse_broken(state_dir)
+    if not d5_registry.d5_active(state_dir):
         raise d5_registry.AuthorityError("D5 is not active")
 
 
@@ -56,7 +57,7 @@ def _grant_locked(directory):
 def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
           mandate_bytes, scope, owner_response, displayed_bounds):
     """Create or replace a validated grant with exact owner confirmation."""
-    _active()
+    _active(state_dir)
     ready = readiness.require(state_dir)
     record = {"schema_version": 1, "grant_id": uuid.uuid4().hex,
               "issued_at": issued_at, "confirmed_at": confirmed_at,
@@ -84,7 +85,7 @@ def grant(checkout, plan_id, state_dir, *, issued_at, confirmed_at, expires_at,
 
 def revoke(checkout, plan_id, state_dir, now, reason):
     """Keep the inactive refusal; R2 resolves registration and serializes revoke."""
-    _active()
+    _active(state_dir)
     return d5_control.revoke(checkout, plan_id, state_dir, now, reason)
 
 
@@ -101,5 +102,5 @@ def status(checkout, plan_id, state_dir, *, now, mandate_bytes):
         if store.present(path, "record"):
             record = authority.decode(store.read_bytes(path))
             state = authority.evaluate(record, now, mandate_bytes)[0]
-    return {"state": "active" if d5_registry.d5_active() else "inactive",
+    return {"state": "active" if d5_registry.d5_active(state_dir) else "inactive",
             "registration": entry, "record": record, "record_state": state}

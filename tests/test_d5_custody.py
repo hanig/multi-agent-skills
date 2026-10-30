@@ -11,7 +11,6 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
-from tests.d5_test_support import inactive
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
@@ -296,7 +295,6 @@ class TestCustodyAPI(unittest.TestCase):
                  p.read_bytes() if p.is_file() else None)
                 for p in self.directory.rglob("*")}
 
-    @inactive(registry)
     def test_inactive_refuses_without_changes(self):
         self.register()
         before = self.tree()
@@ -365,7 +363,6 @@ class TestCustodyAPI(unittest.TestCase):
         self.assertEqual(authority.decode(store.read_bytes(Path(entry["record_dir"]) / store.RECORD_NAME)), result)
         self.assertEqual(self.anchor.call_count, 3)
 
-    @inactive(registry)
     def test_status_absent_and_ungranted_create_nothing(self):
         for registered in (False, True):
             entry = self.register(record=False) if registered else None

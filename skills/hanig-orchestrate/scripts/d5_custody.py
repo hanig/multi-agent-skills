@@ -14,8 +14,9 @@ import d5_registry
 import d5_readiness as readiness
 
 
-def _active():
-    if not d5_registry.d5_active():
+def _active(state_dir):
+    readiness.refuse_broken(state_dir)
+    if not d5_registry.d5_active(state_dir):
         raise authority.AuthorityError("D5 is not active")
 
 
@@ -27,7 +28,7 @@ def claim(checkout, plan_id, state_dir, *, now, mandate_bytes):
     under its locks. Its store.read_bytes opens with O_NOFOLLOW and refuses
     a non-regular mandate file.
     """
-    _active()
+    _active(state_dir)
     ready = readiness.require(state_dir)
     entry = readiness.bound(ready, d5_registry.lookup(checkout, plan_id, state_dir))
     if entry is None:
@@ -38,7 +39,7 @@ def claim(checkout, plan_id, state_dir, *, now, mandate_bytes):
 
 def relinquish(checkout, plan_id, state_dir, *, now):
     """Relinquishment disables this holder; it is not a live handoff."""
-    _active()
+    _active(state_dir)
     return d5_control.relinquish(checkout, plan_id, state_dir, now=now)
 
 
@@ -54,6 +55,6 @@ def status(checkout, plan_id, state_dir, *, now):
         identity = d5_host.ProcessIdentity(custody["anchor_pid"], custody["anchor_start_us"])
         holder = store.observe_liveness(identity, d5_host.liveness)
         is_holder = d5_host.session_anchor() == (custody["session_id"], identity)
-    return {"state": "active" if d5_registry.d5_active() else "inactive",
+    return {"state": "active" if d5_registry.d5_active(state_dir) else "inactive",
             "registration": entry, "custody": custody, "liveness": holder,
             "is_holder": is_holder}

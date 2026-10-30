@@ -211,10 +211,5 @@ class TestSequenceEmission(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
 
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TestSequenceDrain, TestSequenceEmission)
-
-
 if __name__ == '__main__':
     unittest.main()
