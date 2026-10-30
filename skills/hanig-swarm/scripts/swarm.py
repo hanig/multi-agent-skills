@@ -310,7 +310,7 @@ from swarm_types import (
 
 def _d5_state(state_dir, plan=None, extra_repos=()):
     if state_dir is not None:
-        return state_dir
+        return Path(state_dir).expanduser()
     if isinstance(plan, (str, os.PathLike)):
         plan, error = U.read_json(plan)
         if error or not isinstance(plan, dict):

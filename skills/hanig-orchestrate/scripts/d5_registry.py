@@ -77,7 +77,7 @@ def _require(condition, message):
 
 
 def _active(state_dir):
-    readiness.refuse_broken(state_dir)
+    state_dir = readiness.refuse_broken(state_dir)
     _require(d5_active(state_dir), "D5 is not active")
 
 

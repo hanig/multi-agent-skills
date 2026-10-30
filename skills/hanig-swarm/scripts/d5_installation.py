@@ -103,8 +103,8 @@ def _snapshot(state_dir):
         installed = installation(value["record_dir"])
         _require(value == installed, "installation generation or binding mismatch")
         return READY, value
-    except (OSError, ValueError, RuntimeError, RecursionError):
-        return BROKEN, None
+    except (OSError, ValueError, RuntimeError, RecursionError) as exc:
+        return BROKEN, str(exc)
 
 
 def state(state_dir):

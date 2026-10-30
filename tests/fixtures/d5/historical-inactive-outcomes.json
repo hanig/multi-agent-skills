@@ -1,0 +1,92 @@
+{
+  "3f17265c35d5e44cd2c04fa366976968c0b00fb3": {
+    "d5_custody.claim": [
+      "AuthorityError",
+      "D5 is not active"
+    ],
+    "d5_install.claim_custody": [
+      "AuthorityError",
+      "D5 is inactive"
+    ],
+    "d5_install.install_initial": [
+      "AuthorityError",
+      "D5 is inactive"
+    ],
+    "d5_install.replace_authority": [
+      "AuthorityError",
+      "D5 is inactive"
+    ],
+    "d5_lease.grant": [
+      "AuthorityError",
+      "D5 is not active"
+    ],
+    "d5_registry.register": [
+      "AuthorityError",
+      "registry: D5 is not active"
+    ],
+    "d5_submission.submit": [
+      "AuthorityError",
+      "D5 is inactive"
+    ]
+  },
+  "8e1d19afc65b0aa64acbae9c70039a67dae6d834": {
+    "d5_custody.claim": [
+      "AuthorityError",
+      "D5 is not active"
+    ],
+    "d5_install.claim_custody": [
+      "AuthorityError",
+      "D5 is inactive"
+    ],
+    "d5_install.install_initial": [
+      "AuthorityError",
+      "D5 is inactive"
+    ],
+    "d5_install.replace_authority": [
+      "AuthorityError",
+      "D5 is inactive"
+    ],
+    "d5_lease.grant": [
+      "AuthorityError",
+      "D5 is not active"
+    ],
+    "d5_registry.register": [
+      "AuthorityError",
+      "registry: D5 is not active"
+    ],
+    "d5_submission.submit": [
+      "AuthorityError",
+      "D5 is inactive"
+    ]
+  },
+  "cdcbf6377a72cdac456f355d8cf86d169ab5edf8": {
+    "d5_custody.claim": [
+      "AuthorityError",
+      "D5 is not active"
+    ],
+    "d5_install.claim_custody": [
+      "AuthorityError",
+      "D5 is inactive"
+    ],
+    "d5_install.install_initial": [
+      "AuthorityError",
+      "D5 is inactive"
+    ],
+    "d5_install.replace_authority": [
+      "AuthorityError",
+      "D5 is inactive"
+    ],
+    "d5_lease.grant": [
+      "AuthorityError",
+      "D5 is not active"
+    ],
+    "d5_registry.register": [
+      "AuthorityError",
+      "registry: D5 is not active"
+    ],
+    "d5_submission.submit": [
+      "AuthorityError",
+      "D5 is inactive"
+    ]
+  }
+}
