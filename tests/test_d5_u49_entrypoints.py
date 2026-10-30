@@ -19,6 +19,7 @@ import d5_activation as activation
 import swarm as S
 import merge_unit as M
 from tests.fixtures.d5.u49c_capture import inactive_captures, MERGE_ARGV
+from tests.test_d5_u4_0b1_issuance import no_effects
 from tests.fixtures.d5.ready import ready_installation, missing_installation, classification_only
 
 BASE = '4a97999d999347cdc52a6496bbfa5392f0b22d88'
@@ -175,6 +176,12 @@ class TestAdvisory(InstallationFixture):
     def test_read_only_and_diagnostic_failure_never_blocks(self):
         for stream in (io.StringIO(), mock.Mock(write=mock.Mock(side_effect=OSError('unavailable'))),
                        mock.Mock(write=mock.Mock(side_effect=ValueError('closed')))):
+            # The active diagnostic must also swallow failed streams; the
+            # inactive guard below separately limits classification IO.
+            with mock.patch.object(sys, 'dont_write_bytecode', False), \
+                    redirect_stderr(stream), no_effects() as effects:
+                self.assertIsNone(S._d5_bytecode_advisory(self.state))
+                self.assertEqual(effects, ([], []))
             with self.subTest(stream=type(stream).__name__), ExitStack() as stack:
                 stack.enter_context(missing_installation(self.entry))
                 stack.enter_context(classification_only(self.state))
