@@ -23,11 +23,13 @@ import d5_authority_store as store
 import d5_host as host
 import d5_protocol_locks as protocol
 import d5_registry as registry
+import d5_readiness as readiness
 
 
 @contextmanager
 def _started(checkout, plan_id, state_dir):
-    if not registry.d5_active():
+    readiness.refuse_broken(state_dir)
+    if not registry.d5_active(state_dir):
         raise authority.AuthorityError("D5 is inactive")
     entry = registry.lookup(checkout, plan_id, state_dir)
     if entry is None:

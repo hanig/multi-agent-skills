@@ -232,9 +232,5 @@ if sys.argv[0].endswith('merge_unit.py'):
         self.assertEqual(self.f.receipts(), [])
 
 
-from tests.d5_test_support import inactive_class
-inactive_class(TestCancellationCommit)
-
-
 if __name__ == '__main__':
     unittest.main()

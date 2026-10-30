@@ -59,8 +59,6 @@ class TestEvidenceExtraction(unittest.TestCase):
         read.assert_called_once_with({}, "unit", "attempt")
 
     def test_owner_merge_reader_patch_reaches_admission_through_facade(self):
-        from tests.d5_test_support import for_case
-        for_case(self)
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(SE, "load_merge_receipts", return_value=([], [])) as read:
                 receipt, refusal = S.admit_merge(directory, "unit", "a" * 40)

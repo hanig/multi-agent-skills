@@ -84,20 +84,6 @@ else:
 
 class TestMergeUnit(unittest.TestCase):
     def setUp(self):
-        # This fixture exercises pre-cutover behavior; active wiring has U8 tests.
-        from tests.d5_test_support import for_case
-        for_case(self)
-        self.prepare_fixture()
-
-    def prepare_active_fixture(self):
-        """Build legacy state, then restore active wiring before the test runs."""
-        from tests.d5_test_support import inactive
-        import d5_activation
-        with inactive():
-            self.prepare_fixture()
-        self.assertIs(d5_activation.d5_active(), True)
-
-    def prepare_fixture(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.directory = Path(self.tmp.name).resolve()
@@ -219,12 +205,8 @@ class TestMergeUnit(unittest.TestCase):
                    "--state-dir", str(self.state_dir), "--unit", "u", "--pr", "7"]
         if approver:
             command += ["--approver", "Operator"]
-        # Fault-injection tests replace PYTHONPATH after setUp; opt this
-        # legacy child into the same premise while preserving their hook.
-        from tests.d5_test_support import inactive
-        with inactive(environ=self.env) as environment:
-            return subprocess.run(command + list(extra), cwd=str(cwd or self.repo), env=environment,
-                                  capture_output=True, text=True, timeout=60)
+        return subprocess.run(command + list(extra), cwd=str(cwd or self.repo), env=self.env,
+                              capture_output=True, text=True, timeout=60)
 
     def calls(self, prefix=None):
         path = Path(self.env["FORGE_LOG"])
@@ -609,12 +591,7 @@ class TestMergeUnit(unittest.TestCase):
         self.assertEqual(S.acknowledgment_status(self.state_dir)[0], {})
         line, = [line for line in result.stdout.splitlines() if 'linear_sync.py' in line and ' drain ' in line]
         command = shlex.split(line)
-        from tests.d5_test_support import inactive
-        with inactive(environ=self.env) as environment:
-            interpreter = subprocess.check_output(
-                [sys.executable, '-c', 'import sys; print(sys.executable)'],
-                env=environment, text=True).strip()
-        self.assertEqual(command, [interpreter,
+        self.assertEqual(command, [sys.executable,
                                   str(SCRIPTS.parents[1] / 'hanig-project/scripts/linear_sync.py'), 'drain',
                                   '--binding', str(self.plan_path.parent / '.hanig/linear-binding.json'),
                                   '--state-dir', str(self.state_dir)])

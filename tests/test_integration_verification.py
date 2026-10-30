@@ -582,8 +582,6 @@ class TestIntegrationReceiptBinding(IntegrationRepo):
         self.assertIn("re-run integration-tests", refusal)
 
     def test_a_caller_cannot_hide_target_movement_in_merge_attestation(self):
-        from tests.d5_test_support import for_case
-        for_case(self)
         self.write_receipt()
         git(self.repo, "checkout", "-q", "--detach", self.target)
         (self.repo / "right.txt").write_text("2\n")

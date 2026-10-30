@@ -525,12 +525,5 @@ class TestTheJudgedHeadIsInTheReceipt(unittest.TestCase):
             self.assertIsNone(S.attested_receipt(state, "u1", d)[0])
         self.assertIsNone(S.attested_receipt({}, "u1", "")[0])
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TestTheBinding, TestAnUnmergedPRDoesNotClose, TestMalformedReceiptsAreNotEvidence,
-    TestRecordingRefusesABadJournal, TestClosureAuthorityIsUnchanged, TestRoundOneFindings,
-    TestRoundThreeFindings)
-
-
 if __name__ == "__main__":
     unittest.main()

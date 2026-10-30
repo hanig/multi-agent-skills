@@ -10,7 +10,6 @@ from types import ModuleType
 import unittest
 from unittest import mock
 
-from tests.d5_test_support import inactive
 from tests import test_d5_registry as fixtures
 from tests.fixtures.d5.ready import ready
 import d5_install as install
@@ -216,7 +215,6 @@ class TestReadiness(unittest.TestCase):
                 install.promote(*self.args)
         self.assertFalse(self.marker.exists())
 
-    @inactive()
     def test_M6_inactive_operational_effects_equal_recorded_base(self):
         # Unit-local capture: load the recorded base implementations, with the
         # same real fixture and inactive predicate. No production path is patched.

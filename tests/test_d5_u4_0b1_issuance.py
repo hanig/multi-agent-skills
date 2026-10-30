@@ -10,7 +10,6 @@ import sys
 from types import ModuleType
 import unittest
 from unittest import mock
-from tests.d5_test_support import inactive
 
 from tests import test_d5_registry as fixtures
 from tests.fixtures.d5.ready import ready
@@ -303,7 +302,6 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
             self.test_M6_inactive_issuance_matches_unit_base_capture()
             history.assert_not_called()
 
-    @inactive(registry)
     def test_M6_inactive_issuance_matches_unit_base_capture(self):
         baseline = json.loads((fixtures.ROOT / "tests/fixtures/d5/"
                                "u4_0b1_inactive_base.json").read_text())

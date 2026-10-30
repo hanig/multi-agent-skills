@@ -650,9 +650,5 @@ class TestTerminalWatcherOutcome(unittest.TestCase):
 
 
 
-from tests.d5_test_support import inactive_class
-inactive_class(TestTerminalWatcherOutcome)
-
-
 if __name__ == "__main__":
     unittest.main()

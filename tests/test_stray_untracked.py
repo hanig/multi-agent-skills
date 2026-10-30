@@ -103,8 +103,6 @@ class Base(unittest.TestCase):
 
     def unit_check(self, outputs=("phase0b/out.tsv",), facts=None):
         """(state, receipt) from a real `unit.py check` on a DONE slurm unit."""
-        from tests.d5_test_support import for_case
-        for_case(self)
         argv = [sys.executable, str(UNIT), "allocate", "--root", "runs",
                 "--task", "phase0b", "--kind", "slurm",
                 "--repo", str(self.repo)]

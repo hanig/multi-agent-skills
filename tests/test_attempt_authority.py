@@ -41,8 +41,6 @@ def git(repo, *args):
 
 class RepoCase(unittest.TestCase):
     def setUp(self):
-        from tests.d5_test_support import for_case
-        for_case(self)
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.repo = self.tmp / "repo"

@@ -175,11 +175,5 @@ class TestDispatchAnchorsFirst(unittest.TestCase):
                         "captured, so the baseline is not a baseline")
 
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TestTheAnchorIsCapturedBeforeDispatch, TestTheAnchorCannotBeMovedAfterwards,
-    TestDispatchAnchorsFirst)
-
-
 if __name__ == "__main__":
     unittest.main()
