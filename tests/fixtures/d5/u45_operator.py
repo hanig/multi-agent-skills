@@ -1,4 +1,5 @@
 """Synthetic activation/crashes around the real merge operator script entry."""
+from contextlib import nullcontext
 import atexit
 from contextlib import ExitStack
 import fcntl
@@ -39,9 +40,9 @@ def main():
             sys.stdin.readline()
         return
     with ExitStack() as stack:
-        stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+        stack.enter_context(nullcontext())
         stack.enter_context(mock.patch.object(merge_operator, 'merge_launch_admitted', return_value=True))
-        stack.enter_context(mock.patch.object(t.registry, 'd5_active', return_value=True))
+        stack.enter_context(nullcontext())
         stack.enter_context(mock.patch.object(t.registry.CP, '_external_base', return_value=Path(data['external'])))
         stack.enter_context(mock.patch.object(t.host, 'session_anchor', return_value=('native', t.ANCHOR)))
         stack.enter_context(mock.patch.object(t.admission.time, 'time', return_value=150 if mode != 'recover' else 300))

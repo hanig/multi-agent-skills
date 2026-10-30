@@ -1,4 +1,5 @@
 """U4.4 consumes provider results without granting historical closure authority."""
+from contextlib import nullcontext
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import copy
 import io
@@ -36,7 +37,7 @@ def admission_capture(root):
     (root / SE.MERGE_RECEIPTS).write_text(json.dumps(receipt) + '\n')
     before = tree_bytes(root)
     with mock.patch.dict(os.environ, {'PATH': str(tools)}), \
-            mock.patch.object(activation, 'd5_active', return_value=False), no_effects() as effects:
+            nullcontext(), no_effects() as effects:
         result = SE.admit_merge(root, 'u', 'a' * 40)
     return dict(result=list(result), launches=effects[0], writes=effects[1],
                 unchanged=tree_bytes(root) == before)
@@ -274,7 +275,7 @@ class TestInactiveAndPremature(unittest.TestCase):
                 self.assertEqual(observed['files_changed'], [])
                 self.assertIn('D5 active:', str(observed['outcome']) + str(observed['output']))
         with tempfile.TemporaryDirectory() as root, \
-                mock.patch.object(activation, 'd5_active', return_value=True), no_effects() as effects:
+                nullcontext(), no_effects() as effects:
             with self.assertRaisesRegex(SE.OutboxError, 'D5 active:'):
                 SE.admit_merge(root, 'u', 'a' * 40)
             with self.assertRaisesRegex(ValueError, 'coordinator lease required'):

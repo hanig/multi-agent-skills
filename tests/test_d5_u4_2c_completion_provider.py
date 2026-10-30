@@ -1,4 +1,5 @@
 """U4.2-c provider dispatch, retain-on-unknown and unit-local M6 captures."""
+from contextlib import nullcontext
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 import hashlib
@@ -347,7 +348,7 @@ class TestCompletionProvider(unittest.TestCase):
             C._PROVIDERS["journal"] = self.provider
         before = tree_bytes(self.c.root)
         with ExitStack() as stack:
-            stack.enter_context(mock.patch.object(t.registry, "d5_active", return_value=True))
+            stack.enter_context(nullcontext())
             probes = [stack.enter_context(mock.patch.object(target, name,
                 side_effect=AssertionError("unexpected side effect: " + name)))
                 for target, name in ((t.registry, "lookup"), (t.protocol, "pin"),

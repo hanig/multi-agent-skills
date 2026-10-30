@@ -8,7 +8,7 @@ import d5_protocol_locks as protocol
 import swarm_state as state
 
 
-def ready_installation(tmp, entry=None):
+def ready_installation(tmp, entry=None, *, state_dir=None, record_dir=None):
     """Publish under the real installer lease and DRAIN/START protocol.
 
     A standalone fixture needs only filesystem bindings, not grant authority.
@@ -16,7 +16,8 @@ def ready_installation(tmp, entry=None):
     """
     tmp = Path(tmp).resolve()
     if entry is None:
-        directory, record = tmp / 'state', tmp / 'record'
+        directory = Path(state_dir) if state_dir is not None else tmp / 'state'
+        record = Path(record_dir) if record_dir is not None else tmp / 'record'
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         record.mkdir(mode=0o700, parents=True, exist_ok=True)
         key = lambda p: [p.stat().st_dev, p.stat().st_ino]
@@ -41,3 +42,74 @@ def ready(case, checkout, plan_id, state_dir, promote=True):
     if promote:
         ready_installation(Path(state_dir).parent, entry)
     return entry
+
+
+from contextlib import contextmanager, ExitStack
+import builtins
+import io
+import os
+import sys
+import tempfile
+from unittest import mock
+import d5_installation as classifier
+
+
+@contextmanager
+def missing_installation(entry):
+    """Corruption fixture: remove both state witnesses, then restore exact bytes.
+
+    This simulates loss of all local installation evidence, an accepted same-UID
+    limit. It is not withdrawal: normal withdrawal keeps the sentinel.
+    """
+    directory = Path(entry['state_dir'])
+    with tempfile.TemporaryDirectory() as tmp:
+        moved = []
+        try:
+            for name in (readiness.MARKER, readiness.SENTINEL):
+                source, target = directory / name, Path(tmp) / name
+                if source.exists():
+                    source.rename(target)
+                    moved.append((source, target))
+            yield
+        finally:
+            for source, target in reversed(moved):
+                target.rename(source)
+
+
+@contextmanager
+def classification_only(state_dir):
+    """OD-U8R-8: only the pure classifier's named read-only filesystem calls."""
+    directory = Path(state_dir).absolute()
+    allowed = {str(p) for p in (directory,) + tuple(directory.parents)}
+    allowed.update(str(directory / name) for name in (readiness.MARKER, readiness.SENTINEL))
+    def check(path):
+        frame = sys._getframe(2)
+        while frame and frame.f_code.co_filename != classifier.__file__:
+            frame = frame.f_back
+        if frame is None or not isinstance(path, (str, bytes, os.PathLike)) or os.fsdecode(path) not in allowed:
+            raise AssertionError('inactive IO outside classifier or named paths: ' + repr(path))
+    def reader(real):
+        def call(path, *args, **kwargs):
+            check(path)
+            return real(path, *args, **kwargs)
+        return call
+    def opened(real, flags=False):
+        def call(path, mode='r', *args, **kwargs):
+            check(path)
+            selected = kwargs.get('flags' if flags else 'mode', mode)
+            if flags:
+                if not isinstance(selected, int) or selected & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+                    raise AssertionError('inactive write')
+            elif selected not in ('r', 'rb', 'rt'):
+                raise AssertionError('inactive write')
+            return real(path, mode, *args, **kwargs)
+        return call
+    with ExitStack() as stack:
+        for name in ('lstat', 'stat', 'readlink'):
+            stack.enter_context(mock.patch.object(os, name, reader(getattr(os, name))))
+        stack.enter_context(mock.patch.object(os, 'open', opened(os.open, flags=True)))
+        for target in (builtins, io):
+            stack.enter_context(mock.patch.object(target, 'open', opened(target.open)))
+        for name in ('mkdir', 'makedirs', 'unlink', 'remove', 'rename', 'replace', 'rmdir', 'chmod', 'utime'):
+            stack.enter_context(mock.patch.object(os, name, side_effect=AssertionError('inactive mutation: ' + name)))
+        yield

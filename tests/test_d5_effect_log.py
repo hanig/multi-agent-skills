@@ -1,4 +1,5 @@
 """U3c consumer and mutation tests; barriers/hooks provide ordering."""
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import FrozenInstanceError, replace
@@ -22,6 +23,7 @@ import d5_effect_log as E
 import d5_authority as authority
 import d5_authority_store as store
 import d5_host as host
+from tests.fixtures.d5.ready import ready_installation, missing_installation, classification_only
 from tests.test_d5_authority import grant
 
 
@@ -33,12 +35,12 @@ class TestEffectLog(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.d = Path(temp.name)
         self.reg = {"registration_id": "a" * 32, "record_dir": str(self.d)}
+        self.entry = ready_installation(self.d, state_dir=self.d / "state", record_dir=self.d)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.stack.enter_context(mock.patch.object(E.registry, "d5_active", return_value=True))
         self.lookup = self.stack.enter_context(mock.patch.object(
             E.registry, "lookup", return_value=self.reg))
-        self.args = ("checkout", "plan", "state")
+        self.args = ("checkout", "plan", self.entry["state_dir"])
         self.req = dict(record_id="b" * 32, custody={"generation": 1,
             "session_id": "session", "anchor_pid": 123, "anchor_start_us": 101},
             kind="test-effect", scope={"plans": ["plan"], "repositories": ["repo"],
@@ -66,14 +68,15 @@ class TestEffectLog(unittest.TestCase):
             call(*args, **kwargs)
 
     def test_A0_inactive_no_io(self):
-        with mock.patch.object(E.registry, "d5_active", return_value=False), ExitStack() as stack:
+        handle = self.prepare()
+        receipt = E._classify(handle, "submitted")
+        with missing_installation(self.entry), classification_only(self.entry["state_dir"]), ExitStack() as stack:
             for target, name in ((E.registry, "lookup"), (E.locks, "pin"),
-                                 (os, "open"), (os, "mkdir"), (os, "lstat"),
                                  (E.registry.subprocess, "Popen")):
                 stack.enter_context(mock.patch.object(target, name,
                     side_effect=AssertionError("inactive performed work")))
-            for call in (self.prepare, lambda: E._classify(None, "submitted"),
-                         lambda: E.complete(None, self.ok), lambda: E.unresolved(*self.args)):
+            for call in (self.prepare, lambda: E._classify(handle, "submitted"),
+                         lambda: E.complete(receipt, self.ok), lambda: E.unresolved(*self.args)):
                 with self.subTest(call=call):
                     self.denied(call, error="D5 inactive")
 
@@ -135,7 +138,7 @@ class TestEffectLog(unittest.TestCase):
             if state != "attempting":
                 E._classify(intent, state)
             self.denied(E.complete, intent, self.ok, error=E.NOT_SUBMITTED)
-            forged = E.Receipt(intent.effect_id, intent._directory, intent._binding, intent._secret)
+            forged = E.Receipt(intent.effect_id, intent._directory, intent._binding, intent._secret, intent._state_dir)
             with self.subTest(state=state):
                 self.denied(E.complete, forged, self.ok, error=E.NOT_SUBMITTED)
             self.eq(self.entry(intent)["state"], state)
