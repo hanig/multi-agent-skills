@@ -1,4 +1,5 @@
 """U4.3 actual merge boundary, split START, durable provider and no replay."""
+from contextlib import nullcontext
 import argparse
 from contextlib import ExitStack
 import hashlib
@@ -45,7 +46,7 @@ class TestMergeProvider(unittest.TestCase):
         self.c = t.TestSubmission()
         self.c.setUp()
         self.addCleanup(self.c.doCleanups)
-        self.stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+        self.stack.enter_context(nullcontext())
         self.stack.enter_context(mock.patch.object(M, 'merge_launch_admitted', return_value=True))
         self.binding = dict(unit='u', attempt='a', head='a' * 40,
             repo='https://github.com/example/project', target='main', pr=7)
@@ -591,7 +592,7 @@ class TestOperator(unittest.TestCase):
         self.addCleanup(c.doCleanups)
         with ExitStack() as stack:
             stack.enter_context(mock.patch.dict(os.environ, c.env))
-            stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+            stack.enter_context(nullcontext())
             stack.enter_context(mock.patch.object(M, 'merge_launch_admitted', return_value=True))
             stack.enter_context(mock.patch.object(t.registry.CP, '_external_base', return_value=c.directory / 'external'))
             stack.enter_context(mock.patch.object(t.host, 'session_anchor', return_value=('native', t.ANCHOR)))

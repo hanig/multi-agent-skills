@@ -1,4 +1,5 @@
 """D5 registration against real local repositories and directory objects."""
+from contextlib import nullcontext
 import copy
 from contextlib import ExitStack, contextmanager
 import errno
@@ -32,7 +33,7 @@ class TestD5VersionGate(unittest.TestCase):
                         b"unexpected\n", b"git version 2.x\n", b""):
             with self.subTest(version=version), \
                  mock.patch.object(R, "_git", return_value=version), \
-                 mock.patch.object(R, "d5_active", return_value=True), \
+                 nullcontext(), \
                  mock.patch.object(R.CP, "resolve_paths", side_effect=AssertionError("state")), \
                  mock.patch.object(R, "_directory", side_effect=AssertionError("R/P")), \
                  mock.patch.object(R, "_entries", side_effect=AssertionError("registry")), \
@@ -46,7 +47,7 @@ class TestD5VersionGate(unittest.TestCase):
         with mock.patch.object(R, "_git", side_effect=AssertionError("Git")):
             with self.assertRaisesRegex(R.AuthorityError, "D5 is not active"):
                 R.register("/unused", "p", "/unused-state")
-            with mock.patch.object(R, "d5_active", return_value=True):
+            with nullcontext():
                 for call in (install.stage, R.lookup):
                     with self.assertRaisesRegex(R.AuthorityError, "invalid plan_id"):
                         call("/unused", "../p", "/unused-state")
@@ -92,7 +93,7 @@ class TestD5Registry(unittest.TestCase):
         self.git("-C", str(repo), "config", "maintenance.auto", "false")
 
     def register(self, repo=None, plan="p", state=None):
-        with mock.patch.object(R, "d5_active", return_value=True):
+        with nullcontext():
             if self._testMethodName in (
                     "test_idempotent_retry_syncs_file_and_all_directory_links",
                     "test_lookup_and_lease_status_create_nothing_and_inherit_refusal"):
@@ -199,7 +200,7 @@ class TestD5Registry(unittest.TestCase):
         self.state.mkdir()
         self.assertNotEqual(first["state_key"], [self.state.stat().st_dev, self.state.stat().st_ino])
         before = self.tree(self.root)
-        with mock.patch.object(R, "d5_active", return_value=True):
+        with nullcontext():
             for op in (lambda: R.lookup(self.repo, "p", self.state),
                        self.register):
                 with self.subTest(op=op), self.assertRaisesRegex(R.AuthorityError, "state_key mismatch"):
@@ -220,7 +221,7 @@ class TestD5Registry(unittest.TestCase):
                 path.write_text("not a directory")
             with self.assertRaises(R.AuthorityError):
                 self.register(state=path)
-        with mock.patch.object(R, "d5_active", return_value=True):
+        with nullcontext():
             with self.assertRaisesRegex(R.AuthorityError, "state_dir is required"):
                 install.stage(self.repo, "p", None)
         self.assertFalse(self.base.exists())
@@ -447,7 +448,7 @@ class TestD5Registry(unittest.TestCase):
 
     def test_concurrent_registration_is_one_entry(self):
         # flock on independently opened descriptors serializes even same-process writers.
-        with mock.patch.object(R, "d5_active", return_value=True):
+        with nullcontext():
             with ThreadPoolExecutor(max_workers=4) as pool:
                 entries = list(pool.map(lambda _: install.stage(self.repo, "p", self.state), range(4)))
         self.assertTrue(all(entry == entries[0] for entry in entries))
@@ -1091,7 +1092,7 @@ class TestD5Registry(unittest.TestCase):
                                      scope={"plans": ["p"], "repositories": ["repo"],
                                             "actions": ["review"], "trackers": []},
                                      owner_response="confirmed", displayed_bounds="bounded")]
-        with mock.patch.object(R, "d5_active", return_value=True), \
+        with nullcontext(), \
              mock.patch.object(os, "open", side_effect=opened):
             for call in calls:
                 with self.assertRaisesRegex(R.AuthorityError, "authority storage became a Git worktree"):
@@ -1227,7 +1228,7 @@ class TestD5Registry(unittest.TestCase):
             for operation in (R.lookup, install.stage):
                 before = self.tree()
                 with self.subTest(plan=plan, operation=operation.__name__), \
-                     mock.patch.object(R, "d5_active", return_value=True), \
+                     nullcontext(), \
                      mock.patch.object(R, "_entries", wraps=R._entries) as read, \
                      mock.patch.object(R, "_record_key", wraps=R._record_key) as walk:
                     with self.assertRaises(R.AuthorityError) as caught:
