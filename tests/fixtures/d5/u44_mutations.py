@@ -25,9 +25,9 @@ def replacement(module, name, old, new):
 
 def patches(name):
     if name == 'intent-label-completes':
-        return [replacement(tests.M, 'reconcile', 'if intent is not None:\n',
+        return [replacement(tests.M, 'reconcile', 'if intent is not None:\n            if pr["state"] != "MERGED":',
             'if intent is not None and intent.get("phase") in ("merged", "receipt_recorded"):\n'
-            '            return None\n        if intent is not None:\n')]
+            '            return None\n        if intent is not None:\n            if pr["state"] != "MERGED":')]
     if name == 'legacy-receipt-completes':
         return [replacement(tests.SE, 'admit_merge',
             'if D5.d5_active(Path(state_dir).absolute()):', 'if False:')]

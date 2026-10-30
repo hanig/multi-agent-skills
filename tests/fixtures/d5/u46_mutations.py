@@ -34,7 +34,8 @@ def patch(name):
     import d5_submission as DS
     release = 'if H and S and (not A or N or (F and C)):'
     if name in ('cancel-after-dispatch-noeffect', 'premature-activation'):
-        return replacement(M, 'cancel_before_request', "_d5_refuse('cancel_before_request')", 'pass')
+        return replacement(M, 'cancel_before_request',
+                           "_d5_refuse('cancel_before_request', Path(intent_path).parent)", 'pass')
     if name == 'timeout-completes':
         return replacement(M, '_MergeBoundary.finish', '        raise\n', '        return self.completion()\n')
     if name == 'reap-releases':
