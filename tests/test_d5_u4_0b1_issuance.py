@@ -184,6 +184,9 @@ class TestIssuance(unittest.TestCase):
                 held.assert_not_called()
 
     def test_cold_register_refusal_has_no_import_cache_writes(self):
+        ready(self, *self.args)
+        self.marker.unlink()  # real publication followed by broken-state corruption
+        state.release_lease(self.state)
         # A fresh interpreter and cache root exercise the actual first call.
         # Audit hooks see importlib's native opens, which os.open mocks miss.
         code = """
@@ -208,7 +211,6 @@ def audit(event, args):
     if event.startswith(('subprocess.', 'os.exec', 'os.spawn', 'os.posix_spawn', 'os.fork')) or event == 'os.system':
         launches.append(event)
 sys.addaudithook(audit)
-registry.d5_active = lambda: True
 try:
     observing = True
     try:

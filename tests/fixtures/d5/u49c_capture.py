@@ -8,6 +8,7 @@ import argparse
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import io
 import sys
+import tempfile
 from unittest import mock
 
 
@@ -31,11 +32,11 @@ def inactive_captures(swarm, merge):
             return call
 
         with ExitStack() as stack:
-            stack.enter_context(nullcontext())
+            state_dir = stack.enter_context(tempfile.TemporaryDirectory())
             stack.enter_context(mock.patch.object(swarm.SR, 'apply_agent_resolution',
                 side_effect=stop('apply_agent_resolution')))
             stack.enter_context(mock.patch.object(merge, 'read_object', side_effect=stop('read_object')))
-            stack.enter_context(mock.patch.object(sys, 'argv', ['swarm.py', 'run', 'fixture-plan.json']))
+            stack.enter_context(mock.patch.object(sys, 'argv', ['swarm.py', 'run', 'fixture-plan.json', '--state-dir', state_dir]))
             stack.enter_context(redirect_stdout(out))
             stack.enter_context(redirect_stderr(err))
             try:
@@ -44,7 +45,7 @@ def inactive_captures(swarm, merge):
                 elif entry == 'swarm.main':
                     value = swarm.main()
                 else:
-                    value = getattr(swarm, entry.split('.')[1])(argparse.Namespace(plan='fixture-plan.json'))
+                    value = getattr(swarm, entry.split('.')[1])(argparse.Namespace(plan='fixture-plan.json', state_dir=state_dir))
                 outcome = ['return', value]
             except (CaptureStop, SystemExit) as exc:
                 outcome = [type(exc).__name__, str(exc)]
