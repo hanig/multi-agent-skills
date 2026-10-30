@@ -320,7 +320,13 @@ def _d5_state(state_dir, plan=None, extra_repos=()):
 
 def _d5_bytecode_advisory(state_dir, plan=None):
     """Report an interpreter precondition; U8 may enforce or waive it."""
-    if D5.d5_active(_d5_state(state_dir, plan)) and not sys.dont_write_bytecode:
+    try:
+        directory = _d5_state(state_dir, plan)
+    except SystemExit:
+        # Observations retain their own plan diagnostics. Mutation dispatch
+        # independently resolves the state and still refuses before effects.
+        return
+    if D5.d5_active(directory) and not sys.dont_write_bytecode:
         try:
             diagnostic = sys.stderr
             if diagnostic is not None:

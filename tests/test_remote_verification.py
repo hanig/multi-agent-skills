@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 from tests import test_arc683_shared_guard as fixtures
+from tests.fixtures.d5.ready import ready_installation, readiness
 
 S, V = fixtures.S, fixtures.V
 RV = V.RV
@@ -1034,6 +1035,65 @@ class TestRemoteVerification(unittest.TestCase):
         self.assertEqual(self.ssh_launches(), 1)
         self.assertTrue(self.journal.read_bytes().startswith(legacy))
         self.assertEqual(self.admitted().returncode, 0)
+
+    def test_originating_state_is_audit_only_in_remote_entries(self):
+        for entry in ('supervisor', 'worker'):
+            for classification in ('ready', 'broken'):
+                with self.subTest(entry=entry, classification=classification):
+                    case = TestRemoteVerification('test_direct_bundle_runs_pinned_program_and_records_full_binding')
+                    case.setUp()
+                    try:
+                        state = case.f.state_dir.resolve()
+                        case.program()
+                        ready_installation(case.f.directory / 'remote-installation', state_dir=state)
+                        self.assertEqual(readiness.state(state), readiness.READY)
+                        hidden = case.f.directory / 'hidden-remote-witnesses'
+                        hidden.mkdir()
+                        for name in (readiness.MARKER, readiness.SENTINEL):
+                            (state / name).rename(hidden / name)
+                        self.assertEqual(readiness.state(state), readiness.NOT_INSTALLED)
+                        names = ((readiness.MARKER, readiness.SENTINEL)
+                                 if classification == 'ready' else (readiness.SENTINEL,))
+                        if entry == 'supervisor':
+                            source = SSH
+                            old = ("    result = subprocess.run(['/bin/sh', '-c', command], input=raw,\n"
+                                   "                            stdout=subprocess.DEVNULL if mode in ('ssh-lost-response', 'ssh-lost-both') else None)")
+                            self.assertEqual(source.count(old), 1)
+                        else:
+                            case.slurm_policy()
+                            source = SBATCH
+                            old = "    result = subprocess.run(['/bin/sh', sys.argv[-1]], capture_output=True)"
+                            self.assertEqual(source.count(old), 2)
+                        # Separate filesystems can map the originating pathname
+                        # to unrelated evidence. Expose real published witnesses
+                        # only during the local shim's remote entry, then hide
+                        # them again before the originating process resumes.
+                        new = ('    origin_state = pathlib.Path(%r)\n    hidden = pathlib.Path(%r)\n'
+                               '    names = %r\n    for name in names:\n'
+                               '        assert not (origin_state / name).exists()\n'
+                               '        (hidden / name).rename(origin_state / name)\n'
+                               '    try:\n%s\n    finally:\n'
+                               '        for name in names:\n'
+                               '            (origin_state / name).rename(hidden / name)') % (
+                                   str(state), str(hidden), names,
+                                   '\n'.join('    ' + line for line in old.splitlines()))
+                        changed = source.replace(old, new, 1)
+                        if entry == 'supervisor':
+                            case.write_ssh(changed)
+                        else:
+                            (case.f.bin / 'sbatch').write_text(PYTHON + changed)
+                        result = case.verify()
+                        case.assert_ok(result)
+                        self.assertTrue(case.witness.exists())
+                        self.assertEqual(case.rows()[-1]['result'], 'pass')
+                        self.assertEqual(readiness.state(state), readiness.NOT_INSTALLED)
+                        ledgers = list((state / 'remote-verifications').glob('*.json'))
+                        self.assertEqual(len(ledgers), 1)
+                        request = read_json(ledgers[0])['runs'][-1]['request']
+                        self.assertEqual(request['state_dir'], str(state))
+                        case.assert_clean()
+                    finally:
+                        case.doCleanups()
 
     def test_completed_fail_survives_ssh_255_and_poisoning(self):
         legacy = self.legacy_prefix()

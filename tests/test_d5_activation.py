@@ -1,6 +1,8 @@
 """Installation-derived activation, broken-state corruption and real CLI guards."""
 import ast
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,7 +18,7 @@ sys.path.insert(0, str(ROOT / 'skills/hanig-orchestrate/scripts'))
 import d5_registry as registry
 import d5_activation as activation
 import d5_readiness as readiness
-from tests.fixtures.d5.ready import ready_installation, missing_installation
+from tests.fixtures.d5.ready import ready_installation, missing_installation, classification_only
 
 
 class TestD5Activation(unittest.TestCase):
@@ -64,6 +66,69 @@ class TestD5Activation(unittest.TestCase):
             self.assertFalse(activation.d5_active(self.empty))
             with self.assertRaisesRegex(ValueError, 'absolute state_dir'):
                 activation.d5_active('relative-state')
+
+    def test_default_lookup_and_schema_preserve_posix_path_bytes(self):
+        import swarm
+        paths = swarm.CP
+        outputs, locators = [], []
+        # This host refuses non-UTF8 directory creation. Model the filesystem
+        # discovery result, retaining the real hashing and schema entrypoint.
+        for raw in (b'/project-\xff', b'/project-\xfe', b'/project-ascii'):
+            context = Path(os.fsdecode(raw))
+            with self.subTest(raw=raw), \
+                    mock.patch.object(paths.os, 'getcwd', return_value=str(context)), \
+                    mock.patch.object(paths, '_resolved', side_effect=Path), \
+                    mock.patch.object(paths, '_pre_git_layout', return_value=(None, None)), \
+                    mock.patch.object(paths, '_git', return_value=None), \
+                    mock.patch.object(paths, '_external_base', return_value=self.root), \
+                    mock.patch.object(sys, 'argv', ['swarm.py', 'schema', '--json']):
+                early = paths.pre_git_default_state()
+                normal = paths.default_paths()[0]
+                self.assertEqual(early, normal)
+                self.assertTrue(early.parent.name.endswith(hashlib.sha256(raw).hexdigest()[:12]))
+                locators.append(early)
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                    swarm.main()
+                self.assertEqual(stopped.exception.code, 0)
+                self.assertTrue(json.loads(output.getvalue())['fields'])
+                outputs.append(output.getvalue())
+        self.assertEqual(len(set(locators)), 3)
+        self.assertEqual(len(set(outputs)), 1)
+
+    def test_inactive_guard_rejects_filesystem_operation_siblings(self):
+        source = self.root / 'source'
+        source.write_bytes(b'preserved')
+        fd = os.open(str(source), os.O_RDWR)
+        self.addCleanup(os.close, fd)
+        operations = [
+            ('listdir', lambda: os.listdir(self.root)),
+            ('scandir', lambda: list(os.scandir(self.root))),
+            ('access', lambda: os.access(source, os.R_OK)),
+            ('getcwd', lambda: os.getcwd()),
+            ('symlink', lambda: os.symlink('target', self.root / 'link')),
+            ('link', lambda: os.link(source, self.root / 'hardlink')),
+            ('truncate', lambda: os.truncate(source, 0)),
+            ('ftruncate', lambda: os.ftruncate(fd, 0)),
+            ('read', lambda: os.read(fd, 1)),
+            ('write', lambda: os.write(fd, b'changed')),
+            ('fstat', lambda: os.fstat(fd)),
+            ('fchmod', lambda: os.fchmod(fd, 0o600)),
+            ('path-stat', lambda: source.stat()),
+            ('path-lstat', lambda: source.lstat()),
+            ('path-iterdir', lambda: list(self.root.iterdir())),
+            ('path-glob', lambda: list(self.root.glob('*'))),
+            ('path-rglob', lambda: list(self.root.rglob('*'))),
+            ('path-symlink', lambda: (self.root / 'path-link').symlink_to(source)),
+            ('path-chmod', lambda: source.chmod(0o600)),
+            ('path-read', lambda: source.read_bytes()),
+        ]
+        for name, operation in operations:
+            with self.subTest(operation=name), classification_only(self.empty):
+                self.assertFalse(activation.d5_active(self.empty))
+                with self.assertRaises(AssertionError):
+                    operation()
+        self.assertEqual(source.read_bytes(), b'preserved')
 
     def test_no_cache(self):
         state = self.root / 'installed' / 'state'

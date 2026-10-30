@@ -159,7 +159,7 @@ def _external_base(worktrees):
 def default_paths(cwd=None, worktrees=()):
     """Stable per-project defaults shared by run, status, and outbox."""
     context = project_context(cwd)
-    digest = hashlib.sha256(str(context).encode()).hexdigest()[:12]
+    digest = hashlib.sha256(os.fsencode(context)).hexdigest()[:12]
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", context.name).strip("-.")
     slug = slug or "project"
     project = _external_base(worktrees) / "hanig-swarm" / "projects"
@@ -206,7 +206,7 @@ def pre_git_default_state(cwd=None, plan=None, extra_repos=()):
                 pointer = child / "gitdir"
                 if pointer.is_file():
                     worktrees.add(_resolved(pointer.read_text().rstrip("\n")).parent)
-    digest = hashlib.sha256(str(context).encode()).hexdigest()[:12]
+    digest = hashlib.sha256(os.fsencode(context)).hexdigest()[:12]
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", context.name).strip("-.") or "project"
     return (_external_base(worktrees) / "hanig-swarm" / "projects" /
             (slug + "-" + digest) / "state")

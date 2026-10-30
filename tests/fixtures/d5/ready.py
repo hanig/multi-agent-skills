@@ -118,13 +118,35 @@ def classification_only(state_dir):
             return real(path, mode, *args, **kwargs)
         return call
     with ExitStack() as stack:
-        for name in ('lstat', 'stat', 'readlink'):
-            stack.enter_context(mock.patch.object(os, name, reader(getattr(os, name))))
+        for owner in (os, Path):
+            for name in ('lstat', 'stat', 'readlink'):
+                if hasattr(owner, name):
+                    stack.enter_context(mock.patch.object(owner, name, reader(getattr(owner, name))))
         stack.enter_context(mock.patch.object(os, 'open', opened(os.open, flags=True)))
-        for target in (builtins, io):
+        for target in (builtins, io, Path):
             stack.enter_context(mock.patch.object(target, 'open', opened(target.open)))
-        for name in ('mkdir', 'makedirs', 'unlink', 'remove', 'rename', 'replace', 'rmdir', 'chmod', 'utime'):
-            stack.enter_context(mock.patch.object(os, name, side_effect=AssertionError('inactive mutation: ' + name)))
+        # Pathlib 3.9 caches OS functions in its accessor. Guard its public
+        # filesystem methods as well as the OS entry points on every floor.
+        forbidden = {
+            os: ('access', 'listdir', 'scandir', 'getcwd', 'getcwdb', 'chdir', 'fchdir',
+                 'mkdir', 'makedirs', 'unlink', 'remove', 'rename', 'replace', 'rmdir',
+                 'removedirs', 'renames', 'link', 'symlink', 'chmod', 'fchmod', 'lchmod',
+                 'chown', 'fchown', 'lchown', 'utime', 'truncate', 'ftruncate', 'mkfifo',
+                 'mknod', 'read', 'readv', 'pread', 'preadv', 'write', 'writev', 'pwrite',
+                 'pwritev', 'sendfile', 'copy_file_range', 'splice', 'fstat', 'statvfs',
+                 'fstatvfs', 'pathconf', 'fpathconf', 'getxattr', 'listxattr', 'setxattr',
+                 'removexattr', 'posix_fallocate', 'fsync', 'fdatasync', 'lseek', 'dup',
+                 'dup2', 'close'),
+            Path: ('iterdir', 'glob', 'rglob', 'walk', 'mkdir', 'unlink', 'rmdir',
+                   'rename', 'replace', 'touch', 'symlink_to', 'hardlink_to', 'link_to',
+                   'chmod', 'lchmod'),
+            io: ('FileIO', 'open_code'),
+        }
+        for owner, names in forbidden.items():
+            for name in names:
+                if hasattr(owner, name):
+                    stack.enter_context(mock.patch.object(owner, name,
+                        side_effect=AssertionError('inactive filesystem operation: ' + name)))
         yield
 
 

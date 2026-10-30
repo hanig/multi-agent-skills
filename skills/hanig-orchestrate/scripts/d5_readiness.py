@@ -110,6 +110,9 @@ def _validated(value):
         return installation_state._validated(value)
     except ValueError as exc:
         raise registry.AuthorityError(str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        raise registry.AuthorityError(
+            "D5 readiness: installation binding unavailable; repair with d5_install") from exc
 
 
 def installation(directory):
@@ -117,6 +120,9 @@ def installation(directory):
         return installation_state.installation(directory)
     except ValueError as exc:
         raise registry.AuthorityError(str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        raise registry.AuthorityError(
+            "D5 readiness: installation binding unavailable; repair with d5_install") from exc
 
 
 def state(state_dir):
