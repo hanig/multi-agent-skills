@@ -27,6 +27,7 @@ sys.path.insert(0, str(OPERATOR))
 import swarm as S
 import merge_unit as M
 import d5_activation as activation
+from d5_readiness import MARKER
 from tests.fixtures.d5.ready import ready_installation
 
 FIXTURE = ROOT / "tests/fixtures/d5/u41-inactive-effects.json"
@@ -224,9 +225,11 @@ class SurfaceFixture:
         }
         return calls[name]
 
-    def observe(self, tool, name, active):
+    def observe(self, tool, name, active, broken=False):
         if active:
             ready_installation(self.directory, state_dir=self.state_dir)
+            if broken:
+                (self.state_dir / MARKER).unlink()
         with ExitStack() as stack:
             # Replace PATH for every entry; inherited schedulers change even
             # the inactive first-effect prefix through executable discovery.
