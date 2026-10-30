@@ -1599,12 +1599,10 @@ def main():
     a.add_argument("--record-env", action="append", default=[])
     a.add_argument("--gpu-hours", type=float, default=None)
     a.add_argument("--charge-to", default=None)
-    a.set_defaults(fn=cmd_allocate)
 
     b = sub.add_parser("bind", help="record the scheduler job id")
     b.add_argument("unit_dir")
     b.add_argument("--job-id", required=True)
-    b.set_defaults(fn=cmd_bind)
 
     c = sub.add_parser("check", help="the done predicate")
     c.add_argument("unit_dir")
@@ -1623,13 +1621,12 @@ def main():
     c.add_argument("--result-fd", type=int, default=None, help=argparse.SUPPRESS)
     c.add_argument("--skip-sacct", action="store_true", help=argparse.SUPPRESS)
     c.add_argument("--sacct-status-fd", type=int, default=None, help=argparse.SUPPRESS)
-    c.set_defaults(fn=cmd_check)
 
     for command_parser in sub.choices.values():
         command_parser.add_argument("--state-dir", default=None)
     args = ap.parse_args()
     sys.exit(f"D5 active: unit {args.cmd} is refused before first effect; inspect d5_install readiness"
-             if args.state_dir is not None and D5.d5_active(Path(args.state_dir).absolute()) else args.fn(args))
+             if args.state_dir is not None and D5.d5_active(Path(args.state_dir).absolute()) else {"allocate": cmd_allocate, "bind": cmd_bind, "check": cmd_check}[args.cmd](args))
 
 
 if __name__ == "__main__":
