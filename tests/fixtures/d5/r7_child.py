@@ -81,6 +81,8 @@ def effect(data, inherited, mode):
                                               return_value=Path(data['external'])))
         installation = InstallationWitnesses(t.ledger.readiness.installation(directory))
         stack.callback(installation.close)
+        if mode == 'inactive':
+            installation.present = False
         stack.enter_context(mock.patch.object(t.host, 'session_anchor',
                                               return_value=('native', t.ANCHOR)))
         stack.enter_context(mock.patch.object(t.admission.time, 'time', return_value=150))

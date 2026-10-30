@@ -25,7 +25,7 @@ import d5_host as host
 import d5_lease as lease
 import d5_protocol_locks as protocol
 import d5_registry as registry
-from tests.fixtures.d5.ready import ready, missing_installation, classification_only
+from tests.fixtures.d5.ready import ready, ready_installation, missing_installation, classification_only
 from tests.test_d5_locks import isolate_pool
 
 MANDATE = b"fixture mandate\r\n\xff"
@@ -109,12 +109,15 @@ class TestAdmission(unittest.TestCase):
         (self.directory / ".git").rmdir()
         self.state.rename(self.root / "old-state")
         self.state.mkdir()
+        for artifact in (self.root / "old-state").iterdir():
+            artifact.rename(self.state / artifact.name)
         self.refuse("state_key mismatch")
 
     def test_absent_registration(self):
         # R5-ABSENT-REGISTRATION: no authority read on absent registration.
         state = self.root / "other-state"
         state.mkdir()
+        ready_installation(self.root, state_dir=state)
         with mock.patch.object(store, "read", side_effect=AssertionError("authority read")):
             self.refuse("^not registered$", lambda: self.consume(args=(self.repo, "other", state)))
 

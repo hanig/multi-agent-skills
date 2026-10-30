@@ -207,12 +207,16 @@ class TestMergeAudit(unittest.TestCase):
                 imported.append(name)
                 raise AssertionError('unexpected tracker import')
             return original(name, *args, **kwargs)
+        from tests.fixtures.d5.ready import ready_installation
+        installed = tempfile.TemporaryDirectory()
+        self.addCleanup(installed.cleanup)
+        entry = ready_installation(installed.name)
         with nullcontext(), \
                 mock.patch.object(builtins, '__import__', importing), \
                 mock.patch.object(M.skill_paths, 'sibling_skill_root') as lookup, \
                 mock.patch.object(M.tempfile, 'TemporaryDirectory') as temporary, \
                 redirect_stdout(io.StringIO()) as output, no_effects() as effects:
-            M.print_tracker_audit(SimpleNamespace())
+            M.print_tracker_audit(SimpleNamespace(state_dir=entry['state_dir']))
             self.assertIn('Tracker: UNAVAILABLE (D5 active:', output.getvalue())
             self.assertEqual(effects, ([], []))
             self.assertEqual(imported, [])
