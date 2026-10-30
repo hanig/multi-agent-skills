@@ -1,4 +1,5 @@
 """U4.2 authority seams, restart refusals and unit-local M6 observations."""
+from contextlib import nullcontext
 from contextlib import ExitStack
 from dataclasses import FrozenInstanceError, asdict, replace
 import json
@@ -92,10 +93,10 @@ def ledger_capture():
 def restart():
     data = json.load(sys.stdin)
     receipt = E.Receipt(data["effect_id"], data["directory"],
-        bytes.fromhex(data["binding"]), bytes.fromhex(data["secret"]))
-    attempt = E.Attempt(receipt.effect_id, receipt._directory, receipt._binding, receipt._secret)
+        bytes.fromhex(data["binding"]), bytes.fromhex(data["secret"]), data["state_dir"])
+    attempt = E.Attempt(receipt.effect_id, receipt._directory, receipt._binding, receipt._secret, receipt._state_dir)
     results = []
-    with mock.patch.object(E.registry, "d5_active", return_value=True):
+    with nullcontext():
         for call in (lambda: E.complete(receipt, dict(status="succeeded", detail="fixture response")),
                      lambda: E._classify(attempt, "unknown"),
                      lambda: C._Completion(receipt).uncertain(),
@@ -188,8 +189,8 @@ class TestRequestAuthority(unittest.TestCase):
         c.probe("drain")
         before = tree_bytes(c.root)
         with ExitStack() as stack:
-            stack.enter_context(mock.patch.object(t.registry, "d5_active", DEFAULT_ACTIVE))
-            stack.enter_context(mock.patch.object(t.registry.d5_activation, "d5_active", return_value=True))
+            stack.enter_context(nullcontext())
+            stack.enter_context(nullcontext())
             probes = [stack.enter_context(mock.patch.object(target, name, wraps=getattr(target, name)))
                 for target, name in ((t.protocol._Protocol, "start"), (t.protocol, "pin"),
                     (E, "_write"), (subprocess, "Popen"), (socket, "create_connection"))]
@@ -242,7 +243,7 @@ class TestRequestAuthority(unittest.TestCase):
             for state in ("attempting", "submitted", "completed"):
                 receipt, _ = self.legacy("merge", tag, state)
                 attempt = E.Attempt(receipt.effect_id, receipt._directory,
-                                           receipt._binding, receipt._secret)
+                                           receipt._binding, receipt._secret, receipt._state_dir)
                 before = self.snapshot()
                 calls = [lambda: E.complete(receipt, t.OK),
                          lambda: E._classify(attempt, "submitted"),
@@ -283,7 +284,7 @@ class TestRequestAuthority(unittest.TestCase):
         for tag in (None, "journal", "ledger"):
             receipt, _ = self.legacy("merge", tag)
             payload = dict(effect_id=receipt.effect_id, directory=receipt._directory,
-                binding=receipt._binding.hex(), secret=receipt._secret.hex())
+                binding=receipt._binding.hex(), secret=receipt._secret.hex(), state_dir=receipt._state_dir)
             before = self.snapshot()
             result = subprocess.run([sys.executable, "-c",
                 "from tests.test_d5_u4_2_request_authority import restart; restart()"], cwd=t.ROOT,

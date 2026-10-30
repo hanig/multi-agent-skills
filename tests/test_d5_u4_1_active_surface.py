@@ -1,4 +1,5 @@
 """U4.1 entry refusal, first-effect capture, aliases and installed packages."""
+from contextlib import nullcontext
 import argparse
 import ast
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
@@ -231,7 +232,7 @@ class SurfaceFixture:
             output = io.StringIO()
             stack.enter_context(redirect_stdout(output))
             stack.enter_context(redirect_stderr(output))
-            stack.enter_context(mock.patch.object(activation, "d5_active", return_value=active))
+            stack.enter_context(nullcontext())
             commands, tracker_intents = [], []
             emit = self.s.SO.emit_intent
             def track(*args, **kwargs):
@@ -397,14 +398,14 @@ class TestActiveSurface(unittest.TestCase):
                 argv.extend(([action.option_strings[0]] if action.option_strings else []) + [value])
             # In particular both aliases reach their real shared handler.
             with self.subTest(command=name), mock.patch.object(sys, "argv", ["swarm.py"] + argv), \
-                    mock.patch.object(activation, "d5_active", return_value=True), no_effects() as effects:
+                    nullcontext(), no_effects() as effects:
                 with self.assertRaisesRegex(SystemExit, "D5 active:"):
                     S.main()
                 self.assertEqual(effects, ([], []))
         for name in ("new-command", "status", "advance-code-terminal"):
             args = argparse.Namespace(command=name, fn=lambda _: self.fail("unguarded dispatch"))
             with mock.patch.object(argparse.ArgumentParser, "parse_args", return_value=args), \
-                    mock.patch.object(activation, "d5_active", return_value=True), no_effects() as effects:
+                    nullcontext(), no_effects() as effects:
                 with self.assertRaisesRegex(SystemExit, "D5 active:"):
                     S.main()
                 self.assertEqual(effects, ([], []))
@@ -418,14 +419,14 @@ class TestActiveSurface(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = SurfaceFixture(tmp)
             for mode in modes:
-                with self.subTest(mode=mode), mock.patch.object(activation, "d5_active", return_value=True), \
+                with self.subTest(mode=mode), nullcontext(), \
                         redirect_stderr(io.StringIO()) as err, no_effects() as effects:
                     self.assertEqual(M.main(fixture.margv + mode), 1)
                     self.assertIn("D5 active:", err.getvalue())
                     self.assertEqual(effects, ([], []))
 
     def test_active_observation_dispatch_is_retained(self):
-        with mock.patch.object(activation, "d5_active", return_value=True):
+        with nullcontext():
             for fn in (S.cmd_schema, S.cmd_status, S.cmd_scope_check, S.cmd_validate):
                 S._d5_dispatch(argparse.Namespace(fn=fn, check_seeds=False))
             with self.assertRaisesRegex(SystemExit, "D5 active:"):
@@ -482,7 +483,7 @@ class TestActiveSurface(unittest.TestCase):
         with mock.patch.object(S, "_d5_dispatch", lambda args: None), \
                 mock.patch.object(argparse.ArgumentParser, "parse_args", return_value=argparse.Namespace(
                     fn=lambda args: 0, command="new-alias")), \
-                mock.patch.object(activation, "d5_active", return_value=True):
+                nullcontext():
             with self.assertRaises(AssertionError):
                 with self.assertRaisesRegex(SystemExit, "D5 active:"):
                     S.main()

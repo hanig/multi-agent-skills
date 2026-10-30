@@ -1,4 +1,5 @@
 """R4 consumer tests: real ledger transitions, deterministic DRAIN exclusion."""
+from contextlib import nullcontext
 from contextlib import ExitStack
 from dataclasses import FrozenInstanceError, replace
 import copy
@@ -23,6 +24,7 @@ import d5_authority_store as store
 import d5_host as host
 import d5_custody as custody
 import d5_lease as lease
+from tests.fixtures.d5.ready import ready_installation, missing_installation, classification_only
 from tests.test_d5_authority import grant, MANDATE
 from tests.test_d5_locks import isolate_pool
 
@@ -35,12 +37,11 @@ class TestCompletion(unittest.TestCase):
         self.directory = Path(temporary.name)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.active = self.stack.enter_context(mock.patch.object(
-            ledger.registry, "d5_active", return_value=True))
         self.registration = {"registration_id": "a" * 32,
                              "record_dir": str(self.directory)}
         self.stack.enter_context(mock.patch.object(
             ledger.registry, "lookup", return_value=self.registration))
+        self.entry = ready_installation(self.directory, state_dir=self.directory / "state", record_dir=self.directory)
         self.request = dict(record_id="b" * 32,
             custody=dict(generation=1, session_id="fixture", anchor_pid=123, anchor_start_us=101),
             kind="fixture", scope=dict(plans=["p"], repositories=["r"], actions=["a"], trackers=[]),
@@ -48,7 +49,7 @@ class TestCompletion(unittest.TestCase):
         self.outcome = {"status": "succeeded", "detail": "synthetic response"}
 
     def prepare(self):
-        return ledger.prepare("fixture", "p", "fixture", **self.request)
+        return ledger.prepare("fixture", "p", self.entry["state_dir"], **self.request)
 
     def receipt(self):
         return ledger._classify(self.prepare(), "submitted")
@@ -131,7 +132,7 @@ class TestCompletion(unittest.TestCase):
             if state != "submitted":
                 # Recasting an intent as a Receipt is no submission evidence.
                 forged = ledger.Receipt(attempt.effect_id, attempt._directory,
-                                        attempt._binding, attempt._secret)
+                                        attempt._binding, attempt._secret, attempt._state_dir)
                 with self.refuse(C.TRANSITION):
                     C.bind(forged).complete(self.outcome)
                 self.assertEqual(self.snapshot(), before)
@@ -189,13 +190,15 @@ class TestCompletion(unittest.TestCase):
         for state in ("submitted", "completed"):
             self.assertEqual(json.loads(self.path(receipt).read_bytes())["state"], state)
             before = self.snapshot()
-            self.active.return_value = False
+            corruption = missing_installation(self.entry)
+            corruption.__enter__()
+            self.addCleanup(corruption.__exit__, None, None, None)
             with self.refuse("D5 inactive"):
                 capability.complete(self.outcome)
             with self.refuse("D5 inactive"):
                 uncertainty.uncertain()
             self.assertEqual(self.snapshot(), before)
-            self.active.return_value = True
+            corruption.__exit__(None, None, None)
             self.assertEqual(capability.complete(self.outcome), self.outcome)
         self.assertIsNone(uncertainty.uncertain())
         self.assertEqual(json.loads(self.path(attempt).read_bytes())["state"], "unknown")
@@ -203,7 +206,7 @@ class TestCompletion(unittest.TestCase):
     def test_inactive_binding_refused(self):
         # R4-BYPASS-INACTIVE: no capability is issued through inactive binding.
         receipt = self.receipt()
-        self.active.return_value = False
+        self.stack.enter_context(missing_installation(self.entry))
         with mock.patch.object(protocol, "pin", side_effect=AssertionError("inactive pin")):
             with self.refuse("D5 inactive"):
                 C.bind(receipt)
