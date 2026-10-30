@@ -466,6 +466,12 @@ An unreceived owner message is not machine-observable revocation.
 Only the OWNER merges U8 at quiescence: no live lease holder, merge in flight
 or outstanding merge child. Unknown liveness or remote outcomes block cutover.
 Inventory sessions, workers and queued writes with [the runbook](d5-cutover-runbook.md).
+Activation happens per state directory at the owner's `d5_install` publish,
+not at merge. U8 makes activation installation-derived: no installation evidence
+means inactive, valid evidence means READY, and partial or invalid evidence means
+BROKEN and refuses. Publication writes the durable state-local sentinel first;
+withdrawal keeps it. Repair with `d5_install`, never delete files to deactivate.
+Merging U8 alone changes no behavior for a never-installed state directory.
 Confirm the first bounded lease anew. Rollback: do not merge, or revert the merge;
 preserve unresolved records and do not replay uncertain effects.
 
@@ -479,6 +485,8 @@ currently refusing row-75 route, a prior unit must deliver per-item lease author
 migration or disposition of pre-D5 queued items. Keep them unprovenanced and
 parked. Unguarded linear_sync routes confer no permission.
 
+- A same-UID operator invoking `unit.py` or `remote_verify.py` directly without
+  `--state-dir` is not D5-contained. Coordinator-mediated routes supply the state.
 - No process or same-UID isolation: stubs and descriptor options are not an OS
   boundary. Interpreter effects, including bytecode suppression, are excluded.
 - No repository-wide quiet, noncanonical guard coverage, OD4 closure,
