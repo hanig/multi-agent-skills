@@ -102,7 +102,8 @@ class TestProtocolLocks(unittest.TestCase):
         self.assertFalse((self.directory / "authority.lock").exists())
 
     def ledger_setup(self, stack):
-        stack.enter_context(nullcontext())
+        from tests.fixtures.d5.ready import ready_installation
+        self.state_dir = ready_installation(self.directory, record_dir=self.directory)["state_dir"]
         stack.enter_context(mock.patch.object(ledger.registry, "lookup", return_value={
             "registration_id": "a" * 32, "record_dir": str(self.directory)}))
         return dict(record_id="b" * 32,
@@ -116,7 +117,7 @@ class TestProtocolLocks(unittest.TestCase):
             request = self.ledger_setup(stack)
             with protocol.pin(self.directory) as outer:
                 with outer.drain(), outer.start():
-                    a = ledger.prepare("fixture", "p", "fixture", **request)
+                    a = ledger.prepare("fixture", "p", self.state_dir, **request)
                     original = locks._Record._open
 
                     def opening(record, rank):
@@ -127,7 +128,7 @@ class TestProtocolLocks(unittest.TestCase):
                         with protocol.pin(self.directory / ".") as inner:
                             with inner.drain(), inner.start():
                                 request["correlation"] = {"request_id": "inner"}
-                                b = ledger.prepare("fixture", "p", "fixture", **request)
+                                b = ledger.prepare("fixture", "p", self.state_dir, **request)
                                 self.assertEqual(self.probe(1), "blocked")
                     self.assertEqual(self.probe(1), "blocked")
                 with outer.drain():
@@ -135,7 +136,7 @@ class TestProtocolLocks(unittest.TestCase):
                         receipt = ledger._classify(attempt, "submitted")
                         ledger.complete(receipt, {"status": "succeeded", "detail": attempt.effect_id})
             self.assertNotEqual(a.effect_id, b.effect_id)
-            self.assertEqual(ledger.unresolved("fixture", "p", "fixture"), [])
+            self.assertEqual(ledger.unresolved("fixture", "p", self.state_dir), [])
             self.assertEqual(len(list((self.directory / ledger.DIRECTORY).glob("*.json"))), 2)
         self.assertEqual(self.probe(1), "available")
 
@@ -314,10 +315,10 @@ class TestProtocolLocks(unittest.TestCase):
             stack.enter_context(mock.patch.object(locks._Record, "_exclusive", exclusive))
             for name in ("start", "drain"):
                 stack.enter_context(mock.patch.object(locks._Record, name, side_effect=AssertionError(name)))
-            attempt = ledger.prepare("fixture", "p", "fixture", **request)
+            attempt = ledger.prepare("fixture", "p", self.state_dir, **request)
             receipt = ledger._classify(attempt, "submitted")
             ledger.complete(receipt, {"status": "succeeded", "detail": "fixture"})
-            self.assertEqual(ledger.unresolved("fixture", "p", "fixture"), [])
+            self.assertEqual(ledger.unresolved("fixture", "p", self.state_dir), [])
         self.assertEqual(ranks, [2, 2, 2, 2])
 
 

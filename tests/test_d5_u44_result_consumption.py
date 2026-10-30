@@ -1,4 +1,5 @@
 """U4.4 consumes provider results without granting historical closure authority."""
+from tests.fixtures.d5.ready import ready_installation
 from contextlib import nullcontext
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import copy
@@ -274,13 +275,14 @@ class TestInactiveAndPremature(unittest.TestCase):
                 self.assertEqual(observed['writes'], [])
                 self.assertEqual(observed['files_changed'], [])
                 self.assertIn('D5 active:', str(observed['outcome']) + str(observed['output']))
-        with tempfile.TemporaryDirectory() as root, \
-                nullcontext(), no_effects() as effects:
-            with self.assertRaisesRegex(SE.OutboxError, 'D5 active:'):
-                SE.admit_merge(root, 'u', 'a' * 40)
-            with self.assertRaisesRegex(ValueError, 'coordinator lease required'):
-                M._d5_result_receipt(root, {}, 'runs', 'op', None, 'repo')
-            self.assertEqual(effects, ([], []))
+        with tempfile.TemporaryDirectory() as root:
+            ready_installation(root, state_dir=root)
+            with no_effects() as effects:
+                with self.assertRaisesRegex(SE.OutboxError, 'D5 active:'):
+                    SE.admit_merge(root, 'u', 'a' * 40)
+                with self.assertRaisesRegex(ValueError, 'coordinator lease required'):
+                    M._d5_result_receipt(root, {}, 'runs', 'op', None, 'repo')
+                self.assertEqual(effects, ([], []))
 
 
 if __name__ == '__main__':
