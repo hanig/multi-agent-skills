@@ -293,6 +293,25 @@ confirmation, delegated prompts, watcher honesty, preservation, review
 adjudication, merge, tracker reconciliation, the ordered three-part report,
 and takeover.
 
+The [mandate's judgment policy](docs/orchestrator-mandate.md#the-concurrence-rule)
+and the generated `adjudication.matrix` and `adjudication.concurrence`
+[declarations](skills/hanig-orchestrate/SKILL.md) govern dispositions. An
+orchestrator that did not author the affected design or implementation may
+make reproduced findings nonblocking when unlikely to change design or outcome,
+consulting Sol only when unsure; otherwise the existing concurrence rule applies.
+Writing a unit's task specification is not authorship of its implementation.
+The mandate's non-overridable limits, evidence record and green merge checks
+still bind; a disposition never relabels a failing review as a pass.
+
+The session reads `HANIG_REPORT_TZ` under the generated `report.timezone`
+declaration for its own owner-facing observation times, ETAs, status lines and
+reports. Use a validated IANA zone with its abbreviation and daylight-time
+transitions. Unset or invalid means UTC, announced once per session. Internal
+logs may keep UTC, and verbatim tool output and quoted evidence keep their
+timestamps. This is a session instruction, not a `report.py` runtime option;
+the [operating loop](skills/hanig-orchestrate/references/operating-loop.md#owner-facing-report-times)
+shows validation and conversion guidance.
+
 It has no coordinator executable of its own. Set `HANIG_ORCHESTRATE_DIR` to the
 loaded skill directory, then use the programs from the separately loaded
 `hanig-project`, `hanig-swarm`, `hanig-review-gate`, and
@@ -308,6 +327,26 @@ selective install names all five bundles:
 `swarm.py advance` remains one offline, locked pass that exits. A deterministic
 host scheduler repeats it; the orchestrating session performs connected review,
 merge, tracker, and reporting work around those passes.
+
+**D5 is inactive on main until the owner-merged U8.**
+[`d5_activation.py`](skills/hanig-swarm/scripts/d5_activation.py) returns false,
+and `merge_launch_admitted()` in
+[`merge_unit.py`](skills/hanig-orchestrate/scripts/merge_unit.py) separately
+refuses admission. The containment and entry-routing preparation has landed:
+the D5 merge child uses designated arguments, no shell, closed inherited
+descriptors and a filtered environment; active-D5 entry guards refuse
+unadmitted merge launch, direct unit commands and remote verification. These
+are not an OS or same-UID isolation boundary. In active D5, `swarm.py` warns
+when bytecode writing is enabled and recommends `-B` or
+`PYTHONDONTWRITEBYTECODE=1`; bytecode and temporary-directory readiness remain
+advisory preconditions for U8 to enforce or waive.
+
+The [race tests](tests/test_d5_u7_races.py) exercise ordered histories with
+injected clocks and stub execution, not deployed death detection or exhaustive
+interleavings. The [cutover runbook](docs/d5-cutover-runbook.md) is preparatory:
+it records quiescence checks, parked writes and the unresolved pre-launch
+recovery gap. U8 and its redesign have not landed. The commands below describe
+the current inactive-D5 operation; preparation does not authorize activation.
 
 `flake_triage.py` compares unittest outcomes on pinned head/base:
 
@@ -803,28 +842,30 @@ It supports `--diff` (the default), `--staged`, `--range` and repeatable `--file
 plus `--json`, without provider configuration or network calls. Size results are
 not review verdicts. Plan code units to keep the complete PR below the budget.
 
-Panels, from `reviewers.json`:
+Panel snapshot measured 2026-10-30 at `c2556ad4`. Current routing comes from
+the `enabled`, `profiles` and `effort` fields in
+[`reviewers.json`](skills/hanig-review-gate/reviewers.json), not this table:
 
-| profile | membership | use |
+| profile | measured membership and effort | use |
 |---|---|---|
-| `plan` | luna, kimi-k3 | acceptance criteria and designs, before code exists (owner decision 2026-10-19) |
-| `fast` | luna, haiku-5.5 | cheapest implementation panel, first tier of `--escalate` |
-| `standard` | luna, kimi-k2.7-code, sonnet-5.5 | the usual implementation panel |
-| `deep` | standard + sol at `xhigh` | final escalation tier or explicit `--profile deep` |
+| `plan` | luna `max`, kimi-k3 `xhigh` | acceptance criteria and designs, before code exists |
+| `fast` | luna `max`, haiku-5.5 `max` | cheapest implementation panel, first tier of `--escalate` |
+| `standard` | terra `xhigh`, kimi-k2.7-code `null`, sonnet-5.5 `high` | the usual implementation panel |
+| `deep` | terra `xhigh`, kimi-k2.7-code `null`, sonnet-5.5 `high`, sol `xhigh` | final escalation tier or explicit `--profile deep` |
 
-Owner decision 2026-10-12: Luna runs at `max`, and native Anthropic Haiku 5.5
-joins fast at `max`. Plan pairs OpenAI Astra at `xhigh` with Moonshot Kimi K3
-at `xhigh` (accepted live through OpenRouter), because the orchestrator writing
-plans is a Claude model. Sonnet 5.5 retains standard, deep and committee at
-`high`; Sol retains deep at `xhigh`. Owner decision 2026-10-13: the committee
-is DeepSeek V4 Pro, Gemini 4 Argon at `xhigh`, and Sonnet 5.5. The separate
-`sol-tiebreak` seat is unchanged.
-All enabled seats retain or declare 128000-token output caps; dated acceptance
-probes live in `reviewers.json`. An escalation starting at fast retains Haiku's
-verdict, adds Kimi K2.7 Code and Sonnet at standard, then Sol at deep.
-Pass every author's provider/model ID with `--author`.
+Owner decision 2026-10-19 put Luna in plan with Kimi K3. The 2026-10-28
+changes seated Terra in standard and deep and then set its effort to `xhigh`,
+leaving Luna in fast and plan. Kimi K2.7 Code's `null` effort is deliberate;
+the measurement behind it, output caps, dated acceptance probes, committee
+profiles and tie-break routing live in `reviewers.json`. An escalation retains
+earlier results and adds only newly eligible reviewers at each tier. Pass every
+author's provider/model ID with `--author`.
 
 #### Model families
+
+At the 2026-10-30 snapshot above, Terra's note in [`models.json`](models.json)
+still says `max`. Gate effort comes from the `effort` field in `reviewers.json`,
+which sets Terra to `xhigh`; the registry's prose is not a gate setting.
 
 A seat that declares a `family` in `reviewers.json` (or the code-agent
 `default` in `hanig-swarm/agents.json`) can move to a newer point release per
@@ -1325,9 +1366,11 @@ or named exception deliberately changes that boundary.
 
 **Copying it is not the end of the job.** The file was written on a machine
 with no Paseo and no `~/.paseo`, so nothing in it was dispatched at the time.
-Two of its three distinct provider strings have been since — `claude/opus` and
-`codex/gpt-5.6-sol`, on 2026-09-04, both of which come up on the intended
-model; `codex/gpt-5.6-luna` still has not.
+Measured on 2026-09-04: `claude/opus` and `codex/gpt-5.6-sol` came up on the
+intended model; `codex/gpt-5.6-luna` had not been dispatched. These measurements
+predate the model upgrade. Read current code-unit defaults from
+[`agents.json`](skills/hanig-swarm/agents.json) and model metadata from
+[`models.json`](models.json).
 Every provider string in it is copied verbatim from an attested id — the
 examples in `skills/paseo/SKILL.md`, or an id in `models.json` — but a
 well-formed string is not evidence that an agent comes up on the intended
@@ -1360,8 +1403,9 @@ forward unchanged, and `planning`, `research` and `audit` are readings of a
 decision that was not written in these terms; each says so in its
 `_judgement_calls` entry rather than presenting a guess as settled. And the
 decision does not fully fit: `audit` is one provider string, while the real
-review gate is three models across two API providers run by `review.py` over
-`reviewers.json`, and DeepSeek's Paseo route needs a provider *and* a model,
+review gate selects a panel from the enabled profiles in
+[`reviewers.json`](skills/hanig-review-gate/reviewers.json), and DeepSeek's
+Paseo route needs a provider *and* a model,
 which a one-string category cannot express. Those gaps are recorded in
 `_unmapped` instead of being papered over with invented strings.
 
