@@ -5,8 +5,9 @@ Title: D5 preparatory cutover runbook
 Purpose: Bound the U7 race evidence and list the human checks and owner decisions before U8.
 
 The owner's 2026-10-28 "Drop U5, shrink U7" decision drops U5 because U6
-closes row 75. Only the owner merges U8, which couples [the amended mandate](orchestrator-mandate.md)
-with activation. Merge launch remains closed.
+closes row 75. Only the owner merges U8 and [the amended mandate](orchestrator-mandate.md).
+Activation happens per state directory at the owner's later `d5_install` publish,
+not at merge. Merging U8 alone leaves never-installed directories inactive. Merge launch remains closed.
 
 ## Quiescence and human inventory
 
@@ -52,9 +53,18 @@ until a separately authorized post-D5 unit handles them.
 refusing, a prior unit must deliver per-item lease authority (the original U5
 M1-M5 scope) AND migration or disposition of the pre-D5 queue. Activation leaves U6 in place.
 
-Rollback: do not merge U8, or revert its merge. `merge_launch_admitted()`
+Rollback: do not merge U8, or revert its merge. Deactivation requires reverting
+U8, not deleting readiness files. Publication writes the state-local
+`d5-installed.json` sentinel first, then the external installation record and
+readiness marker. Withdrawal keeps the sentinel, so missing or invalid readiness
+remains BROKEN and refuses; repair through `d5_install promote` at quiescence. `merge_launch_admitted()`
 remains **False**. Preserve unresolved records; rollback is not cancellation
 or permission to replay uncertain effects.
+
+A same-UID operator invoking `unit.py` or `remote_verify.py` directly without
+`--state-dir` is not D5-contained. Coordinator-mediated entries carry the operated
+state; remote stages receive the originating path as audit data after the
+originating host checks activation. This is a mechanism, not isolation.
 
 ## What the seven scenarios measure
 
