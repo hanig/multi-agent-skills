@@ -35,12 +35,12 @@ class TestEffectLog(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.d = Path(temp.name)
         self.reg = {"registration_id": "a" * 32, "record_dir": str(self.d)}
-        self.entry = ready_installation(self.d, state_dir=self.d / "state", record_dir=self.d)
+        self.installation = ready_installation(self.d, state_dir=self.d / "state", record_dir=self.d)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.lookup = self.stack.enter_context(mock.patch.object(
             E.registry, "lookup", return_value=self.reg))
-        self.args = ("checkout", "plan", self.entry["state_dir"])
+        self.args = ("checkout", "plan", self.installation["state_dir"])
         self.req = dict(record_id="b" * 32, custody={"generation": 1,
             "session_id": "session", "anchor_pid": 123, "anchor_start_us": 101},
             kind="test-effect", scope={"plans": ["plan"], "repositories": ["repo"],
@@ -70,7 +70,7 @@ class TestEffectLog(unittest.TestCase):
     def test_A0_inactive_no_io(self):
         handle = self.prepare()
         receipt = E._classify(handle, "submitted")
-        with missing_installation(self.entry), classification_only(self.entry["state_dir"]), ExitStack() as stack:
+        with missing_installation(self.installation), classification_only(self.installation["state_dir"]), ExitStack() as stack:
             for target, name in ((E.registry, "lookup"), (E.locks, "pin"),
                                  (E.registry.subprocess, "Popen")):
                 stack.enter_context(mock.patch.object(target, name,
