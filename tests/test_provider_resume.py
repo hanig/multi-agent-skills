@@ -114,7 +114,7 @@ class Harness(Checks):
     self.plan = {"name": "resume-test", "units": [self.unit]}
     self.sd = self.tmp / "state"
     state = {"schema_version": 1, "units": {}, "halted": None, "plan_digest": S.plan_digest(self.plan)}
-    directory, error = S._allocate(self.plan, self.unit, self.tmp / "runs")
+    directory, error = S._allocate(self.plan, self.unit, self.tmp / "runs", self.sd)
     self.is_none(error)
     self.attempt = Path(directory)
     S._capture_artifact_basis(state, "code", directory, self.unit)
@@ -124,7 +124,7 @@ class Harness(Checks):
     with mock.patch.object(S.U, "run", side_effect=launch):
       job, error = S._submit(self.unit, directory, False, state, str(self.sd))
     self.is_none(error)
-    self.is_none(S._bind(directory, job))
+    self.is_none(S._bind(directory, job, self.sd))
     us = state["units"]["code"]
     us.update(state="RUNNING", attempt_dir=directory, attempts=[directory],
          job_id=job, gpu_hours=0, state_changed_at=1000, code_terminal_watches={self.attempt.name: {

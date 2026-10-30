@@ -86,7 +86,7 @@ def _validate_locked(pinned, checkout, plan_id, state_dir, *, grant_id,
     R1's private pinned record/ownership view is reused to check directory inode
     and this thread's START. STATE is never pre-acquired here; the store owns it.
     """
-    readiness.refuse_broken(state_dir)
+    state_dir = readiness.refuse_broken(state_dir)
     if not registry.d5_active(state_dir):
         raise authority.AuthorityError("D5 is inactive")
     record = pinned._record
