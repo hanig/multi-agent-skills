@@ -48,7 +48,7 @@ def ledger_capture():
             stack.enter_context(mock.patch.object(E.secrets, "token_hex", return_value="a" * 32))
             stack.enter_context(mock.patch.object(E.secrets, "token_bytes", return_value=b"s" * 32))
             if mode == "inactive":
-                c.active.return_value = False
+                c.installation.present = False
             elif mode == "not_submitted":
                 c.boundary.state = S.Initiation.NOT_SUBMITTED
             elif mode == "unknown":

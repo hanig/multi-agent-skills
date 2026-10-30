@@ -106,8 +106,8 @@ def worktrees_of(repo):
     return sorted(found, key=str)
 
 
-def operated_worktrees(plan=None, cwd=None, extra_repos=()):
-    """Resolved worktrees the current command may operate on."""
+def _plan_repositories(plan=None, extra_repos=()):
+    """All declared workspace sources, shared by early and Git-backed lookup."""
     repos = list(extra_repos or [])
     for unit in ((plan or {}).get("units") or []):
         if not isinstance(unit, dict):
@@ -121,6 +121,12 @@ def operated_worktrees(plan=None, cwd=None, extra_repos=()):
         policy = unit.get("workspace_policy") or {}
         if isinstance(policy, dict) and policy.get("path"):
             repos.append(policy["path"])
+    return repos
+
+
+def operated_worktrees(plan=None, cwd=None, extra_repos=()):
+    """Resolved worktrees the current command may operate on."""
+    repos = _plan_repositories(plan, extra_repos)
     context = _resolved(cwd or os.getcwd())
     if git_top(context) is not None:
         repos.append(context)
@@ -161,39 +167,45 @@ def default_paths(cwd=None, worktrees=()):
     return project / "state", project / "runs"
 
 
-def pre_git_default_state(cwd=None):
-    """Locate the ordinary local default without starting Git.
-
-    This is an early D5 containment check, not path-policy validation. The
-    normal resolver still validates the selected paths before any mutation.
-    Supported D5 installations use the registry's standard Git layout.
-    """
-    here = _resolved(cwd or os.getcwd())
-    context = here
-    common = None
+def _pre_git_layout(path):
+    """Read a standard checkout/linked-worktree layout without invoking Git."""
+    here = _resolved(path)
     for candidate in (here,) + tuple(here.parents):
         marker = candidate / ".git"
         if marker.is_dir():
-            context, common = candidate, marker
-            break
+            return candidate, marker
         if marker.is_file():
             raw = marker.read_text().rstrip("\n")
             if raw.startswith("gitdir: "):
-                context = candidate
                 gitdir = _resolved(candidate / raw[len("gitdir: "):])
                 commondir = gitdir / "commondir"
                 common = (_resolved(gitdir / commondir.read_text().rstrip("\n"))
                           if commondir.is_file() else gitdir)
-                break
-    worktrees = [context]
-    if common is not None:
-        worktrees.append(common.parent)
+                return candidate, common
+    return None, None
+
+
+def pre_git_default_state(cwd=None, plan=None, extra_repos=()):
+    """Early containment lookup for the same operated standard Git layouts.
+
+    Include all plan workspaces and linked siblings when selecting the external
+    base. The normal Git-backed resolver still validates before mutation; tests
+    compare both paths for every supported default and workspace source.
+    """
+    here = _resolved(cwd or os.getcwd())
+    context = _pre_git_layout(here)[0] or here
+    worktrees = set()
+    for repo in _plan_repositories(plan, extra_repos) + [here]:
+        top, common = _pre_git_layout(repo)
+        if top is None:
+            continue
+        worktrees.update((top, common.parent))
         linked = common / "worktrees"
         if linked.is_dir():
             for child in linked.iterdir():
                 pointer = child / "gitdir"
                 if pointer.is_file():
-                    worktrees.append(_resolved(pointer.read_text().rstrip("\n")).parent)
+                    worktrees.add(_resolved(pointer.read_text().rstrip("\n")).parent)
     digest = hashlib.sha256(str(context).encode()).hexdigest()[:12]
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", context.name).strip("-.") or "project"
     return (_external_base(worktrees) / "hanig-swarm" / "projects" /

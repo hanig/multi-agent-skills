@@ -16,8 +16,8 @@ def ready_installation(tmp, entry=None, *, state_dir=None, record_dir=None):
     """
     tmp = Path(tmp).resolve()
     if entry is None:
-        directory = Path(state_dir) if state_dir is not None else tmp / 'state'
-        record = Path(record_dir) if record_dir is not None else tmp / 'record'
+        directory = Path(state_dir).resolve() if state_dir is not None else tmp / 'state'
+        record = Path(record_dir).resolve() if record_dir is not None else tmp / 'record'
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         record.mkdir(mode=0o700, parents=True, exist_ok=True)
         key = lambda p: [p.stat().st_dev, p.stat().st_ino]
@@ -113,3 +113,26 @@ def classification_only(state_dir):
         for name in ('mkdir', 'makedirs', 'unlink', 'remove', 'rename', 'replace', 'rmdir', 'chmod', 'utime'):
             stack.enter_context(mock.patch.object(os, name, side_effect=AssertionError('inactive mutation: ' + name)))
         yield
+
+
+class InstallationWitnesses:
+    """Explicit corruption/restoration used by ordered completion fixtures."""
+    def __init__(self, entry):
+        self.entry = entry
+        self._missing = None
+
+    @property
+    def present(self):
+        return self._missing is None
+
+    @present.setter
+    def present(self, value):
+        if value and self._missing is not None:
+            self._missing.__exit__(None, None, None)
+            self._missing = None
+        elif not value and self._missing is None:
+            self._missing = missing_installation(self.entry)
+            self._missing.__enter__()
+
+    def close(self):
+        self.present = True

@@ -109,7 +109,7 @@ class TestSubmitBarrier(unittest.TestCase):
         base.__dict__.update(registry=t.registry, AuthorityError=t.authority.AuthorityError)
         with mock.patch.dict(sys.modules, {base.__name__: base}):
             exec(compile(source, '<recorded-base>', 'exec'), base.__dict__)
-            self.c.active.return_value = False
+            self.c.installation.present = False
             state.release_lease(self.c.state_dir)
             self.marker.unlink()
             results = []

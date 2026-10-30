@@ -4,10 +4,16 @@ Date: 2026-10-22
 Title: D5 integration preparation
 Purpose: Record inactive integration, registration, lease, custody and host contracts.
 
-**D5 activates with the owner-merged U8 cutover.** The shared production
-predicate is True; merge launch remains closed. Existing confirmations are
+**D5 activates per state directory at the owner's `d5_install` publish,
+not at merge.** U8 makes activation installation-derived. A directory without
+installation witnesses keeps its legacy behavior. READY and BROKEN installations
+are active; BROKEN refuses with `d5_install` repair guidance. Merge launch remains closed. Existing confirmations are
 not leases. See [the cutover runbook](d5-cutover-runbook.md) for the measured
 tracker gaps and [the mandate](orchestrator-mandate.md) for bounded authority.
+A same-UID operator invoking `unit.py` or `remote_verify.py` directly without
+`--state-dir` is not D5-contained. Coordinator-mediated calls supply that path;
+remote staging checks it on the originating host and carries it as audit data.
+
 The preparation measurements below remain historical evidence, not a claim
 of complete enforcement.
 
