@@ -1,5 +1,6 @@
 """D5 fixture construction and coordinator command inventories (OD6/OD7)."""
 import ast
+import os
 from pathlib import Path
 import unittest
 
@@ -78,11 +79,12 @@ def fixture_problems(source, filename):
                 problems.append('activation assignment')
         if isinstance(node, ast.Call):
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, 'id', '')
-            values = [n.value for arg in node.args for n in ast.walk(arg)
+            arguments = list(node.args) + [k.value for k in node.keywords]
+            values = [n.value for arg in arguments for n in ast.walk(arg)
                       if isinstance(n, ast.Constant) and isinstance(n.value, str)]
             if name in ('object', 'patch', 'setattr', 'setitem', 'patches') and (
                     any('d5_active' in v or 'd5_activation.' in v for v in values) or
-                    any(isinstance(a, ast.Name) and a.id in activation_modules for a in node.args)):
+                    any(isinstance(a, ast.Name) and a.id in activation_modules for a in arguments)):
                 problems.append('activation patch')
             target, writes = None, False
             if name in ('write_text', 'write_bytes', 'write', 'writelines') and isinstance(node.func, ast.Attribute):
@@ -97,7 +99,9 @@ def fixture_problems(source, filename):
                 mode = next((k.value for k in node.keywords if k.arg in ('mode', 'flags')), mode)
                 if mode is not None:
                     writes = (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
-                              and any(c in mode.value for c in 'wax+')) or any(
+                              and any(c in mode.value for c in 'wax+')) or (
+                        isinstance(mode, ast.Constant) and type(mode.value) is int and bool(mode.value &
+                        (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))) or any(
                         isinstance(n, ast.Attribute) and n.attr in ('O_WRONLY', 'O_RDWR', 'O_CREAT', 'O_TRUNC', 'O_APPEND')
                         for n in ast.walk(mode))
             if writes and target is not None and artifact(target):
@@ -163,12 +167,16 @@ class TestActivationGuards(unittest.TestCase):
     def test_checker_catches_builtin_and_descriptor_writers(self):
         prefix = "p = root / 'd5-readiness.json'\n"
         for call in ("open(p, 'w')", "open(p, mode='wb')", "p.open(mode='w')",
-                     "os.open(p, os.O_WRONLY | os.O_CREAT)", "h = open(p, 'r+')\nh.write('{}')"):
+                     "os.open(p, os.O_WRONLY | os.O_CREAT)", "os.open(p, 1)", "h = open(p, 'r+')\nh.write('{}')"):
             with self.subTest(call=call):
                 self.assertTrue(fixture_problems(prefix + call, 'synthetic.py'))
-        for call in ("open(p)", "open(p, mode='rb')", "p.open()", "os.open(p, os.O_RDONLY)"):
+        for call in ("open(p)", "open(p, mode='rb')", "p.open()", "os.open(p, os.O_RDONLY)", "os.open(p, 0)"):
             with self.subTest(read=call):
                 self.assertEqual(fixture_problems(prefix + call, 'synthetic.py'), [])
+
+    def test_checker_catches_keyword_activation_patch(self):
+        source = "mock.patch.object(registry, attribute='d5_" + "active', new=lambda: False)"
+        self.assertTrue(fixture_problems(source, 'synthetic.py'))
 
     def test_coordinator_passes_state_dir(self):
         inventory = {}
