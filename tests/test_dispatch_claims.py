@@ -971,11 +971,5 @@ class TestTheRunReportSaysWhichPreflightRefused(unittest.TestCase):
         self.assertIn("3 dirty path(s)", html)
 
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TestOneLiveClaimPerOutputDestination, TestUnknownIsNotFree, TestAClaimDoesNotWedgeItsOwnProject,
-    TestReviewAndPushBeforeAgentCreation, TestANonEmptyStashStackRefusesACodeDispatch)
-
-
 if __name__ == "__main__":
     unittest.main()

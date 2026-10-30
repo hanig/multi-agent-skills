@@ -35,8 +35,6 @@ class TestDispatchExtraction(unittest.TestCase):
                     self.assertIs(getattr(SD, name).__globals__, SD.__dict__)
 
     def test_dependency_patch_reaches_coordinator_submit(self):
-        from tests.d5_test_support import for_case
-        for_case(self)
         with tempfile.TemporaryDirectory(prefix="dispatch-env-") as directory:
             unit = {"id": "unit", "kind": "slurm", "command": "true"}
             with mock.patch.object(S.U, "slurm_record_policy",

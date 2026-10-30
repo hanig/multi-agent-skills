@@ -84,7 +84,7 @@ class TestScopeCheck(unittest.TestCase):
         state_file = self.state_dir / S.STATE_FILE
         state_file.write_text(json.dumps(self.state))
         before = {p.name: p.read_bytes() for p in self.state_dir.iterdir()}
-        cmd = [sys.executable, "-B", str(SCRIPTS / "swarm.py"), "scope-check",
+        cmd = [sys.executable, str(SCRIPTS / "swarm.py"), "scope-check",
                str(self.plan_path), "--state-dir", str(self.state_dir),
                "--unit", "u"]
         if json_output:

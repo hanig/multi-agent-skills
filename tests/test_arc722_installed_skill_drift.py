@@ -22,8 +22,6 @@ from tests.scheduler_fixture import codex_environment, state_environment
 
 class TestInstalledSkillDrift(unittest.TestCase):
     def setUp(self):
-        from tests.d5_test_support import for_case
-        for_case(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.tmp = Path(temporary.name)

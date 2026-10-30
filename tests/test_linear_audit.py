@@ -251,13 +251,6 @@ class BudgetLinear(BudgetPaging, FakeLinear):
 
 class AuditCase(unittest.TestCase):
     def setUp(self):
-        # This fixture exercises pre-cutover behavior; active wiring has U8 tests.
-        from tests.d5_test_support import for_case
-        for_case(self)
-        self.prepare_fixture()
-
-    def prepare_fixture(self):
-        """Construct tracker stubs without choosing an activation premise."""
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

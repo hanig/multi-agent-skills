@@ -20,9 +20,9 @@ import swarm_preflight as SP
 _HERE = Path(__file__).resolve().parent
 
 
-def _allocate(plan, u, root):
+def _allocate(plan, u, root, state_dir):
     argv = [sys.executable, str(_HERE / "unit.py"), "allocate",
-            "--root", str(root), "--task", u["id"], "--kind", u["kind"]]
+            "--state-dir", str(state_dir), "--root", str(root), "--task", u["id"], "--kind", u["kind"]]
     if u.get("command"):
         argv += ["--command", u["command"]]
     if u.get("repo"):
@@ -275,7 +275,7 @@ else
 fi'''
 
 
-def _bind(unit_dir, job_id):
+def _bind(unit_dir, job_id, state_dir):
     rc, out, err = U.run([sys.executable, str(_HERE / "unit.py"), "bind",
-                          str(unit_dir), "--job-id", str(job_id)], timeout=120)
+                          str(unit_dir), "--state-dir", str(state_dir), "--job-id", str(job_id)], timeout=120)
     return None if rc == 0 else f"bind failed: {(err or out).strip()[:200]}"

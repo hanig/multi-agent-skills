@@ -3400,15 +3400,5 @@ class TestUnresolvedInputsRoundTwo(unittest.TestCase):
             self._u("user", needs=["mid"], inputs=["generated.txt"])]))
 
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TestDrainRestartReconciliation, TestIntentEnvelope, TestIdempotency,
-    TestNothingClosesOnASelfReport, TestTheTrackerIsNeverAuthoritative, TestThePipelinePredicate,
-    TestTheCodePredicate, TestGatedPromotion, TestTheThreeWeakPointsIFlagged, TestDirectoryOutputs,
-    TestNoStateChangeEscapesTheOutbox, TestRound2ReviewFindings, TestADryRunCannotWedgeARealProject,
-    TestConcurrencyDoesNotDeadlock, TestLiveConcurrencyIsBounded, TestRetryBudgetBehaviour, TestClosureAuthorityIsFixedByKind,
-    TestACodeUnitIsNotDoneUntilMerged, TestAStalledDAGIsDiagnosable, TestAPersistedDoneIsCorrected)
-
-
 if __name__ == "__main__":
     unittest.main(verbosity=2)

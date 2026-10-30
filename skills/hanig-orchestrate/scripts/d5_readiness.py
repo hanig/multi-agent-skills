@@ -18,10 +18,13 @@ import uuid
 import d5_registry as registry
 import d5_authority_store as store
 import d5_protocol_locks as protocol
-import swarm_state as state
+import swarm_state as coordinator_state
+import d5_installation as installation_state
 
 MARKER = "d5-readiness.json"
 INSTALLATION = "installation.json"
+SENTINEL = "d5-installed.json"
+NOT_INSTALLED, READY, BROKEN = "NOT_INSTALLED", "READY", "BROKEN"
 PROFILE = "synchronous-merge-v1"
 BINDING = ("registration_id", "plan_id", "state_dir", "record_dir",
            "repo_key", "state_key", "record_key")
@@ -58,7 +61,7 @@ def _state_directory(directory):
 
 def lease_required(directory):
     directory = _state_directory(directory)
-    _require(state.holds_lease(directory), "caller-held coordinator lease required")
+    _require(coordinator_state.holds_lease(directory), "caller-held coordinator lease required")
     return directory
 
 
@@ -82,7 +85,7 @@ def prepared_state(state_dir):
     """
     directory = _state_directory(state_dir)
     _require(directory.is_dir(), "prepared state directory must exist")
-    path = directory / state.STATE_FILE
+    path = directory / coordinator_state.STATE_FILE
     if not os.path.lexists(path):
         return None
     value = _read(path)
@@ -103,36 +106,35 @@ def prepared_state(state_dir):
 
 
 def _validated(value):
-    _require(type(value) is dict and set(value) == set(BINDING) | {
-        "schema_version", "generation", "profile"}, "invalid installation fields")
-    _require(type(value["schema_version"]) is int and value["schema_version"] == 1,
-             "invalid installation schema")
-    for key in ("generation", "registration_id"):
-        _require(type(value[key]) is str and re.fullmatch(r"[0-9a-f]{32}", value[key]),
-                 "invalid " + key)
-    _require(value["profile"] == PROFILE, "unsupported route profile")
-    registry._plan_id(value["plan_id"])
-    for key in ("state_dir", "record_dir"):
-        _require(type(value[key]) is str and Path(value[key]).is_absolute(), "invalid " + key)
-        if key == "state_dir":
-            _require(str(Path(value[key]).resolve()) == value[key], "noncanonical " + key)
-    for key in ("repo_key", "state_key", "record_key"):
-        pair = value[key]
-        _require(type(pair) is list and len(pair) == 2 and
-                 all(type(n) is int and n >= 0 for n in pair), "invalid " + key)
-    return value
+    try:
+        return installation_state._validated(value)
+    except ValueError as exc:
+        raise registry.AuthorityError(str(exc)) from exc
+
+
+def installation(directory):
+    try:
+        return installation_state.installation(directory)
+    except ValueError as exc:
+        raise registry.AuthorityError(str(exc)) from exc
+
+
+def state(state_dir):
+    return installation_state.state(state_dir)
+
+
+def refuse_broken(state_dir):
+    """Refuse a damaged installation before a consumer can invoke Git."""
+    _require(state(state_dir) != BROKEN,
+             "installation is BROKEN; repair with d5_install promote")
 
 
 def require(state_dir):
-    """Pure reader under the live lease; never provision or publish readiness."""
+    """The same validator, under the live lease; never publish readiness."""
     directory = lease_required(state_dir)
-    value = _validated(_read(directory / MARKER))
-    _require(value["state_dir"] == str(directory), "state directory mismatch")
-    installed = _validated(_read(Path(value["record_dir"]) / INSTALLATION))
-    _require(value == installed, "installation generation or binding mismatch")
-    for name, key in (("state_dir", "state_key"), ("record_dir", "record_key")):
-        _require(list(registry._key(Path(value[name]).stat())) == value[key],
-                 "installation object mismatch")
+    classification, value = installation_state._snapshot(directory)
+    _require(classification == READY,
+             "installation is " + classification + "; repair with d5_install promote")
     return value
 
 
@@ -157,11 +159,11 @@ def installer_lease(state_dir):
         owner = _INSTALLERS.setdefault(directory, dict(
             pid=os.getpid(), count=0, acquired=False, body=threading.RLock()))
         if owner["count"] == 0:
-            borrowed = state.holds_lease(directory)
+            borrowed = coordinator_state.holds_lease(directory)
             if not borrowed:
                 _require(not protocol.locks._held(), "cannot acquire lease under DRAIN or START")
                 _require(directory.is_dir(), "state directory must exist")
-                ok, reason = state.acquire_lease(directory, bump_epoch=False)
+                ok, reason = coordinator_state.acquire_lease(directory, bump_epoch=False)
                 _require(ok, "coordinator lease unavailable: " + str(reason))
             owner["acquired"] = not borrowed
         owner["count"] += 1
@@ -176,7 +178,7 @@ def installer_lease(state_dir):
                 if owner["count"] == 0:
                     try:
                         if owner["acquired"]:
-                            state.release_lease(directory)
+                            coordinator_state.release_lease(directory)
                     finally:
                         del _INSTALLERS[directory]
 
@@ -263,6 +265,7 @@ def publish_installation(entry):
     value = dict((key, entry[key]) for key in BINDING)
     value.update(schema_version=1, generation=uuid.uuid4().hex, profile=PROFILE)
     _validated(value)
+    publish(Path(entry["state_dir"]) / SENTINEL, value)
     publish(Path(entry["record_dir"]) / INSTALLATION, value)
     publish(Path(entry["state_dir"]) / MARKER, value)
     return value
