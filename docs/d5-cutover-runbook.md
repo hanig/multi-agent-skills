@@ -107,6 +107,9 @@ context-compaction testing.
 - Process isolation and same-UID isolation; neither the stubs nor descriptor
   options establish an OS security boundary. Interpreter effects, including
   bytecode suppression, are outside this work.
+- No liveness guarantee against a concurrent same-UID writer replacing
+  installation files. A replacement can block classification before effects;
+  the hang grants no authority.
 - Repository-wide quiet, non-canonical guard coverage, OD4 closure, the
   `linear_sync` mutator direct-root refusals, and a route-inventory drift guard.
   No source/path scanner is added. 
