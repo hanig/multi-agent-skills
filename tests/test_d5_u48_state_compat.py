@@ -130,7 +130,13 @@ class TestInactive(unittest.TestCase):
     def test_inactive_eligible_installer_effects(self):
         data = json.loads(FIXTURE.read_text())
         self.assertEqual(data['base'], BASE)
-        self.assertEqual(installation_capture(), data['installation'])
+        # OD-U8R-2 adds one durable write before the historical publication.
+        # Preserve the recorded oracle for every other effect and its order.
+        expected = copy.deepcopy(data['installation'])
+        marker, = [value for name, value in expected['writes'] if name == R.MARKER]
+        expected['writes'].insert(0, [R.SENTINEL, marker])
+        expected['changed'] = sorted(expected['changed'] + [R.SENTINEL])
+        self.assertEqual(installation_capture(), expected)
 
 
 class TestPreparedState(unittest.TestCase):

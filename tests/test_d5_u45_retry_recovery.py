@@ -42,7 +42,7 @@ def inactive_script_capture(script=None):
         # Python may report a resolved launcher path in its child process.
         child_python = subprocess.check_output(
             [sys.executable, '-c', 'import sys; print(sys.executable)'],
-            env=environment, text=True).strip()
+            env=c.env, text=True).strip()
         before = tree_bytes(c.state_dir)
         result = c.invoke()
         c.assertEqual(result.returncode, 0, result.stdout + result.stderr)
