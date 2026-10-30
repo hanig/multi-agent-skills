@@ -30,7 +30,7 @@ def patches(name):
             '            return None\n        if intent is not None:\n')]
     if name == 'legacy-receipt-completes':
         return [replacement(tests.SE, 'admit_merge',
-            'if D5.d5_active(state_dir):', 'if False:')]
+            'if D5.d5_active(Path(state_dir).absolute()):', 'if False:')]
     if name == 'report-before-readback':
         return [replacement(tests.M, '_d5_result_receipt',
             'J._readback(handle, expected)', 'return expected')]

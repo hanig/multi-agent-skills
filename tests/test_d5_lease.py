@@ -75,9 +75,9 @@ class TestD5Lease(unittest.TestCase):
     def test_inactive_refuses_before_filesystem_access(self):
         self.base.mkdir()
         before = self.tree()
-        self.assertFalse(registry.d5_active(self.state))
         with classification_only(self.state), mock.patch.object(registry, "lookup", side_effect=AssertionError("lookup")), \
                 mock.patch.object(store, "present", side_effect=AssertionError("stat")):
+            self.assertFalse(registry.d5_active(self.state))
             for operation in (self.grant,
                               lambda: lease.revoke(self.repo, "p", self.state, 150, "stop")):
                 with self.subTest(operation=operation):
