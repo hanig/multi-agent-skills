@@ -502,6 +502,7 @@ class TestActiveSurface(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             destination = Path(tmp) / "installed"
             destination.mkdir()
+            installed_state = ready_installation(tmp)["state_dir"]
             # Real copy installation of swarm, then of the operator's declared closure.
             for skill in ("hanig-swarm", "hanig-orchestrate"):
                 names = (skill,) if skill == "hanig-swarm" else (
@@ -515,31 +516,31 @@ root = pathlib.Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(root / 'hanig-swarm/scripts'))
 real_import = builtins.__import__
 def checked(name, *args, **kwargs):
-    if name.startswith('d5_') and name != 'd5_activation':
+    if name.startswith('d5_') and name not in ('d5_activation', 'd5_installation'):
         raise AssertionError('unexpected orchestrate helper: ' + name)
     return real_import(name, *args, **kwargs)
 builtins.__import__ = checked
 import d5_activation
-d5_activation.d5_active = lambda: True
 import swarm
 try:
-    swarm.cmd_continue(None)
+    from types import SimpleNamespace
+    swarm.cmd_continue(SimpleNamespace(state_dir=sys.argv[3]))
 except SystemExit as exc:
     assert 'D5 active:' in str(exc)
 else:
     raise AssertionError('entry not refused')
-assert not any(n.startswith('d5_') and n != 'd5_activation' for n in sys.modules)
+assert not any(n.startswith('d5_') and n not in ('d5_activation', 'd5_installation') for n in sys.modules)
 if sys.argv[2] == 'operator':
     sys.path.insert(0, str(root / 'hanig-orchestrate/scripts'))
     import merge_unit
     assert merge_unit.SWARM == str(root / 'hanig-swarm/scripts/swarm.py')
-    assert merge_unit.main(['unused', '--state-dir', 'unused', '--unit', 'u',
+    assert merge_unit.main(['unused', '--state-dir', sys.argv[3], '--unit', 'u',
                             '--pr', '1', '--approver', 'Operator']) == 1
 print('installed refusal: OK')
 '''
                 env = {k: v for k, v in os.environ.items() if not k.startswith("HANIG_")}
                 result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", probe,
-                                         str(destination), "swarm" if skill == "hanig-swarm" else "operator"],
+                                         str(destination), "swarm" if skill == "hanig-swarm" else "operator", installed_state],
                                         cwd=tmp, env=env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("installed refusal: OK", result.stdout)

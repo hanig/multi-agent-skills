@@ -101,7 +101,7 @@ class TestProcess(unittest.TestCase):
         self.eq(completed.stderr, b'')
         self.data = json.loads(completed.stdout)['data']
         self.directory = Path(self.data['directory'])
-        self.assertFalse(registry.d5_active(self.directory))
+        self.assertTrue(registry.d5_active(self.data["args"][2]))
 
     def holding(self):
         record = self.stack.enter_context(protocol.pin(self.directory))
