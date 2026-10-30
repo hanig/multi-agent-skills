@@ -543,7 +543,7 @@ class CommitIdentityTests(unittest.TestCase):
         state = {"schema_version": 1, "units": {}, "halted": None}
         allocated = self.tmp / "runs" / "code" / "attempt-1"
 
-        def default_allocate(_plan, _unit, _root):
+        def default_allocate(_plan, _unit, _root, state_dir):
             allocated.mkdir(parents=True, exist_ok=True)
             return str(allocated), None
 
