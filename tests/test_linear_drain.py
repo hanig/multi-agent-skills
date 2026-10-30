@@ -1325,7 +1325,11 @@ class TestMergeDrain(DrainCase):
                     if mode == 'no-sibling':
                         raise ValueError('missing sibling')
                     return sibling(*args)
-                with mock.patch.object(MU, 'authority'), mock.patch.object(MU.S.SS, 'acquire_lease', return_value=(True, None)), mock.patch.object(MU.S.SS, 'release_lease'), mock.patch.object(MU, 'reconcile', return_value=['advance']), mock.patch.object(MU, 'run', side_effect=lambda c: (events.append('advance') or subprocess.CompletedProcess(c, 0, '', ''))), mock.patch.object(MU, 'print_pending_close', side_effect=lambda *a: events.append('pending')), mock.patch.object(MU, 'print_tracker_audit', side_effect=lambda *a: events.append('audit')), mock.patch.object(API, 'load_key', return_value=None if mode == 'no-key' else KEY), mock.patch.object(MU.subprocess, 'run', side_effect=child), mock.patch.object(MU.skill_paths, 'sibling_skill_root', side_effect=resolve), contextlib.redirect_stdout(out):
+                def advance(command, *, state_dir):
+                    self.assertEqual(state_dir, str(self.state))
+                    events.append('advance')
+                    return subprocess.CompletedProcess(command, 0, '', '')
+                with mock.patch.object(MU, 'authority'), mock.patch.object(MU.S.SS, 'acquire_lease', return_value=(True, None)), mock.patch.object(MU.S.SS, 'release_lease'), mock.patch.object(MU, 'reconcile', return_value=['advance']), mock.patch.object(MU, 'run', side_effect=advance), mock.patch.object(MU, 'print_pending_close', side_effect=lambda *a: events.append('pending')), mock.patch.object(MU, 'print_tracker_audit', side_effect=lambda *a: events.append('audit')), mock.patch.object(API, 'load_key', return_value=None if mode == 'no-key' else KEY), mock.patch.object(MU.subprocess, 'run', side_effect=child), mock.patch.object(MU.skill_paths, 'sibling_skill_root', side_effect=resolve), contextlib.redirect_stdout(out):
                     self.assertEqual(MU.main(arguments), 0)
                 self.assertEqual(events[:2], ['advance', 'pending'])
                 self.assertEqual(events[-1], 'audit')
