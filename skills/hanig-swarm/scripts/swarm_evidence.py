@@ -745,7 +745,7 @@ def admit_merge(state_dir, unit, produced, expect_repo=None, repo=None,
     Coordinator closure consumption remains outside that restricted profile;
     neither a legacy attestation nor a D5 receipt enables DONE here.
     """
-    if D5.d5_active(state_dir):
+    if D5.d5_active(Path(state_dir).absolute()):
         raise OutboxError("D5 active: merge receipt consumption is outside the supported merge profile")
     if not produced:
         return None, ("this attempt has no produced commit, so there is "

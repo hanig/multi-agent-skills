@@ -35,6 +35,11 @@ def _pairs(items):
 def _state_directory(directory):
     _require(directory is not None, "state_dir is required and must exist")
     try:
+        directory = os.fspath(directory)
+    except TypeError as exc:
+        raise ValueError("D5 readiness: invalid state_dir") from exc
+    _require(os.path.isabs(directory), "absolute state_dir is required")
+    try:
         return Path(os.path.realpath(directory))
     except (TypeError, ValueError, OSError, RuntimeError) as exc:
         raise ValueError("D5 readiness: invalid state_dir") from exc

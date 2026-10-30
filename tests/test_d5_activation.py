@@ -59,6 +59,12 @@ class TestD5Activation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 fn(None)
 
+    def test_classifier_never_uses_ambient_cwd(self):
+        with mock.patch.object(os, 'getcwd', side_effect=AssertionError('ambient cwd')):
+            self.assertFalse(activation.d5_active(self.empty))
+            with self.assertRaisesRegex(ValueError, 'absolute state_dir'):
+                activation.d5_active('relative-state')
+
     def test_no_cache(self):
         state = self.root / 'installed' / 'state'
         self.assertFalse(activation.d5_active(state))
@@ -72,12 +78,14 @@ class TestD5Activation(unittest.TestCase):
         self.assertEqual(readiness.state(state), readiness.READY)
 
     def test_broken_is_active_and_refuses(self):
-        for corruption in ('deleted', 'truncated', 'schema', 'binding', 'symlink', 'mid-publish'):
+        for corruption in ('deleted', 'truncated', 'schema', 'binding', 'symlink', 'mid-publish', 'sentinel-removed'):
             with self.subTest(corruption=corruption):
                 state = self.publish()
                 marker = state / readiness.MARKER
                 if corruption in ('deleted', 'mid-publish'):
                     marker.unlink()
+                elif corruption == 'sentinel-removed':
+                    (state / readiness.SENTINEL).unlink()
                 elif corruption == 'truncated':
                     marker.write_text('{')
                 elif corruption == 'symlink':

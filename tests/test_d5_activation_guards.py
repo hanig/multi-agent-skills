@@ -45,7 +45,13 @@ def fixture_problems(source, filename):
                 return node.name
         return None
     # Track installation path expressions and their aliases through assignments.
-    tainted = set()
+    tainted, attributes = set(), set()
+    def enclosing_class(node):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.ClassDef):
+                return node.name
+        return None
     def key(node):
         return ast.dump(node, include_attributes=False)
     def artifact(node):
@@ -53,7 +59,8 @@ def fixture_problems(source, filename):
                     any(n.value == name or n.value.endswith("/" + name) for name in ARTIFACTS)) or
                    (isinstance(n, ast.Attribute) and n.attr in ('MARKER', 'INSTALLATION', 'SENTINEL')
                     and isinstance(n.value, ast.Name) and n.value.id in readers) or
-                   (function(node), key(n)) in tainted for n in ast.walk(node))
+                   ((function(node), key(n)) in tainted or
+                    (enclosing_class(node), key(n)) in attributes) for n in ast.walk(node))
     for _ in range(5):
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign) and artifact(node.value):
@@ -62,7 +69,7 @@ def fixture_problems(source, filename):
                     if isinstance(target, ast.Name):
                         tainted.add((function(node), key(ast.Name(id=target.id, ctx=ast.Load()))))
                     elif isinstance(target, ast.Attribute):
-                        tainted.add((function(node), key(ast.Attribute(value=target.value, attr=target.attr, ctx=ast.Load()))))
+                        attributes.add((enclosing_class(node), key(ast.Attribute(value=target.value, attr=target.attr, ctx=ast.Load()))))
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -127,6 +134,10 @@ class TestActivationGuards(unittest.TestCase):
 
     def test_checker_detects_handwritten_marker(self):
         self.assertTrue(fixture_problems("p = root / 'd5-readiness.json'\np.write_text('{}')", 'synthetic.py'))
+
+    def test_checker_tracks_installation_paths_across_fixture_methods(self):
+        source = "class Fixture:\n def setUp(self):\n  self.marker = root / 'd5-readiness.json'\n def test_bad(self):\n  self.marker.write_text('{}')\n"
+        self.assertTrue(fixture_problems(source, 'synthetic.py'))
 
     def test_coordinator_passes_state_dir(self):
         inventory = {}
