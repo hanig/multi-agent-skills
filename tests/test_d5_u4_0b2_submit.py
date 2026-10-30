@@ -104,23 +104,17 @@ class TestSubmitBarrier(unittest.TestCase):
             history.assert_not_called()
 
     def test_M6_inactive_submit_matches_recorded_base(self):
-        source = json.loads((t.ROOT / 'tests/fixtures/d5/u4_0b2_inactive_base.json').read_text())['source']
-        base = ModuleType('d5_submission_recorded_base')
-        base.__dict__.update(registry=t.registry, AuthorityError=t.authority.AuthorityError)
-        with mock.patch.dict(sys.modules, {base.__name__: base}):
-            exec(compile(source, '<recorded-base>', 'exec'), base.__dict__)
-            self.c.installation.present = False
-            state.release_lease(self.c.state_dir)
-            self.marker.unlink()
-            results = []
-            for module in (base, t.submission):
-                with no_effects() as observed:
-                    with self.assertRaises(t.authority.AuthorityError) as error:
-                        module.submit(*self.c.args, **self.c.request,
-                                      operation=None, boundary=None)
-                    results.append((type(error.exception), str(error.exception), observed))
-            self.assertEqual(results[0], results[1])
-            self.assertEqual(results[1][1:], ('D5 is inactive', ([], [])))
+        historical = json.loads((t.ROOT / 'tests/fixtures/d5/u4_0b2_inactive_base.json').read_text())
+        outcomes = json.loads((t.ROOT / 'tests/fixtures/d5/historical-inactive-outcomes.json').read_text())
+        self.c.installation.present = False
+        state.release_lease(self.c.state_dir)
+        expected = outcomes[historical['base']]['d5_submission.submit']
+        with no_effects() as observed:
+            with self.assertRaises(t.authority.AuthorityError) as error:
+                t.submission.submit(*self.c.args, **self.c.request, operation=None, boundary=None)
+            result = (type(error.exception).__name__, str(error.exception), observed)
+        self.assertEqual(result, tuple(expected) + (([], []),))
+        self.assertEqual(result[1:], ('D5 is inactive', ([], [])))
         self.assertEqual(self.c.rows(), [])
         self.assertEqual(self.c.boundary.calls, [])
 
@@ -285,7 +279,7 @@ class TestSuccessorGate(unittest.TestCase):
                     mock.patch.object(readiness, 'publish', side_effect=publishing):
                 operation()
             expected = ['authority'] if name == 'replace' else []
-            self.assertEqual(events, expected + [readiness.INSTALLATION, readiness.MARKER])
+            self.assertEqual(events, expected + [readiness.SENTINEL, readiness.INSTALLATION, readiness.MARKER])
             self.assertNotEqual(readiness.require(self.c.state_dir)['generation'], before['generation'])
 
     def test_replacement_accepts_record_directory_alias(self):

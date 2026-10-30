@@ -123,18 +123,36 @@ def state(state_dir):
     return installation_state.state(state_dir)
 
 
+def activation_directory(state_dir):
+    """Expand caller locators before classification, without filesystem reads."""
+    _require(state_dir is not None, "state_dir is required and must exist")
+    try:
+        return Path(state_dir).expanduser()
+    except (TypeError, ValueError, OSError, RuntimeError) as exc:
+        raise registry.AuthorityError("D5 readiness: invalid state_dir") from exc
+
+
 def refuse_broken(state_dir):
-    """Refuse a damaged installation before a consumer can invoke Git."""
-    _require(state(state_dir) != BROKEN,
-             "installation is BROKEN; repair with d5_install promote")
+    """Resolve caller syntax and refuse damage before a consumer invokes Git."""
+    directory = activation_directory(state_dir)
+    if state(directory) == BROKEN:
+        try:
+            require(directory)
+        except registry.AuthorityError as exc:
+            message = str(exc)
+            if "d5_install" not in message:
+                message += "; repair with d5_install promote"
+            raise registry.AuthorityError(message) from exc
+    return directory
 
 
 def require(state_dir):
     """The same validator, under the live lease; never publish readiness."""
     directory = lease_required(state_dir)
     classification, value = installation_state._snapshot(directory)
-    _require(classification == READY,
-             "installation is " + classification + "; repair with d5_install promote")
+    if classification != READY:
+        reason = value or "D5 readiness: missing or malformed installation state"
+        raise registry.AuthorityError(reason + "; repair with d5_install promote")
     return value
 
 

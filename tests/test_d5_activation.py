@@ -98,6 +98,9 @@ class TestD5Activation(unittest.TestCase):
 
     def test_registry_requires_readiness(self):
         state = self.publish()
+        with mock.patch.object(registry, 'lookup', side_effect=AssertionError('lookup before readiness')):
+            with self.assertRaisesRegex(registry.AuthorityError, 'caller-held coordinator lease'):
+                registry.register(self.root, 'p', state)
         (state / readiness.MARKER).unlink()
         with readiness.installer_lease(state), mock.patch.object(registry, '_git') as git:
             with self.assertRaisesRegex(registry.AuthorityError, 'd5_install'):
@@ -232,6 +235,15 @@ class TestD5Activation(unittest.TestCase):
                         side_effect=AssertionError('Git before D5 refusal')):
                     with self.assertRaisesRegex(SystemExit, 'D5 active:'):
                         call()
+
+    def test_expanded_explicit_state_matches_operated_state(self):
+        import swarm
+        state = self.publish()
+        with mock.patch.dict(os.environ, {'HOME': str(state.parent)}), \
+                mock.patch.object(subprocess, 'run', side_effect=AssertionError('Git before refusal')):
+            self.assertEqual(swarm._d5_state('~/state'), state)
+            with self.assertRaisesRegex(SystemExit, 'D5 active:'):
+                swarm._d5_refuse('explicit', '~/state')
 
     def test_no_tracked_readiness(self):
         names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).split(b'\0')

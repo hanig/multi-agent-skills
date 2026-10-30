@@ -67,10 +67,11 @@ class TestEvidenceExtraction(unittest.TestCase):
             self.assertIn("no merge receipt", refusal)
 
     def test_owner_sink_patch_reaches_checker_through_facade(self):
-        with mock.patch.object(SE, "_authority_result_sink",
+        with tempfile.TemporaryDirectory() as state_dir, \
+                mock.patch.object(SE, "_authority_result_sink",
                                wraps=SE._authority_result_sink) as sink, \
                 mock.patch.object(SE.U, "run", return_value=(0, "diagnostic", "")) as run:
-            self.assertEqual(S._check("/attempt"), (0, "diagnostic", "", ""))
+            self.assertEqual(S._check("/attempt", state_dir=state_dir), (0, "diagnostic", "", ""))
         self.assertEqual(sink.call_count, 2)
         run.assert_called_once()
         self.assertEqual(len(run.call_args.kwargs["pass_fds"]), 2)

@@ -566,7 +566,7 @@ class TestTheSealActuallyTravels(unittest.TestCase):
 
         self.S.U.run = spy
         try:
-            self.S._check(str(self.att), {"attempt_id": "att1"})
+            self.S._check(str(self.att), {"attempt_id": "att1"}, state_dir=self.tmp / "state")
         finally:
             self.S.U.run = real
         self.assertIn("--launch-facts", seen["argv"])

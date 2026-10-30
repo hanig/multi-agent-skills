@@ -28,7 +28,7 @@ import d5_readiness as readiness
 
 @contextmanager
 def _started(checkout, plan_id, state_dir):
-    readiness.refuse_broken(state_dir)
+    state_dir = readiness.refuse_broken(state_dir)
     if not registry.d5_active(state_dir):
         raise authority.AuthorityError("D5 is inactive")
     entry = registry.lookup(checkout, plan_id, state_dir)
