@@ -17,7 +17,7 @@ import d5_authority_store as store
 import d5_host as host
 import d5_lease as lease
 import d5_registry as registry
-from tests.fixtures.d5.ready import ready, classification_only
+from tests.fixtures.d5.ready import ready, classification_only, missing_installation
 from tests.test_d5_locks import isolate_pool
 
 
@@ -53,9 +53,9 @@ class TestD5Lease(unittest.TestCase):
                                    return_value=self.directory / "installed-registry"):
                 ready(self, self.repo, "p", self.state)
 
-    def register(self):
+    def register(self, promote=True):
         with nullcontext():
-            return ready(self, self.repo, "p", self.state)
+            return ready(self, self.repo, "p", self.state, promote=promote)
 
     def grant(self, **changes):
         args = dict(self.args, **changes)
@@ -242,7 +242,7 @@ class TestD5Lease(unittest.TestCase):
                 self.assertEqual(self.base.exists(), base_exists)
 
     def test_status_registered_without_record_creates_nothing(self):
-        entry = self.register()
+        entry = self.register(promote=False)
         (self.base / "hanig-authority/v1/registry.lock").unlink()
         before = self.tree()
         self.assertEqual(self.status(), {"state": "inactive", "registration": entry,
@@ -263,7 +263,8 @@ class TestD5Lease(unittest.TestCase):
             for changes, expected in (({}, "valid"), ({"now": 200}, "expired"),
                                       ({"mandate_bytes": b"changed"}, "mandate_changed")):
                 with self.subTest(active=active, expected=expected), \
-                        nullcontext():
+                        (nullcontext() if active else missing_installation(entry)):
+                    before = self.tree()
                     self.assertEqual(self.status(**changes), {
                         "state": "active" if active else "inactive", "registration": entry,
                         "record": record, "record_state": expected})

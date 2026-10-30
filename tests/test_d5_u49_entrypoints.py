@@ -52,7 +52,7 @@ class TestRoutes(InstallationFixture):
                     mock.patch.object(S.SR, 'apply_agent_resolution',
                                       side_effect=SystemExit('legacy preparation')) as legacy:
                 with self.assertRaisesRegex(SystemExit, 'D5 active:.*cmd_run' if active else 'legacy preparation'):
-                    S.cmd_run(argparse.Namespace(plan='fixture-plan.json'))
+                    S.cmd_run(argparse.Namespace(plan='fixture-plan.json', state_dir=str(self.state)))
                 self.assertEqual(legacy.call_count, 0 if active else 1)
 
     def test_cmd_advance(self):
@@ -63,7 +63,7 @@ class TestRoutes(InstallationFixture):
                     mock.patch.object(S.SR, 'apply_agent_resolution',
                                       side_effect=SystemExit('legacy preparation')) as legacy, \
                     mock.patch.object(S, 'cmd_run', wraps=S.cmd_run) as run:
-                args = argparse.Namespace(plan='fixture-plan.json')
+                args = argparse.Namespace(plan='fixture-plan.json', state_dir=str(self.state))
                 with self.assertRaisesRegex(SystemExit, 'D5 active:.*cmd_run' if active else 'legacy preparation'):
                     S.cmd_advance(args)
                 run.assert_called_once_with(args)
@@ -77,7 +77,7 @@ class TestRoutes(InstallationFixture):
             with self.subTest(active=active), \
                     self.activation_state(active), \
                     mock.patch.object(sys, 'dont_write_bytecode', True), \
-                    mock.patch.object(sys, 'argv', ['swarm.py', 'run', 'fixture-plan.json']), \
+                    mock.patch.object(sys, 'argv', ['swarm.py', 'run', 'fixture-plan.json', '--state-dir', str(self.state)]), \
                     mock.patch.object(S, 'cmd_run', return_value=19) as run:
                 with self.assertRaises(SystemExit) as stopped:
                     S.main()
@@ -157,7 +157,7 @@ class TestAdvisory(InstallationFixture):
                             if entry == 'main':
                                 S.main()
                             else:
-                                getattr(S, entry)(argparse.Namespace(plan='fixture-plan.json'))
+                                getattr(S, entry)(argparse.Namespace(plan='fixture-plan.json', state_dir=str(self.state)))
                         if entry == 'main':
                             self.assertEqual(stopped.exception.code, 0)
                         elif active:
@@ -178,6 +178,7 @@ class TestAdvisory(InstallationFixture):
             with self.subTest(stream=type(stream).__name__), ExitStack() as stack:
                 stack.enter_context(missing_installation(self.entry))
                 stack.enter_context(classification_only(self.state))
+                stack.enter_context(mock.patch.object(argparse, "_", lambda text: text))
                 stack.enter_context(mock.patch.object(sys, 'dont_write_bytecode', False))
                 stack.enter_context(redirect_stderr(stream))
                 for owner, name in ((Path, 'iterdir'),
@@ -187,7 +188,7 @@ class TestAdvisory(InstallationFixture):
                 self.assertIs(sys.dont_write_bytecode, False)
                 # Exercise a real allowed consumer with a failing stderr too.
                 stack.enter_context(mock.patch.object(argparse.ArgumentParser, 'parse_args',
-                    return_value=argparse.Namespace(fn=S.cmd_schema, state_dir=str(self.state))))
+                    return_value=argparse.Namespace(fn=S.cmd_schema, state_dir=str(self.state), json=False)))
                 stack.enter_context(redirect_stdout(io.StringIO()))
                 with self.assertRaises(SystemExit) as stopped:
                     S.main()

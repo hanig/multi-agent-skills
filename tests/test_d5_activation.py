@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / 'skills/hanig-orchestrate/scripts'))
 import d5_registry as registry
 import d5_activation as activation
 import d5_readiness as readiness
-from tests.fixtures.d5.ready import ready_installation
+from tests.fixtures.d5.ready import ready_installation, missing_installation
 
 
 class TestD5Activation(unittest.TestCase):
@@ -103,6 +103,18 @@ class TestD5Activation(unittest.TestCase):
             with self.assertRaisesRegex(registry.AuthorityError, 'd5_install'):
                 registry.register(self.root, 'p', state)
             git.assert_not_called()
+
+    def test_corruption_fixture_preserves_only_its_own_metadata(self):
+        state = self.publish()
+        before = state.stat().st_mtime_ns
+        with missing_installation(self.entry):
+            self.assertFalse(activation.d5_active(state))
+        self.assertEqual(state.stat().st_mtime_ns, before)
+        with missing_installation(self.entry):
+            (state / 'consumer-write').write_bytes(b'visible')
+            os.utime(state, ns=(1, 1))
+        self.assertNotEqual(state.stat().st_mtime_ns, before)
+        self.assertEqual((state / 'consumer-write').read_bytes(), b'visible')
 
     def test_publish_interruption_order(self):
         state = self.publish()
