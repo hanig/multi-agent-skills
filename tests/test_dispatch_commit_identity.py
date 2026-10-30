@@ -224,7 +224,7 @@ class CommitIdentityTests(unittest.TestCase):
     def test_launch_is_bound_to_checked_commit_after_checkout_moves(self):
         moved = {"head": None}
 
-        def allocate(_plan, _unit, _root):
+        def allocate(_plan, _unit, _root, state_dir):
             git(self.repo, "checkout", "-qb", "moved-after-check")
             (self.repo / "tracked.txt").write_text("moved\n")
             git(self.repo, "add", "tracked.txt")
@@ -260,7 +260,7 @@ class CommitIdentityTests(unittest.TestCase):
         state = {"units": {}}
         counter = {"n": 0}
 
-        def allocate(_plan, unit, root):
+        def allocate(_plan, unit, root, state_dir):
             counter["n"] += 1
             if counter["n"] == 1:
                 # Move only the remote target after admission. The second
@@ -334,7 +334,7 @@ class CommitIdentityTests(unittest.TestCase):
                 repo = unit["repo"]
             return repo, problem
 
-        def allocate(_plan, unit, root):
+        def allocate(_plan, unit, root, state_dir):
             path = Path(root) / unit["id"] / ("alias-" + unit["id"])
             path.mkdir(parents=True)
             return str(path), None
