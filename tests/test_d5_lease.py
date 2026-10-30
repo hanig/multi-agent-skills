@@ -17,7 +17,7 @@ import d5_authority_store as store
 import d5_host as host
 import d5_lease as lease
 import d5_registry as registry
-from tests.fixtures.d5.ready import ready
+from tests.fixtures.d5.ready import ready, classification_only
 from tests.test_d5_locks import isolate_pool
 
 
@@ -75,8 +75,8 @@ class TestD5Lease(unittest.TestCase):
     def test_inactive_refuses_before_filesystem_access(self):
         self.base.mkdir()
         before = self.tree()
-        self.assertFalse(registry.d5_active())
-        with mock.patch.object(registry, "lookup", side_effect=AssertionError("lookup")), \
+        self.assertFalse(registry.d5_active(self.state))
+        with classification_only(self.state), mock.patch.object(registry, "lookup", side_effect=AssertionError("lookup")), \
                 mock.patch.object(store, "present", side_effect=AssertionError("stat")):
             for operation in (self.grant,
                               lambda: lease.revoke(self.repo, "p", self.state, 150, "stop")):

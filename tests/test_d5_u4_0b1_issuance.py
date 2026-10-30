@@ -316,7 +316,7 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
                     outcome = (type(exc).__name__, str(exc))
             return outcome, launches, writes, before == self.fixture.tree()
 
-        self.assertFalse(registry.d5_active())
+        self.assertFalse(registry.d5_active(self.state))
         for module, name, kwargs in self.operations():
             path = Path(module.__file__).relative_to(fixtures.ROOT)
             source = baseline["modules"][module.__name__]["source"]

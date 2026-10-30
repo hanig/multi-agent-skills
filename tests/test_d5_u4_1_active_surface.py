@@ -27,6 +27,7 @@ sys.path.insert(0, str(OPERATOR))
 import swarm as S
 import merge_unit as M
 import d5_activation as activation
+from tests.fixtures.d5.ready import ready_installation
 
 FIXTURE = ROOT / "tests/fixtures/d5/u41-inactive-effects.json"
 MANIFEST = ROOT / "tests/fixtures/d5/integration-manifest.json"
@@ -211,7 +212,7 @@ class SurfaceFixture:
             import linear_api
             patch(linear_api, "load_key", "synthetic-fixture-key")
         calls = {
-            "run": lambda: m.run(["gh", "pr", "merge", "7", "--squash"]),
+            "run": lambda: m.run(["gh", "pr", "merge", "7", "--squash"], state_dir=self.state_dir),
             "current_intent": lambda: m.current_intent(self.state_dir, self.binding, a.root),
             "abandon": lambda: m.abandon(a, self.state_dir / "intent.json", {}, {}, "op"),
             "reconcile": lambda: m.reconcile(a, self.plan),
@@ -223,6 +224,8 @@ class SurfaceFixture:
         return calls[name]
 
     def observe(self, tool, name, active):
+        if active:
+            ready_installation(self.directory, state_dir=self.state_dir)
         with ExitStack() as stack:
             # Replace PATH for every entry; inherited schedulers change even
             # the inactive first-effect prefix through executable discovery.
@@ -386,6 +389,9 @@ class TestActiveSurface(unittest.TestCase):
         manifest = json.loads(MANIFEST.read_text())
         parser = parser_for(manifest["tools"]["swarm.py"])
         subs = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        state_dir = ready_installation(temporary.name)["state_dir"]
         for name, child in subs.choices.items():
             if name in ("schema", "status", "scope-check", "validate"):
                 continue
@@ -396,6 +402,8 @@ class TestActiveSurface(unittest.TestCase):
                 value = (list(action.choices)[0] if action.choices else
                          "1" if action.type is int else "fixture")
                 argv.extend(([action.option_strings[0]] if action.option_strings else []) + [value])
+            if "--state-dir" in child._option_string_actions:
+                argv += ["--state-dir", state_dir]
             # In particular both aliases reach their real shared handler.
             with self.subTest(command=name), mock.patch.object(sys, "argv", ["swarm.py"] + argv), \
                     nullcontext(), no_effects() as effects:
@@ -403,7 +411,7 @@ class TestActiveSurface(unittest.TestCase):
                     S.main()
                 self.assertEqual(effects, ([], []))
         for name in ("new-command", "status", "advance-code-terminal"):
-            args = argparse.Namespace(command=name, fn=lambda _: self.fail("unguarded dispatch"))
+            args = argparse.Namespace(state_dir=state_dir, command=name, fn=lambda _: self.fail("unguarded dispatch"))
             with mock.patch.object(argparse.ArgumentParser, "parse_args", return_value=args), \
                     nullcontext(), no_effects() as effects:
                 with self.assertRaisesRegex(SystemExit, "D5 active:"):
@@ -418,6 +426,7 @@ class TestActiveSurface(unittest.TestCase):
                  ["--abandon-intent", "op", "--reason", "test"])
         with tempfile.TemporaryDirectory() as tmp:
             fixture = SurfaceFixture(tmp)
+            ready_installation(tmp, state_dir=fixture.state_dir)
             for mode in modes:
                 with self.subTest(mode=mode), nullcontext(), \
                         redirect_stderr(io.StringIO()) as err, no_effects() as effects:
@@ -426,11 +435,12 @@ class TestActiveSurface(unittest.TestCase):
                     self.assertEqual(effects, ([], []))
 
     def test_active_observation_dispatch_is_retained(self):
-        with nullcontext():
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = ready_installation(tmp)["state_dir"]
             for fn in (S.cmd_schema, S.cmd_status, S.cmd_scope_check, S.cmd_validate):
-                S._d5_dispatch(argparse.Namespace(fn=fn, check_seeds=False))
+                S._d5_dispatch(argparse.Namespace(fn=fn, check_seeds=False, state_dir=state_dir))
             with self.assertRaisesRegex(SystemExit, "D5 active:"):
-                S._d5_dispatch(argparse.Namespace(fn=S.cmd_validate, check_seeds=True))
+                S._d5_dispatch(argparse.Namespace(fn=S.cmd_validate, check_seeds=True, state_dir=state_dir))
 
     def test_named_route_ownership_and_callers(self):
         profile = json.loads(MANIFEST.read_text())["u41_active_surface"]

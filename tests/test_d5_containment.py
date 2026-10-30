@@ -73,8 +73,9 @@ class TestMergeAdmission(unittest.TestCase):
                 case = TestD5Registry()
                 case.setUp()
                 stack.callback(case.doCleanups)
-                if installed:
-                    ready(case, case.repo, 'p', case.state)
+                ready(case, case.repo, 'p', case.state)
+                if not installed:
+                    (case.state / DR.MARKER).unlink()
                 tmp = stack.enter_context(tempfile.TemporaryDirectory())
                 fixture = SurfaceFixture(tmp)
                 fixture.args.state_dir = str(case.state)

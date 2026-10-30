@@ -194,7 +194,7 @@ class TestRequestAuthority(unittest.TestCase):
             probes = [stack.enter_context(mock.patch.object(target, name, wraps=getattr(target, name)))
                 for target, name in ((t.protocol._Protocol, "start"), (t.protocol, "pin"),
                     (E, "_write"), (subprocess, "Popen"), (socket, "create_connection"))]
-            self.assertTrue(t.registry.d5_active())
+            self.assertTrue(t.registry.d5_active(c.state_dir))
             with self.assertRaisesRegex(Denied, "journal binding"):
                 c.submit()
             with self.assertRaisesRegex(Denied, "not designated"):
