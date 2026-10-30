@@ -1,4 +1,5 @@
 """U4.5 fresh-process crash recovery; the actual CLI never replays a merge."""
+from tests.fixtures.d5.ready import ready_installation
 from contextlib import nullcontext
 from contextlib import ExitStack
 from datetime import datetime
@@ -320,12 +321,13 @@ class TestInactiveAndPremature(unittest.TestCase):
                 for key in ('launches', 'writes', 'files_changed'):
                     self.assertEqual(observed[key], [])
                 self.assertIn('D5 active:', str(observed['outcome']) + str(observed['output']))
-        with tempfile.TemporaryDirectory() as root, \
-                nullcontext(), no_effects() as effects:
-            with self.assertRaisesRegex(ValueError, 'coordinator lease required'):
-                with J.recovery_drain(root):
-                    self.fail('entered recovery without readiness')
-            self.assertEqual(effects, ([], []))
+        with tempfile.TemporaryDirectory() as root:
+            ready_installation(root, state_dir=root)
+            with no_effects() as effects:
+                with self.assertRaisesRegex(ValueError, 'coordinator lease required'):
+                    with J.recovery_drain(root):
+                        self.fail('entered recovery without readiness')
+                self.assertEqual(effects, ([], []))
 
 
 if __name__ == '__main__':
