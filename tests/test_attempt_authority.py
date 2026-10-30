@@ -463,7 +463,7 @@ Path(data["result"]).write_text(json.dumps(payload))
             "id": "u1", "kind": "code", "repo": str(self.repo),
             "outputs": ["o"], "write_scopes": ["u1/"]}]}
 
-        def check(unit_dir, launch_facts=None, artifact_basis=None):
+        def check(unit_dir, launch_facts=None, artifact_basis=None, *, state_dir):
             receipt = {"task_id": "u1", "attempt_id": "att2",
                        "state": "DONE",
                        "basis": {"produced_head": produced}}
@@ -513,7 +513,7 @@ Path(data["result"]).write_text(json.dumps(payload))
             "id": "u1", "kind": "code", "repo": str(self.repo),
             "outputs": ["o"], "write_scopes": ["u1/"]}]}
 
-        def check(unit_dir, launch_facts=None, artifact_basis=None):
+        def check(unit_dir, launch_facts=None, artifact_basis=None, *, state_dir):
             receipt = {"task_id": "u1", "attempt_id": "att1",
                        "state": "DONE",
                        "basis": {"produced_head": produced}}
