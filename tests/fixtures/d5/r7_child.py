@@ -10,6 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests import test_d5_submission as t
+from tests.fixtures.d5.ready import InstallationWitnesses
 import d5_effect_child as child
 
 
@@ -71,14 +72,15 @@ def effect(data, inherited, mode):
             if mode == 'finish-error':
                 raise RuntimeError('finish error')
             if mode == 'inactive-completion':
-                active.return_value = False
+                installation.present = False
             return dict(t.OK)
 
     # Activation and measured identity/time patches exist in this fixture only.
     with ExitStack() as stack:
         stack.enter_context(mock.patch.object(t.registry.CP, '_external_base',
                                               return_value=Path(data['external'])))
-        active = stack.enter_context(nullcontext())
+        installation = InstallationWitnesses(t.ledger.readiness.installation(directory))
+        stack.callback(installation.close)
         stack.enter_context(mock.patch.object(t.host, 'session_anchor',
                                               return_value=('native', t.ANCHOR)))
         stack.enter_context(mock.patch.object(t.admission.time, 'time', return_value=150))

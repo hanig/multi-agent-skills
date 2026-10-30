@@ -308,9 +308,19 @@ from swarm_types import (
 )
 
 
-def _d5_bytecode_advisory(state_dir):
+def _d5_state(state_dir, plan=None, extra_repos=()):
+    if state_dir is not None:
+        return state_dir
+    if isinstance(plan, (str, os.PathLike)):
+        plan, error = U.read_json(plan)
+        if error or not isinstance(plan, dict):
+            raise SystemExit("D5 cannot resolve operated state: unreadable plan")
+    return CP.pre_git_default_state(plan=plan, extra_repos=extra_repos)
+
+
+def _d5_bytecode_advisory(state_dir, plan=None):
     """Report an interpreter precondition; U8 may enforce or waive it."""
-    if D5.d5_active(state_dir if state_dir is not None else CP.pre_git_default_state()) and not sys.dont_write_bytecode:
+    if D5.d5_active(_d5_state(state_dir, plan)) and not sys.dont_write_bytecode:
         try:
             diagnostic = sys.stderr
             if diagnostic is not None:
@@ -323,9 +333,9 @@ def _d5_bytecode_advisory(state_dir):
             pass
 
 
-def _d5_refuse(route, state_dir):
+def _d5_refuse(route, state_dir, plan=None, extra_repos=()):
     """U4.1: legacy effect routes have no authority in the first active profile."""
-    if D5.d5_active(state_dir if state_dir is not None else CP.pre_git_default_state()):
+    if D5.d5_active(_d5_state(state_dir, plan, extra_repos)):
         raise SystemExit("D5 active: swarm {} is outside the supported merge profile; inspect d5_install readiness".format(route))
 
 
@@ -333,9 +343,9 @@ def _d5_dispatch(args):
     # Default refusal also covers new commands and aliases. Observations retain
     # their legacy constraints; validate's optional seed check can fetch.
     if args.fn not in (cmd_schema, cmd_status, cmd_scope_check, cmd_validate):
-        _d5_refuse(getattr(args, "command", "unknown command"), getattr(args, "state_dir", None))
+        _d5_refuse(getattr(args, "command", "unknown command"), getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     elif args.fn is cmd_validate and getattr(args, "check_seeds", False):
-        _d5_refuse("validate --check-seeds", getattr(args, "state_dir", None))
+        _d5_refuse("validate --check-seeds", getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
 
 
 def __getattr__(name):
@@ -3384,7 +3394,7 @@ def _start_code_terminal_watchers(plan, state, args, report):
     the only checker and the resulting head still crosses the normal
     coordinator-controlled result channel.
     """
-    _d5_refuse('_start_code_terminal_watchers', getattr(args, "state_dir", None))
+    _d5_refuse('_start_code_terminal_watchers', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     units = {u["id"]: u for u in plan.get("units") or []}
     started = False
     for uid, u in sorted(units.items()):
@@ -3484,7 +3494,7 @@ def _start_code_terminal_watchers(plan, state, args, report):
 
 def cmd_watch_code_terminal(args):
     """Publish only this watcher's outcome; a separate coordinator checks it."""
-    _d5_refuse('cmd_watch_code_terminal', getattr(args, "state_dir", None))
+    _d5_refuse('cmd_watch_code_terminal', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     try:
         rc, out, err = U.run(
             ["paseo", "wait", str(args.agent), "--json"],
@@ -3534,7 +3544,8 @@ def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False,
                            read_only=False):
     """Apply the one external path policy before any command can write."""
     if not read_only:
-        _d5_refuse('_prepare_command_paths', getattr(args, "state_dir", None))
+        _d5_refuse('_prepare_command_paths', getattr(args, "state_dir", None),
+                   plan=plan, extra_repos=extra_repos)
     raw_state = getattr(args, "state_dir", None)
     raw_root = getattr(args, "root", None)
     try:
@@ -3566,14 +3577,14 @@ def _prepare_command_paths(args, plan=None, extra_repos=(), need_root=False,
 
 
 def cmd_continue(args):
-    _d5_refuse('cmd_continue', getattr(args, "state_dir", None))
+    _d5_refuse('cmd_continue', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     args.check_seeds = True
     return SC.continue_plan(args, lambda plan: cmd_validate(args, plan))
 
 
 def cmd_validate(args, plan=None):
     if getattr(args, "check_seeds", False):
-        _d5_refuse('cmd_validate', getattr(args, "state_dir", None))
+        _d5_refuse('cmd_validate', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     SR.apply_agent_resolution(args.plan)
     if plan is None:
         plan, err = U.read_json(args.plan)
@@ -3654,8 +3665,8 @@ def cmd_validate(args, plan=None):
 
 def cmd_run(args):
     """Dispatch what is ready, then EXIT. Does not babysit."""
-    _d5_bytecode_advisory(getattr(args, "state_dir", None))
-    _d5_refuse('cmd_run', getattr(args, "state_dir", None))
+    _d5_bytecode_advisory(getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
+    _d5_refuse('cmd_run', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     SR.apply_agent_resolution(args.plan)
     plan = _load_plan(args.plan)
     _prepare_command_paths(args, plan=plan, need_root=True)
@@ -3720,7 +3731,7 @@ def _emit_current_intent(state_dir, project, uid, us, unit, evidence=None):
 
 def cmd_stop_unit(args):
     """Record an approver's terminal disposition; preserve every attempt."""
-    _d5_refuse('cmd_stop_unit', getattr(args, "state_dir", None))
+    _d5_refuse('cmd_stop_unit', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     if not args.approver or not args.approver.strip():
         print("error: a non-blank approver is required", file=sys.stderr)
         return 4
@@ -4111,7 +4122,7 @@ def promote(plan, state, state_dir, uid, approver, approve,
 
 
 def cmd_promote(args):
-    _d5_refuse('cmd_promote', getattr(args, "state_dir", None))
+    _d5_refuse('cmd_promote', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     plan, err = U.read_json(args.plan)
     if err:
         sys.exit(f"error: no readable plan at {args.plan}: {err}")
@@ -4518,7 +4529,7 @@ def cmd_verify(args):
     the verifier's bytes hashed to what the policy authorized, those exact
     bytes ran, and the head it ran against is the one this attempt produced.
     """
-    _d5_refuse('cmd_verify', getattr(args, "state_dir", None))
+    _d5_refuse('cmd_verify', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     _prepare_command_paths(args)
     if args.claim == V.INTEGRATION_CLAIM:
         problem = _integration_verification_fence(args.state_dir, args.unit)
@@ -4676,7 +4687,7 @@ def cmd_merge(args):
     the coordinator checks is that the head you pin is the head it judged this
     attempt to have produced.
     """
-    _d5_refuse('cmd_merge', getattr(args, "state_dir", None))
+    _d5_refuse('cmd_merge', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     _prepare_command_paths(args)
     try:
         SE.load_merge_receipts(args.state_dir)     # refuse to extend a bad journal
@@ -4712,7 +4723,7 @@ def cmd_merge(args):
 
 def cmd_seq_floor(args):
     """Record a sequence floor under lease."""
-    _d5_refuse('cmd_seq_floor', getattr(args, "state_dir", None))
+    _d5_refuse('cmd_seq_floor', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     _prepare_command_paths(args)
     ok, holder = SS.acquire_lease(args.state_dir)
     if not ok:
@@ -4737,7 +4748,7 @@ def cmd_outbox(args):
     command exists so a human on the cluster can see exactly what WOULD be
     sent before anything is, and afterwards what the drainer confirmed landed.
     """
-    _d5_refuse('cmd_outbox', getattr(args, "state_dir", None))
+    _d5_refuse('cmd_outbox', getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     _prepare_command_paths(args)
     intents = SO.read_outbox(args.state_dir)
 
@@ -5308,7 +5319,7 @@ def main():
     s.set_defaults(fn=cmd_status)
 
     args = ap.parse_args()
-    _d5_bytecode_advisory(getattr(args, "state_dir", None))
+    _d5_bytecode_advisory(getattr(args, "state_dir", None), plan=getattr(args, "plan", None))
     _d5_dispatch(args)
     sys.exit(args.fn(args))
 
