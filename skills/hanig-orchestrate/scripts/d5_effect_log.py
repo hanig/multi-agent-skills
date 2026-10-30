@@ -64,7 +64,14 @@ def _handle_active(handle):
     # The handle locator permits the inactive check before any record IO.
     # It is never authority: active use rechecks the verified installation.
     _active(handle._state_dir)
-    _require(readiness.installation(handle._directory)["state_dir"] == handle._state_dir)
+    _require(_installation_state(handle._directory) == handle._state_dir)
+
+
+def _installation_state(directory):
+    try:
+        return readiness.installation(directory)["state_dir"]
+    except registry.AuthorityError as exc:
+        raise EffectError(INVALID) from exc
 
 
 def _hex(value, width):
@@ -287,6 +294,7 @@ def prepare(checkout, plan_id, state_dir, *, record_id, custody, kind, scope, co
     registration = registry.lookup(checkout, plan_id, state_dir)
     _require(registration is not None)
     directory = registration["record_dir"]
+    bound_state = _installation_state(directory)
     with _access(directory, create=True) as (record, fd):
         binding = dict(record_id=record_id, registration_id=registration["registration_id"],
                        record_key=_key(record.fd), effects_key=_key(fd), custody=custody,
@@ -299,7 +307,7 @@ def prepare(checkout, plan_id, state_dir, *, record_id, custody, kind, scope, co
                      receipt_verifier=_verifier(effect_id, raw, secret),
                      state="attempting", outcome=None)
         _write(fd, effect_id + ".json", entry, create=True)
-    return Attempt(effect_id, directory, raw, secret, readiness.installation(directory)["state_dir"])
+    return Attempt(effect_id, directory, raw, secret, bound_state)
 
 
 def _check_handle(handle):

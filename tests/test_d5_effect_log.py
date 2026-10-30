@@ -344,6 +344,9 @@ class TestEffectLog(unittest.TestCase):
         for mask in (0o000, 0o022, 0o077, 0o277, 0o777):
             with self.subTest(umask=oct(mask)), tempfile.TemporaryDirectory() as directory:
                 self.reg["record_dir"] = directory
+                installed = ready_installation(directory, record_dir=directory)
+                previous_args = self.args
+                self.args = ("checkout", "plan", installed["state_dir"])
                 saved = os.umask(mask)
                 try:
                     intent = self.prepare()
@@ -358,6 +361,15 @@ class TestEffectLog(unittest.TestCase):
                     self.eq(list(effects.glob(".effect-*")), [])
                 finally:
                     os.umask(saved)
+                    self.args = previous_args
+
+    def test_prepare_verifies_installation_before_creating_ledger(self):
+        alternate = self.d / "uninstalled-record"
+        alternate.mkdir(mode=0o700)
+        self.reg["record_dir"] = str(alternate)
+        with self.assertRaises(ValueError):
+            self.prepare()
+        self.assertEqual(list(alternate.iterdir()), [])
 
     def test_new_nonprivate_modes_repaired_before_check(self):
         real_open, real_fchmod, real_safe = os.open, os.fchmod, E._safe
