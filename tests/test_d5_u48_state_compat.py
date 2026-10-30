@@ -232,7 +232,7 @@ class TestPreparedState(unittest.TestCase):
                             ('merge', ('current_intent', 'reconcile', 'main'))):
             for name in names:
                 with tempfile.TemporaryDirectory() as temp:
-                    result = SurfaceFixture(temp).observe(tool, name, True)
+                    result = SurfaceFixture(temp).observe(tool, name, True, broken=True)
                     self.assertEqual(result['launches'], [])
                     self.assertEqual(result['writes'], [])
                     self.assertEqual(result['files_changed'], [])
