@@ -361,6 +361,7 @@ class TestInstall(unittest.TestCase):
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
         with mock.patch.object(install.registry.CP, "_external_base", return_value=self.root / "external"):
             entry = install.stage(repo, "p", state)
+            ready_installation(self.root, entry)
         directory = Path(entry["record_dir"])
         self.assertTrue(directory.is_dir())
         self.assertFalse((directory / store.RECORD_NAME).exists())
@@ -424,8 +425,9 @@ class TestInstall(unittest.TestCase):
         nested = self.root / "nested"
         nested.mkdir()
         (nested / "child").mkdir()
-        intended = self.directory("nested/record")
-        other = self.directory("record")
+        intended, other = nested / "record", self.root / "record"
+        intended.mkdir(mode=0o700)
+        other.mkdir(mode=0o700)
         (self.root / "link").symlink_to(nested / "child", target_is_directory=True)
         prior = Path.cwd()
         try:
