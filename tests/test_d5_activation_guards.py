@@ -84,9 +84,24 @@ def fixture_problems(source, filename):
                     any('d5_active' in v or 'd5_activation.' in v for v in values) or
                     any(isinstance(a, ast.Name) and a.id in activation_modules for a in node.args)):
                 problems.append('activation patch')
-            if name in ('write_text', 'write_bytes', 'open') and isinstance(node.func, ast.Attribute) and artifact(node.func.value):
-                writes = name != 'open' or any(any(c in v for c in 'wax+') for v in values)
-                if writes and (filename, function(node)) not in CORRUPTION:
+            target, writes = None, False
+            if name in ('write_text', 'write_bytes', 'write', 'writelines') and isinstance(node.func, ast.Attribute):
+                target, writes = node.func.value, True
+            elif name == 'open':
+                module_open = isinstance(node.func, ast.Name) or (
+                    isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in ('os', 'io', 'builtins'))
+                target = node.args[0] if module_open and node.args else getattr(node.func, 'value', None)
+                offset = 1 if module_open else 0
+                mode = node.args[offset] if len(node.args) > offset else None
+                mode = next((k.value for k in node.keywords if k.arg in ('mode', 'flags')), mode)
+                if mode is not None:
+                    writes = (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
+                              and any(c in mode.value for c in 'wax+')) or any(
+                        isinstance(n, ast.Attribute) and n.attr in ('O_WRONLY', 'O_RDWR', 'O_CREAT', 'O_TRUNC', 'O_APPEND')
+                        for n in ast.walk(mode))
+            if writes and target is not None and artifact(target):
+                if (filename, function(node)) not in CORRUPTION:
                     problems.append('hand-written installation outside corruption test: ' + str(function(node)))
         # Embedded child Python and startup-hook payloads are also fixture code.
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and '\n' in node.value:
@@ -119,9 +134,15 @@ class TestActivationGuards(unittest.TestCase):
     def test_no_activation_pins_bootstraps_or_handwritten_installations(self):
         for name in FORBIDDEN:
             self.assertFalse((ROOT / 'tests' / (name + '.py')).exists())
-        for path in sorted((ROOT / 'tests').rglob('*.py')):
+        for path in sorted((ROOT / 'tests').rglob('*')):
+            if not path.is_file() or '__pycache__' in path.parts:
+                continue
+            try:
+                source = path.read_text()
+            except UnicodeError:
+                continue
             with self.subTest(path=path.relative_to(ROOT)):
-                self.assertEqual(fixture_problems(path.read_text(), path.name), [])
+                self.assertEqual(fixture_problems(source, path.name), [])
 
     def test_checker_detects_activation_assignment_and_startup_hook_pin(self):
         target = 'd5_' + 'active'
@@ -138,6 +159,16 @@ class TestActivationGuards(unittest.TestCase):
     def test_checker_tracks_installation_paths_across_fixture_methods(self):
         source = "class Fixture:\n def setUp(self):\n  self.marker = root / 'd5-readiness.json'\n def test_bad(self):\n  self.marker.write_text('{}')\n"
         self.assertTrue(fixture_problems(source, 'synthetic.py'))
+
+    def test_checker_catches_builtin_and_descriptor_writers(self):
+        prefix = "p = root / 'd5-readiness.json'\n"
+        for call in ("open(p, 'w')", "open(p, mode='wb')", "p.open(mode='w')",
+                     "os.open(p, os.O_WRONLY | os.O_CREAT)", "h = open(p, 'r+')\nh.write('{}')"):
+            with self.subTest(call=call):
+                self.assertTrue(fixture_problems(prefix + call, 'synthetic.py'))
+        for call in ("open(p)", "open(p, mode='rb')", "p.open()", "os.open(p, os.O_RDONLY)"):
+            with self.subTest(read=call):
+                self.assertEqual(fixture_problems(prefix + call, 'synthetic.py'), [])
 
     def test_coordinator_passes_state_dir(self):
         inventory = {}
