@@ -1629,7 +1629,7 @@ def main():
         command_parser.add_argument("--state-dir", default=None)
     args = ap.parse_args()
     sys.exit(f"D5 active: unit {args.cmd} is refused before first effect; inspect d5_install readiness"
-             if args.state_dir is not None and D5.d5_active(args.state_dir) else args.fn(args))
+             if args.state_dir is not None and D5.d5_active(Path(args.state_dir).absolute()) else args.fn(args))
 
 
 if __name__ == "__main__":

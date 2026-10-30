@@ -49,7 +49,7 @@ class Refusal(ValueError):
 
 
 def _d5_refuse(route, state_dir):
-    if D5.d5_active(state_dir):
+    if D5.d5_active(Path(state_dir).absolute()):
         raise Refusal("D5 active: {} is outside the supported merge profile; inspect d5_install readiness".format(route))
 
 
@@ -59,7 +59,7 @@ def merge_launch_admitted():
 
 
 def _d5_merge_launch_entry(state_dir):
-    if D5.d5_active(state_dir) and not merge_launch_admitted():
+    if D5.d5_active(Path(state_dir).absolute()) and not merge_launch_admitted():
         raise Refusal("D5 active: merge launch is not admitted; executable binding "
                       "and integrity remain undelivered at U8 cutover; inspect d5_install readiness")
 
@@ -72,7 +72,7 @@ def _d5_merge_entry(args):
     There is deliberately no legacy fallback or runtime opt-out.
     """
     _d5_merge_launch_entry(args.state_dir)
-    if D5.d5_active(args.state_dir):
+    if D5.d5_active(Path(args.state_dir).absolute()):
         if (args.verify_integration or args.abandon_intent
                 or args.retrieve_remote_evidence or args.remote_recovery_attestation):
             raise Refusal("D5 active: verification and abandonment are outside "
@@ -171,7 +171,7 @@ def forge_route(remote):
 
 
 def authority(args, plan):
-    if D5.d5_active(args.state_dir):
+    if D5.d5_active(Path(args.state_dir).absolute()):
         import d5_readiness as DR
         DR.require(args.state_dir)
         DR.prepared_state(args.state_dir)
@@ -445,7 +445,7 @@ def current_intent(state_dir, binding, root, repair=True):
     intent unmarked, finish that local update before permitting a successor.
     No worker file or filesystem timestamp selects the current operation.
     """
-    if D5.d5_active(state_dir):
+    if D5.d5_active(Path(state_dir).absolute()):
         if repair:
             _d5_refuse('current_intent', state_dir)
         import d5_readiness as DR
@@ -638,7 +638,7 @@ def _d5_result_receipt(state_dir, binding, root, operation_id, outcome, repo):
 
 def reconcile(args, plan):
     _d5_merge_entry(args)
-    if D5.d5_active(args.state_dir):
+    if D5.d5_active(Path(args.state_dir).absolute()):
         import d5_authority_store as store
         import d5_host as host_api
         import d5_merge_journal as J
@@ -1305,7 +1305,7 @@ def print_tracker_audit(args):
     """Best-effort operator read after advance; never affects merge outcome."""
     key = None
     try:
-        if D5.d5_active(args.state_dir):
+        if D5.d5_active(Path(args.state_dir).absolute()):
             print('Tracker: UNAVAILABLE (D5 active: audit is not admitted)')
             return
         project_dir = skill_paths.sibling_skill_root(
@@ -1385,7 +1385,7 @@ def main(argv=None):
     if args.reason and not args.abandon_intent:
         parser.error("--reason requires --abandon-intent")
     try:
-        if D5.d5_active(args.state_dir):
+        if D5.d5_active(Path(args.state_dir).absolute()):
             with _active_entry_lease(args):
                 plan = read_object(args.plan)
                 reconcile(args, plan)

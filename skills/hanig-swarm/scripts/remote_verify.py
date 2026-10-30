@@ -1423,7 +1423,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
     if state_dir is None:
         raise ValueError("remote verification requires coordinator evidence storage")
     import d5_activation
-    if d5_activation.d5_active(state_dir):
+    if d5_activation.d5_active(Path(state_dir).absolute()):
         raise ValueError("D5 active: remote verification is refused before staging; "
                          "inspect d5_install readiness")
     if journal_entries is None:
@@ -1746,7 +1746,7 @@ def main():
     try:
         sys.dont_write_bytecode = True
         import d5_activation
-        active = args.state_dir is not None and d5_activation.d5_active(args.state_dir)
+        active = args.state_dir is not None and d5_activation.d5_active(Path(args.state_dir).absolute())
     except Exception as exc:
         sys.exit("D5 activation unavailable: " + type(exc).__name__)
     finally:

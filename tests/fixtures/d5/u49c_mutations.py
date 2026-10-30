@@ -29,7 +29,7 @@ CASES = {
     'entrypoint-unwired-swarm-main': ('TestRoutes.test_swarm_main', tests.S, 'main',
         '_d5_dispatch(args)', 'pass'),
     'entrypoint-unwired-merge-main': ('TestRoutes.test_merge_main', tests.M, 'main',
-        'if D5.d5_active(args.state_dir):', 'if False:'),
+        'if D5.d5_active(Path(args.state_dir).absolute()):', 'if False:'),
     'advisory-blocks': ('TestAdvisory.test_warning_truth_table_at_swarm_entries', tests.S,
         '_d5_bytecode_advisory', '        try:', "        raise SystemExit('advisory refusal')\n        try:"),
     'advisory-silent-when-active': ('TestAdvisory.test_warning_truth_table_at_swarm_entries', tests.S,
