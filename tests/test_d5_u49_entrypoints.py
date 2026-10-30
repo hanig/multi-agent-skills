@@ -140,6 +140,26 @@ class TestAdvisory(InstallationFixture):
                 stream = mock.Mock(write=mock.Mock(side_effect=error('synthetic stream failure')))
                 self.assertEqual(self.schema_output(stream), expected)
 
+    def test_bad_plan_keeps_observation_diagnostics_and_mutation_refusal(self):
+        plan = self.root / 'bad.json'
+        for active in (False, True):
+            for content in ('{', '[]'):
+                with self.subTest(active=active, content=content), self.activation_state(active):
+                    plan.write_text(content)
+                    args = argparse.Namespace(plan=str(plan), check_seeds=False, survey=None)
+                    with self.assertRaises(SystemExit) as expected:
+                        S.cmd_validate(args)
+                    self.assertTrue(str(expected.exception).startswith('error: '))
+                    with mock.patch.object(sys, 'argv', ['swarm.py', 'validate', str(plan)]):
+                        with self.assertRaises(SystemExit) as observed:
+                            S.main()
+                    self.assertEqual(str(observed.exception), str(expected.exception))
+                    with mock.patch.object(sys, 'argv', ['swarm.py', 'run', str(plan)]), \
+                            mock.patch.object(S, 'cmd_run', side_effect=AssertionError('mutation reached')) as run:
+                        with self.assertRaisesRegex(SystemExit, 'D5 cannot resolve operated state'):
+                            S.main()
+                        run.assert_not_called()
+
     def test_warning_truth_table_at_swarm_entries(self):
         for active in (False, True):
             for disabled in (False, True):
