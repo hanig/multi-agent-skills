@@ -1,6 +1,11 @@
 """Real installation publication; no activation patch or hand-written records."""
 from pathlib import Path
+import sys
 import uuid
+
+ROOT = Path(__file__).resolve().parents[3]
+for bundle in ('hanig-swarm', 'hanig-orchestrate'):
+    sys.path.insert(0, str(ROOT / 'skills' / bundle / 'scripts'))
 
 import d5_install as install
 import d5_readiness as readiness
@@ -48,7 +53,6 @@ from contextlib import contextmanager, ExitStack
 import builtins
 import io
 import os
-import sys
 import tempfile
 from unittest import mock
 import d5_installation as classifier
