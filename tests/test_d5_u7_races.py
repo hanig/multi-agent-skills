@@ -378,7 +378,7 @@ class TestD5U7Races(unittest.TestCase):
                    (remote_verify.main, ['remote_verify', '--worker', str(w.root)]),
                    (remote_verify.main, ['remote_verify', '--supervise', str(w.root)])]
         for main, argv in entries:
-            with self.subTest(entry=argv[:2]), mock.patch.object(sys, 'argv', argv):
+            with self.subTest(entry=argv[:2]), mock.patch.object(sys, 'argv', argv + ['--state-dir', str(w.state)]):
                 with self.assertRaisesRegex(SystemExit, 'D5 active: .*refused before first effect'):
                     main()
         child.alive = False

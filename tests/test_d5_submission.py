@@ -558,7 +558,7 @@ class TestSubmission(unittest.TestCase):
                     if name == "finish-invalid":
                         c.boundary.on_finish = lambda: None
                     if name == "inactive":
-                        c.boundary.on_finish = lambda: (setattr(c.active, "return_value", False), dict(OK))[1]
+                        c.boundary.on_finish = lambda: (setattr(c.installation, "present", False), dict(OK))[1]
                     with ExitStack() as stack:
                         stack.enter_context(mock.patch.object(ledger, "prepare", side_effect=prepared))
                         stack.enter_context(mock.patch.object(ledger, "_write", side_effect=writing))

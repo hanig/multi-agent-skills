@@ -62,18 +62,27 @@ def missing_installation(entry):
     limit. It is not withdrawal: normal withdrawal keeps the sentinel.
     """
     directory = Path(entry['state_dir'])
+    original = directory.stat()
     with tempfile.TemporaryDirectory() as tmp:
         moved = []
+        absent = original
         try:
             for name in (readiness.MARKER, readiness.SENTINEL):
                 source, target = directory / name, Path(tmp) / name
                 if source.exists():
                     source.rename(target)
                     moved.append((source, target))
+            absent = directory.stat()
             yield
         finally:
+            after = directory.stat()
+            untouched = (after.st_ino, after.st_mtime_ns) == (absent.st_ino, absent.st_mtime_ns)
             for source, target in reversed(moved):
                 target.rename(source)
+            # Undo fixture metadata only when the consumer left it untouched.
+            # An extra entry or write must remain visible to snapshot assertions.
+            if untouched:
+                os.utime(directory, ns=(original.st_atime_ns, original.st_mtime_ns))
 
 
 @contextmanager
