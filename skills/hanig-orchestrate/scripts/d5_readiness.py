@@ -127,7 +127,7 @@ def activation_directory(state_dir):
     """Expand caller locators before classification, without filesystem reads."""
     _require(state_dir is not None, "state_dir is required and must exist")
     try:
-        return Path(state_dir).expanduser()
+        return Path(state_dir).expanduser().absolute()
     except (TypeError, ValueError, OSError, RuntimeError) as exc:
         raise registry.AuthorityError("D5 readiness: invalid state_dir") from exc
 

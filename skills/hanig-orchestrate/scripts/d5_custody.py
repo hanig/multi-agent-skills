@@ -55,6 +55,6 @@ def status(checkout, plan_id, state_dir, *, now):
         identity = d5_host.ProcessIdentity(custody["anchor_pid"], custody["anchor_start_us"])
         holder = store.observe_liveness(identity, d5_host.liveness)
         is_holder = d5_host.session_anchor() == (custody["session_id"], identity)
-    return {"state": "active" if d5_registry.d5_active(state_dir) else "inactive",
+    return {"state": "active" if d5_registry.d5_active(readiness.activation_directory(state_dir)) else "inactive",
             "registration": entry, "custody": custody, "liveness": holder,
             "is_holder": is_holder}

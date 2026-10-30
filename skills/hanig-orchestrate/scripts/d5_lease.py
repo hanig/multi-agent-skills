@@ -102,5 +102,5 @@ def status(checkout, plan_id, state_dir, *, now, mandate_bytes):
         if store.present(path, "record"):
             record = authority.decode(store.read_bytes(path))
             state = authority.evaluate(record, now, mandate_bytes)[0]
-    return {"state": "active" if d5_registry.d5_active(state_dir) else "inactive",
+    return {"state": "active" if d5_registry.d5_active(readiness.activation_directory(state_dir)) else "inactive",
             "registration": entry, "record": record, "record_state": state}

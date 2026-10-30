@@ -32,7 +32,7 @@ def main():
     for name in T.ENTRIES:
         def remove(source):
             lines = source.splitlines(keepends=True)
-            index = next(i for i, line in enumerate(lines) if "if D5.d5_active(state_dir):" in line)
+            index = next(i for i, line in enumerate(lines) if "if D5.d5_active(Path(state_dir).absolute()):" in line)
             del lines[index:index + 2]
             return "".join(lines)
         check("revert-" + name, T.SO, name, remove,
