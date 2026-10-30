@@ -273,10 +273,10 @@ class TestCustodyAPI(unittest.TestCase):
                                    return_value=self.directory / "installed-registry"):
                 ready(self, self.repo, "p", self.state)
 
-    def register(self, record=True):
+    def register(self, record=True, promote=True):
         with nullcontext():
             entry = ready(self, self.repo, "p", self.state,
-                          promote=getattr(self, "promote", True))
+                          promote=promote)
         if record:
             store.create(entry["record_dir"], grant())
         return entry
@@ -366,7 +366,7 @@ class TestCustodyAPI(unittest.TestCase):
 
     def test_status_absent_and_ungranted_create_nothing(self):
         for registered in (False, True):
-            entry = self.register(record=False) if registered else None
+            entry = self.register(record=False, promote=False) if registered else None
             if entry:
                 (self.base / "hanig-authority/v1/registry.lock").unlink()
             before = self.tree()
@@ -385,7 +385,7 @@ class TestCustodyAPI(unittest.TestCase):
         for active in (False, True):
             for now in (102, 86501):
                 with self.subTest(active=active, now=now), \
-                        nullcontext(), \
+                        (nullcontext() if active else missing_installation(entry)), \
                         mock.patch.object(store, "read", side_effect=AssertionError("locking read")), \
                         mock.patch.object(store, "check", side_effect=AssertionError("persistent check")), \
                         mock.patch.object(authority, "evaluate", side_effect=AssertionError("evaluation")):

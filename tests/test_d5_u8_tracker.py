@@ -46,7 +46,7 @@ class TestTrackerMatrix(unittest.TestCase):
       filing.FileCase if route == 'file' else issue.IssueCase)
      case = cls()
      stack.callback(case.doCleanups)
-     case.prepare_fixture()
+     case.setUp()
      state_dir = case.state if route == "drain" else case.root / "d5-state"
      if active:
       ready_installation(case.root, state_dir=state_dir)

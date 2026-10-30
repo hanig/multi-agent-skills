@@ -212,7 +212,7 @@ class TestAcceptance(unittest.TestCase):
         self.eq(returned['calls'], [])
         self.eq(c.rows(), [])
         # The successor owns the lease before waiting on the surviving DRAIN.
-        t.submission.readiness.state.release_lease(c.state_dir)
+        t.submission.readiness.coordinator_state.release_lease(c.state_dir)
         installer = self.worker('installer', self.data)
         self.assertTrue(self.event(installer, 'exclusive-probe')['blocked'])
         self.eq((c.directory / t.store.RECORD_NAME).read_bytes(), original)
@@ -353,6 +353,7 @@ class TestAcceptance(unittest.TestCase):
              t.authority.AuthorityError, 'D5 protected bootstrap is not designated')]
         before = self.snapshot()
         with missing_installation(c.entry):
+            inactive_before = self.snapshot()
             self.assertIs(t.registry.d5_active(c.state_dir), False)
             self.eq(p.process.DESIGNATED_BOOTSTRAPS, frozenset())
             for index, (call, kind, message) in enumerate(table):
@@ -365,7 +366,7 @@ class TestAcceptance(unittest.TestCase):
                     pin.assert_not_called()
                     lookup.assert_not_called()
                     spawn.assert_not_called()
-                    self.eq(self.snapshot(), before)
+                    self.eq(self.snapshot(), inactive_before)
             with t.protocol.pin(c.directory) as record, record.drain() as fd:
                 result = subprocess.run([sys.executable, PEER, str(c.directory), str(fd)],
                     pass_fds=(fd,), close_fds=True, capture_output=True, timeout=20)
@@ -395,10 +396,11 @@ class TestAcceptance(unittest.TestCase):
         before = self.snapshot()
         with missing_installation(c.entry), \
                 mock.patch.object(t.protocol, 'pin', wraps=t.protocol.pin) as pin:
+            inactive_before = self.snapshot()
             for call in (lambda: cap.complete(t.OK), uncertain.uncertain):
                 with self.assertRaisesRegex(t.ledger.EffectError, '^D5 inactive$'):
                     call()
-                self.eq(self.snapshot(), before)
+                self.eq(self.snapshot(), inactive_before)
             self.eq(pin.call_count, 2)
         self.eq(cap.complete(t.OK), t.OK)
         self.assertIsNone(uncertain.uncertain())

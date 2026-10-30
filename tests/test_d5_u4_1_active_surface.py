@@ -159,6 +159,7 @@ class SurfaceFixture:
             }
             if name == "_prepare_command_paths":
                 a.state_dir = None  # exercise implicit migration, not a no-op
+                patch(s.CP, "pre_git_default_state", self.state_dir)
                 legacy = self.directory / ".swarm/state"
                 legacy.mkdir(parents=True)
                 (legacy / "swarm-state.json").write_text('{"units":{}}')
