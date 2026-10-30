@@ -29,7 +29,8 @@ def patches(name):
         return [replacement(tests.S, 'advance', "    _d5_refuse('advance', state_dir)", '    pass')]
     if name == 'legacy-migrated-active':
         return [replacement(tests.S, '_prepare_command_paths',
-                            "        _d5_refuse('_prepare_command_paths')", '        pass')]
+                            '        _d5_refuse(\'_prepare_command_paths\', getattr(args, "state_dir", None),\n'
+                            '                   plan=plan, extra_repos=extra_repos)', '        pass')]
     if name == 'legacy-key-changed':
         return [replacement(tests.M, 'authority',
             '    binding = {"unit": args.unit,', '    binding = {"state_epoch": epoch, "unit": args.unit,')]
