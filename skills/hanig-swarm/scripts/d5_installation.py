@@ -84,7 +84,7 @@ def installation(directory):
     _require(directory.samefile(value["record_dir"]), "record directory mismatch")
     for name, key in (("state_dir", "state_key"), ("record_dir", "record_key")):
         _require([Path(value[name]).stat().st_dev, Path(value[name]).stat().st_ino] == value[key],
-                 key + " mismatch")
+                 "installation object mismatch: " + key + " mismatch")
     return value
 
 
