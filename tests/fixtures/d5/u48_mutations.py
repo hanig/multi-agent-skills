@@ -26,7 +26,7 @@ CASES = {
 
 def patches(name):
     if name == 'legacy-normalized-active':
-        return [replacement(tests.S, 'advance', "    _d5_refuse('advance')", '    pass')]
+        return [replacement(tests.S, 'advance', "    _d5_refuse('advance', state_dir)", '    pass')]
     if name == 'legacy-migrated-active':
         return [replacement(tests.S, '_prepare_command_paths',
                             "        _d5_refuse('_prepare_command_paths')", '        pass')]
@@ -43,7 +43,7 @@ def patches(name):
     if name == 'ineligible-state-ready':
         return [mock.patch.object(tests.R, 'prepared_state', return_value=None)]
     if name == 'premature-activation':
-        return [replacement(tests.M, 'authority', 'if D5.d5_active():', 'if False:')]
+        return [replacement(tests.M, 'authority', 'if D5.d5_active(args.state_dir):', 'if False:')]
     if name == 'stale-m6-base':
         return [mock.patch.object(tests, 'BASE', 'eb90c2c50081291c43e7177bcd3edfc2197fe61e')]
     raise AssertionError(name)

@@ -32,18 +32,18 @@ def main():
     for name in T.ENTRIES:
         def remove(source):
             lines = source.splitlines(keepends=True)
-            index = next(i for i, line in enumerate(lines) if "if D5.d5_active():" in line)
+            index = next(i for i, line in enumerate(lines) if "if D5.d5_active(state_dir):" in line)
             del lines[index:index + 2]
             return "".join(lines)
         check("revert-" + name, T.SO, name, remove,
               "TestTrackerRefusal.test_premature_activation_helpers_have_zero_effects")
     check("outbox-enqueue-active", T.S, "advance", lambda source: source.replace(
-        "    _d5_refuse('advance')", "    SO.emit_intent(state_dir, 'fixture', 'u', 'SUBMITTED', {})\n"
-        "    _d5_refuse('advance')"),
+        "    _d5_refuse('advance', state_dir)", "    SO.emit_intent(state_dir, 'fixture', 'u', 'SUBMITTED', {})\n"
+        "    _d5_refuse('advance', state_dir)"),
         "TestTrackerRefusal.test_row75_containing_entries_refuse_before_helpers")
     check("backfill-reachable", T.S, "advance", lambda source: source.replace(
-        "    _d5_refuse('advance')", "    SO.backfill_tracker_intents(state_dir, 'fixture', {})\n"
-        "    _d5_refuse('advance')"),
+        "    _d5_refuse('advance', state_dir)", "    SO.backfill_tracker_intents(state_dir, 'fixture', {})\n"
+        "    _d5_refuse('advance', state_dir)"),
         "TestTrackerRefusal.test_row75_containing_entries_refuse_before_helpers")
     check("audit-mutates", T.M, "print_tracker_audit", lambda source: source.replace(
         "script, 'audit', *inputs", "script, 'drain', *inputs"),
