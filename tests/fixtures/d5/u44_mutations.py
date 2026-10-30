@@ -50,8 +50,8 @@ def patches(name):
             '_require(type(intent.get("d5")) is dict, "legacy intent cannot authorize active recovery")',
             'if "d5" not in intent:\n        return outcome'),
             replacement(tests.M, '_d5_journal_binding',
-            'bound = intent["d5"]["binding"]',
-            'if "d5" not in intent:\n        return {}\n    bound = intent["d5"]["binding"]'),
+            'metadata = intent.get("d5")',
+            'if "d5" not in intent:\n        return {}\n    metadata = intent.get("d5")'),
             replacement(tests.M, '_d5_result_receipt',
             'if current != operation_id or not isinstance((intent or {}).get("d5"), dict):',
             'if "d5" not in intent:\n        return {}\n'
