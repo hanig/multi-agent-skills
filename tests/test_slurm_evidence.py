@@ -733,7 +733,7 @@ class SlurmEvidence(unittest.TestCase):
                           "import sys; sys.exit('Invalid job id specified')")
                 self.stub("sacct", "print(%r)" % self.accounting()
                           if source == "sacct" else "pass")
-                result = S._check(self.attempt, artifact_basis=self.basis)
+                result = S._check(self.attempt, artifact_basis=self.basis, state_dir=self.root / "state")
                 self.assertEqual(result[0], U.STATES["DONE"], result)
                 receipt = json.loads((self.attempt / U.RECEIPT).read_text())
                 self.assertEqual(receipt["basis"]["exit_status_attested_by"], source)
@@ -745,13 +745,13 @@ class SlurmEvidence(unittest.TestCase):
                   "path=Path(%r); path.write_text(path.read_text()+'x' if path.exists() else 'x'); "
                   "sys.exit('connection refused')" % str(calls))
         for _ in range(2):
-            result = S._check(self.attempt, artifact_basis=self.basis)
+            result = S._check(self.attempt, artifact_basis=self.basis, state_dir=self.root / "state")
             self.assertEqual(result[0], U.STATES["INCOMPLETE"], result)
         self.assertEqual(calls.read_text(), "x")
         self.assertTrue(U.SACCT_UNAVAILABLE)
         U.SACCT_UNAVAILABLE = False
         (self.attempt / U.RECEIPT).write_text('{"sacct_unavailable":true}')
-        S._check(self.attempt, artifact_basis=self.basis)
+        S._check(self.attempt, artifact_basis=self.basis, state_dir=self.root / "state")
         self.assertEqual(calls.read_text(), "xx")
 
     def test_real_timeout_kills_accounting_and_skips_next_query(self):

@@ -671,7 +671,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         plan = {"name": "watch-test", "units": [unit]}
         state = {"schema_version": 1, "halted": None,
                  "plan_digest": S.plan_digest(plan), "units": {}}
-        directory, error = S._allocate(plan, unit, self.tmp / "runs")
+        directory, error = S._allocate(plan, unit, self.tmp / "runs", self.tmp / "state")
         self.assertIsNone(error)
         attempt = Path(directory)
         S._capture_artifact_basis(state, "code", directory, unit)
@@ -685,7 +685,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
             launched, error = self.submit(unit, attempt, False, state)
         self.assertIsNone(error)
         self.assertEqual(launched, agent)
-        self.assertIsNone(S._bind(directory, agent))
+        self.assertIsNone(S._bind(directory, agent, self.tmp / "state"))
         facts = S.trusted_launch_facts(state, "code", directory)
         workspace = Path(facts["execution_workspace"])
         (workspace / "made.txt").write_text("made\n")

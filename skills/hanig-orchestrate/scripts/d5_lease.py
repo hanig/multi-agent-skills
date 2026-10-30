@@ -19,7 +19,7 @@ import d5_readiness as readiness
 
 
 def _active(state_dir):
-    readiness.refuse_broken(state_dir)
+    state_dir = readiness.refuse_broken(state_dir)
     if not d5_registry.d5_active(state_dir):
         raise d5_registry.AuthorityError("D5 is not active")
 

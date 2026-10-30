@@ -55,7 +55,7 @@ def _require(condition, message=INVALID):
 
 
 def _active(state_dir):
-    readiness.refuse_broken(state_dir)
+    state_dir = readiness.refuse_broken(state_dir)
     _require(registry.d5_active(state_dir), "D5 inactive")
 
 

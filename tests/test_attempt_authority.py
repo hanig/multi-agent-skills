@@ -133,7 +133,8 @@ class TestCheckerResultProtocol(unittest.TestCase):
 
         S.U.run = run
         try:
-            rc, stdout, stderr, result_channel = S._check("/attempt")
+            with tempfile.TemporaryDirectory() as state_dir:
+                rc, stdout, stderr, result_channel = S._check("/attempt", state_dir=state_dir)
         finally:
             S.U.run = real
         self.assertEqual(rc, 0)
