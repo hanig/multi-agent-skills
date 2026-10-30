@@ -110,7 +110,7 @@ ALLOWED = {
         "reads values from _dispatch_source_identity(u, target), which the "
         "coordinator computes live from the plan and the repository, not "
         "from any agent-writable record",
-    ("coordinator_paths.py", "operated_worktrees"):
+    ("coordinator_paths.py", "_plan_repositories"):
         "reads execution_workspace off the PLAN's units to build the path "
         "containment set; no record is involved",
     ("worktree.py", "judge_detail"):
