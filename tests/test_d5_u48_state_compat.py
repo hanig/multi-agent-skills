@@ -18,7 +18,7 @@ from tests.test_d5_u45_retry_recovery import inactive_script_capture
 from tests.test_d5_u4_0b1_issuance import no_effects
 from tests.test_d5_u4_1_active_surface import SurfaceFixture
 from tests.test_d5_u4_2_request_authority import tree_bytes
-from tests.fixtures.d5.ready import ready
+from tests.fixtures.d5.ready import ready, ready_installation
 import d5_activation as activation
 import d5_readiness as R
 import merge_unit as M
@@ -218,6 +218,8 @@ class TestPreparedState(unittest.TestCase):
             self.assertEqual(snapshot, before)
         self.args.state_dir = None
         self.args.root = None
+        implicit, _, _ = S.CP.resolve_paths(None, plan=self.c.plan, cwd=os.getcwd())
+        ready_installation(self.c.directory, state_dir=implicit)
         self.refused_without_effects(lambda: S._prepare_command_paths(self.args,
             self.c.plan, need_root=True), 'D5 active')
 
