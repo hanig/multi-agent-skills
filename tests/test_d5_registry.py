@@ -14,7 +14,6 @@ import unittest
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
-from tests.d5_test_support import inactive
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
@@ -43,7 +42,6 @@ class TestD5VersionGate(unittest.TestCase):
                          self.assertRaisesRegex(R.AuthorityError, "unsupported Git version"):
                         call("/unused", "p", "/unused-state")
 
-    @inactive(R)
     def test_activation_and_plan_validation_precede_envelope(self):
         with mock.patch.object(R, "_git", side_effect=AssertionError("Git")):
             with self.assertRaisesRegex(R.AuthorityError, "D5 is not active"):
@@ -232,7 +230,6 @@ class TestD5Registry(unittest.TestCase):
         self.assertIsNone(R.lookup(self.repo, "p", self.state))
         self.assertEqual(self.tree(), before)
 
-    @inactive(R)
     def test_register_refuses_before_activation(self):
         before = self.tree()
         self.assertFalse(R.d5_active())

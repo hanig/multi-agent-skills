@@ -242,10 +242,5 @@ class TestItIsNotAUnitState(unittest.TestCase):
         self.assertIn("fails for missing production evidence", src)
 
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TestOnlyOneConditionTriggersIt, TestTheBoundIsDeclaredAndChecked, TestItIsNotAUnitState)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,7 @@ def _require(condition, message):
 
 
 def _held(state_dir):
-    _require(registry.d5_active(), "inactive")
+    _require(registry.d5_active(state_dir), "inactive")
     ready = readiness.require(state_dir)
     _require(any(key == tuple(ready["record_key"]) and rank == 0
                  for key, rank, _, _ in protocol.locks._held()), "caller DRAIN required")
@@ -205,7 +205,7 @@ def recovery_drain(state_dir):
     coordinator lease precedes this independent acquisition. No new lock or
     release protocol, and no readiness/installation substitution.
     """
-    _require(registry.d5_active(), "inactive")
+    _require(registry.d5_active(state_dir), "inactive")
     ready = readiness.require(state_dir)
     locks = protocol.locks
     _require(not locks._held(), "recovery requires independent DRAIN before START")

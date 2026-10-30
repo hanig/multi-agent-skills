@@ -818,10 +818,5 @@ class TestDeadlineBreach(unittest.TestCase):
         self.assertEqual(deadline_intents, [])
 
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TestDeadlineDeclaration, TestStatusCarriesTime, TestDeadlineBreach)
-
-
 if __name__ == "__main__":
     unittest.main(verbosity=2)

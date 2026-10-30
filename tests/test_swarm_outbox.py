@@ -45,9 +45,6 @@ CONSTANTS = (
 EXPORTS = DEFINITIONS + CONSTANTS + ("_with_intent_envelope",)
 
 
-from tests.d5_test_support import inactive
-
-
 class TestOutboxExtraction(unittest.TestCase):
     def test_every_moved_definition_is_reexported_identically(self):
         for name in EXPORTS:
@@ -67,7 +64,6 @@ class TestOutboxExtraction(unittest.TestCase):
                 S.require_valid_intent({"envelope": {}}, ["fixture capability"])
         validate.assert_called_once_with({"envelope": {}}, ["fixture capability"])
 
-    @inactive()
     def test_owner_key_patch_reaches_coordinator_emission(self):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(SO, "_intent_key", return_value="fixture-key") as key:

@@ -247,9 +247,5 @@ class ContinueCommandTests(unittest.TestCase):
         self.assert_refusal("inputs")
 
 
-from tests.d5_test_support import inactive_class
-inactive_class(ContinueCommandTests)
-
-
 if __name__ == "__main__":
     unittest.main()

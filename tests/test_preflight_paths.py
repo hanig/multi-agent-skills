@@ -106,8 +106,6 @@ class Base(unittest.TestCase):
             clear=True)
         state_env.start()
         self.addCleanup(state_env.stop)
-        from tests.d5_test_support import for_case
-        for_case(self)
 
 
 def _state_with_seal(uid, attempt, seal, facts=None):
@@ -676,12 +674,6 @@ class TestContainmentCoversAWorkspaceThatDoesNotExistYet(unittest.TestCase):
         state, _runs, _wt = CP.resolve_paths(
             state_dir=str(self.tmp / "state"), plan=plan, cwd=str(plain))
         self.assertEqual(state, Path(self.tmp / "state").resolve())
-
-
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TestRefusalIsCarriedNotRederived, TestARefusedAttemptCannotBeBound,
-    TestContainmentCoversAWorkspaceThatDoesNotExistYet)
 
 
 if __name__ == "__main__":

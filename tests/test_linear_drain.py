@@ -116,8 +116,8 @@ class BudgetDrainLinear(BudgetPaging, DrainLinear):
 
 
 class DrainCase(AuditCase):
-    def prepare_fixture(self):
-        super().prepare_fixture()
+    def setUp(self):
+        super().setUp()
         self.patch.stop()
         self.fake = DrainLinear()
         self.patch = mock.patch.object(API, 'transport', self.fake)

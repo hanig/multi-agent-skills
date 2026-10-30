@@ -1491,9 +1491,5 @@ class SlurmEvidence(unittest.TestCase):
         self.assertTrue(any("unobserved requeue" in note for note in self.notes))
 
 
-from tests.d5_test_support import inactive_class
-inactive_class(SlurmEvidence)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,6 @@ import subprocess
 import sys
 import unittest
 from unittest import mock
-from tests.d5_test_support import inactive
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -178,7 +177,6 @@ class TestD5Routing(unittest.TestCase):
         self.fixture.anchor.assert_called_once_with()
         self.assertFalse((self.directory / "authority.drain.lock").exists())
 
-    @inactive(registry)
     def test_inactive_delegates_are_not_called(self):
         # R9-BYPASS-INACTIVE: unrelated environment/CLI input cannot activate.
         before = self.fixture.tree()

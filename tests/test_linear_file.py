@@ -107,8 +107,8 @@ class FileLinear(BudgetPaging, IssueLinear):
 
 
 class FileCase(IssueCase):
-    def prepare_fixture(self):
-        super().prepare_fixture()
+    def setUp(self):
+        super().setUp()
         self.fake = FileLinear()
         patch = mock.patch.object(API, 'transport', self.fake)
         patch.start()
