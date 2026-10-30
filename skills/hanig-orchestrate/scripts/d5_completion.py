@@ -90,7 +90,7 @@ class _Completion:
         with _refusals():
             ledger._check_handle(handle)
         attempt = ledger.Attempt(handle.effect_id, handle._directory,
-                                 handle._binding, handle._secret)
+                                 handle._binding, handle._secret, handle._state_dir)
         with _refusals(), protocol.pin(handle._directory) as record:
             with record.drain():
                 return ledger._classify(attempt, "unknown")

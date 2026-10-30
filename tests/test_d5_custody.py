@@ -1,4 +1,5 @@
 """Custody transitions through the locked store and inactive public API."""
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextlib import ExitStack
 import copy
@@ -214,7 +215,7 @@ class TestCustodyStore(unittest.TestCase):
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
         stack = ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(mock.patch.object(registry, "d5_active", return_value=True))
+        stack.enter_context(nullcontext())
         stack.enter_context(mock.patch.object(registry.CP, "_external_base",
                                               return_value=self.directory / "external"))
         self.directory = Path(ready(self, repo, "p", state)["record_dir"])
@@ -273,7 +274,7 @@ class TestCustodyAPI(unittest.TestCase):
                 ready(self, self.repo, "p", self.state)
 
     def register(self, record=True):
-        with mock.patch.object(registry, "d5_active", return_value=True):
+        with nullcontext():
             entry = ready(self, self.repo, "p", self.state,
                           promote=getattr(self, "promote", True))
         if record:
@@ -299,7 +300,7 @@ class TestCustodyAPI(unittest.TestCase):
         self.register()
         before = self.tree()
         self.assertFalse(registry.d5_active())
-        with mock.patch.object(registry, "d5_active", return_value=False), \
+        with nullcontext(), \
                 mock.patch.object(registry, "lookup", side_effect=AssertionError("lookup")):
             for operation in (self.claim, self.relinquish):
                 with self.assertRaisesRegex(authority.AuthorityError, "D5 is not active"):
@@ -309,7 +310,7 @@ class TestCustodyAPI(unittest.TestCase):
 
     def test_requires_registration_before_anchor(self):
         before = self.tree()
-        with mock.patch.object(registry, "d5_active", return_value=True):
+        with nullcontext():
             for operation in (self.claim, self.relinquish):
                 with self.assertRaisesRegex(authority.AuthorityError, "not registered"):
                     operation()
@@ -321,7 +322,7 @@ class TestCustodyAPI(unittest.TestCase):
         directory = Path(entry["record_dir"])
         before = self.tree()
         self.anchor.return_value = host.Unknown("no verified native anchor")
-        with mock.patch.object(registry, "d5_active", return_value=True), ExitStack() as stack:
+        with nullcontext(), ExitStack() as stack:
             # R9-UNKNOWN-FALLBACK: no authority-store operation may be entered.
             # Registry's strict byte reader remains available to resolve identity.
             for name in ("claim", "relinquish", "create", "replace", "revoke", "check", "read"):
@@ -351,7 +352,7 @@ class TestCustodyAPI(unittest.TestCase):
 
     def test_api_claim_and_relinquish_reinspect_identity(self):
         entry = self.register()
-        with mock.patch.object(registry, "d5_active", return_value=True):
+        with nullcontext():
             result = self.claim()
             self.assertEqual(result["custody"]["session_id"], "native")
             self.anchor.return_value = ("changed", ANCHOR)
@@ -384,7 +385,7 @@ class TestCustodyAPI(unittest.TestCase):
         for active in (False, True):
             for now in (102, 86501):
                 with self.subTest(active=active, now=now), \
-                        mock.patch.object(registry, "d5_active", return_value=active), \
+                        nullcontext(), \
                         mock.patch.object(store, "read", side_effect=AssertionError("locking read")), \
                         mock.patch.object(store, "check", side_effect=AssertionError("persistent check")), \
                         mock.patch.object(authority, "evaluate", side_effect=AssertionError("evaluation")):

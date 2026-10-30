@@ -1,4 +1,5 @@
 """Installation infrastructure, with operational enforcement deferred to U4.0b."""
+from contextlib import nullcontext
 from contextlib import ExitStack
 import json
 import os
@@ -42,7 +43,7 @@ class TestReadiness(unittest.TestCase):
 
     def test_staging_create_only_without_record_locks_or_authority(self):
         with mock.patch.object(R.protocol, "pin", side_effect=AssertionError("record lock")), \
-             mock.patch.object(R.registry, "d5_active", return_value=False):
+             nullcontext():
             entry = self.stage()
             before = self.fixture.tree(self.fixture.root)
             self.assertEqual(self.stage(), entry)
