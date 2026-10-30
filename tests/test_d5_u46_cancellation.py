@@ -1,5 +1,6 @@
 """U4.6 same-lifetime release measured through the real operator and R6."""
 from contextlib import nullcontext
+from tests.fixtures.d5.ready import ready_installation
 from contextlib import ExitStack
 from datetime import datetime
 import json
@@ -189,6 +190,7 @@ class TestInactiveAndPremature(unittest.TestCase):
     def test_premature_activation_zero_effects(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
+            ready_installation(root, state_dir=root)
             path = root / 'merge-unit-fixture.json'
             before = tree_bytes(root)
             with nullcontext(), no_effects() as effects:
