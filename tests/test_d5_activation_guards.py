@@ -2,6 +2,8 @@
 import ast
 import os
 from pathlib import Path
+import subprocess
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -135,6 +137,18 @@ def command_sites(source):
 
 
 class TestActivationGuards(unittest.TestCase):
+    def test_ready_fixture_imports_and_publishes_in_a_fresh_interpreter(self):
+        source = """from tests.fixtures.d5.ready import ready_installation
+import tempfile
+import d5_installation
+with tempfile.TemporaryDirectory() as tmp:
+    installed = ready_installation(tmp)
+    assert d5_installation.state(installed['state_dir']) == d5_installation.READY
+"""
+        result = subprocess.run([sys.executable, '-B', '-c', source], cwd=str(ROOT),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_no_activation_pins_bootstraps_or_handwritten_installations(self):
         for name in FORBIDDEN:
             self.assertFalse((ROOT / 'tests' / (name + '.py')).exists())
