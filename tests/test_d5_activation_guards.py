@@ -81,12 +81,17 @@ def fixture_problems(source, filename):
                 problems.append('activation assignment')
         if isinstance(node, ast.Call):
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, 'id', '')
-            arguments = list(node.args) + [k.value for k in node.keywords]
+            # Inspect the patch target and attribute, not replacement values
+            # or diagnostics nested under side_effect/new/return_value.
+            count = 1 if name == 'patch' else 2
+            arguments = list(node.args[:count]) + [k.value for k in node.keywords
+                        if k.arg in ('target', 'attribute', 'name')]
             values = [n.value for arg in arguments for n in ast.walk(arg)
                       if isinstance(n, ast.Constant) and isinstance(n.value, str)]
             if name in ('object', 'patch', 'setattr', 'setitem', 'patches') and (
-                    any('d5_active' in v or 'd5_activation.' in v for v in values) or
-                    any(isinstance(a, ast.Name) and a.id in activation_modules for a in arguments)):
+                    any(v.split('.')[-1] == 'd5_active' or 'd5_activation' in v.split('.') for v in values) or
+                    any(isinstance(n, ast.Name) and n.id in activation_modules
+                        for a in arguments for n in ast.walk(a))):
                 problems.append('activation patch')
             target, writes = None, False
             if name in ('write_text', 'write_bytes', 'write', 'writelines') and isinstance(node.func, ast.Attribute):
@@ -191,6 +196,23 @@ with tempfile.TemporaryDirectory() as tmp:
     def test_checker_catches_keyword_activation_patch(self):
         source = "mock.patch.object(registry, attribute='d5_" + "active', new=lambda: False)"
         self.assertTrue(fixture_problems(source, 'synthetic.py'))
+
+    def test_checker_distinguishes_patch_targets_from_diagnostics(self):
+        target = 'd5_' + 'active'
+        diagnostic = repr(target + ' must refuse before Git')
+        for source in (
+                "mock.patch.object(registry, '_git', side_effect=AssertionError(" + diagnostic + '))',
+                "mock.patch('registry._git', side_effect=AssertionError(" + diagnostic + '))',
+                "monkeypatch.setattr(registry, '_git', lambda: " + diagnostic + ')'):
+            with self.subTest(source=source):
+                self.assertEqual(fixture_problems(source, 'synthetic.py'), [])
+        for source in (
+                'mock.patch.object(registry, ' + repr(target) + ', return_value=False)',
+                'mock.patch(' + repr('registry.' + target) + ', return_value=False)',
+                'monkeypatch.setattr(registry, ' + repr(target) + ', lambda: False)',
+                'mock.patch.object(d5_activation, "anything", return_value=False)'):
+            with self.subTest(source=source):
+                self.assertIn('activation patch', fixture_problems(source, 'synthetic.py'))
 
     def test_coordinator_passes_state_dir(self):
         inventory = {}
