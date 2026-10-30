@@ -1,5 +1,5 @@
 """R2 controls through real registration/store; lock evidence uses hooks/probes."""
-from contextlib import contextmanager, ExitStack
+from contextlib import nullcontext, contextmanager, ExitStack
 import os
 from pathlib import Path
 import subprocess
@@ -46,7 +46,7 @@ class TestD5Control(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.object(registry.CP, "_external_base",
                                                    return_value=self.root / "external"))
-        self.active = self.stack.enter_context(mock.patch.object(registry, "d5_active", return_value=True))
+        self.active = self.stack.enter_context(nullcontext())
         self.anchor = self.stack.enter_context(mock.patch.object(host, "session_anchor",
                                                                 return_value=("native", ANCHOR)))
         self.args = self.repo, "p", self.state

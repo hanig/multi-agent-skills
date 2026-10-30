@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 """Live retained protection and kernel release at exit, at two interrupt sites."""
 import inspect
 import json
@@ -27,7 +28,7 @@ def child(data):
             raise KeyboardInterrupt("cleanup-entry")
         return interrupt
     with t.mock.patch.object(t.registry.CP, "_external_base", return_value=Path(external)), \
-            t.mock.patch.object(t.registry, "d5_active", return_value=True), \
+            nullcontext(), \
             t.mock.patch.object(t.host, "session_anchor", return_value=("native", t.ANCHOR)), \
             t.mock.patch.object(t.admission.time, "time", return_value=150):
         try:

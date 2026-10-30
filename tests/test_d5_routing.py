@@ -1,5 +1,5 @@
 """R9 delegation through real wrappers, registry and store; no activation."""
-from contextlib import contextmanager, ExitStack
+from contextlib import nullcontext, contextmanager, ExitStack
 import fcntl
 import os
 from pathlib import Path
@@ -74,7 +74,7 @@ class TestD5Routing(unittest.TestCase):
             observed.assert_called_once()
 
     def test_initial_delegates_to_install_initial(self):
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(install, "install_initial", wraps=install.install_initial) as route, \
                 self.store_boundary("create", [(0, False), (1, False)]):
             result = self.grant()
@@ -86,7 +86,7 @@ class TestD5Routing(unittest.TestCase):
         first = fixtures.grant()
         store.create(self.directory, first)
         raw = self.path.read_bytes()
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(install, "replace_authority", wraps=install.replace_authority) as route, \
                 self.store_boundary("replace", [(0, False), (1, False)]):
             result = self.grant(confirmed_at=first["confirmed_at"] + 1)
@@ -98,7 +98,7 @@ class TestD5Routing(unittest.TestCase):
     def test_revoke_delegates_to_control(self):
         # R9-DIRECT-STORE-REVOKE: result alone cannot establish START ownership.
         store.create(self.directory, fixtures.grant())
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(control, "revoke", wraps=control.revoke) as route, \
                 self.store_boundary("revoke", [(1, False)]):
             result = lease.revoke(*self.args, 120, "owner stopped")
@@ -110,7 +110,7 @@ class TestD5Routing(unittest.TestCase):
     def test_claim_delegates_to_install_with_fresh_registered_source(self):
         # R9-DIRECT-STORE-CLAIM; caller bytes/time must not substitute for R3's.
         store.create(self.directory, fixtures.grant())
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(registry, "lookup", wraps=registry.lookup) as lookup, \
                 mock.patch.object(install, "claim_custody", wraps=install.claim_custody) as route, \
                 self.store_boundary("claim", [(0, False), (1, False)]):
@@ -123,7 +123,7 @@ class TestD5Routing(unittest.TestCase):
         self.fixture.anchor.assert_called_once_with()
         # A second call re-resolves registration and reads the new source bytes.
         self.mandate.write_bytes(b"current registered bytes")
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(registry, "lookup", wraps=registry.lookup) as lookup:
             with self.assertRaisesRegex(authority.AuthorityError, "mandate_changed"):
                 self.claim()
@@ -141,7 +141,7 @@ class TestD5Routing(unittest.TestCase):
         git("worktree", "add", "-b", "linked", str(linked), "HEAD")
         (linked / "docs").mkdir()
         (linked / "docs/orchestrator-mandate.md").write_bytes(b"unregistered source")
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(install, "claim_custody", wraps=install.claim_custody) as route:
             result = custody.claim(linked, "p", self.fixture.state, now=999999, mandate_bytes=b"cached")
         route.assert_called_once_with(self.entry["record_dir"], mandate_path=self.mandate)
@@ -155,7 +155,7 @@ class TestD5Routing(unittest.TestCase):
         target.write_bytes(fixtures.MANDATE)
         self.mandate.unlink()
         self.mandate.symlink_to(target)
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(store, "claim", wraps=store.claim) as mutation:
             with self.assertRaises(OSError):
                 self.claim()
@@ -167,7 +167,7 @@ class TestD5Routing(unittest.TestCase):
     def test_relinquish_delegates_to_control(self):
         store.create(self.directory, fixtures.grant())
         store.claim(self.directory, 101, fixtures.MANDATE, "native", fixtures.ANCHOR, host.liveness)
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(control, "relinquish", wraps=control.relinquish) as route, \
                 self.store_boundary("relinquish", [(1, False)]):
             result = custody.relinquish(*self.args, now=120)
@@ -209,7 +209,7 @@ class TestD5Routing(unittest.TestCase):
                 for name in names:
                     stack.enter_context(mock.patch.object(target, name, side_effect=AssertionError(name)))
             for active in (False, True):
-                with self.subTest(active=active), mock.patch.object(registry, "d5_active", return_value=active):
+                with self.subTest(active=active), nullcontext():
                     self.assertEqual(lease.status(*self.args, now=120,
                         mandate_bytes=b"changed")["record_state"], "mandate_changed")
                     self.assertIsNone(custody.status(*self.args, now=120)["custody"])

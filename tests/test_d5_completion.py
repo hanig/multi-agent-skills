@@ -1,5 +1,5 @@
 """R4 consumer tests: real ledger transitions, deterministic DRAIN exclusion."""
-from contextlib import ExitStack
+from contextlib import nullcontext, ExitStack
 from dataclasses import FrozenInstanceError, replace
 import copy
 import fcntl
@@ -35,8 +35,7 @@ class TestCompletion(unittest.TestCase):
         self.directory = Path(temporary.name)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.active = self.stack.enter_context(mock.patch.object(
-            ledger.registry, "d5_active", return_value=True))
+        self.active = self.stack.enter_context(nullcontext())
         self.registration = {"registration_id": "a" * 32,
                              "record_dir": str(self.directory)}
         self.stack.enter_context(mock.patch.object(

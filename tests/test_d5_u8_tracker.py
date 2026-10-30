@@ -1,5 +1,5 @@
 """Measured cutover matrix through real routes and synthetic tracker transports."""
-from contextlib import ExitStack, redirect_stdout, redirect_stderr
+from contextlib import nullcontext, ExitStack, redirect_stdout, redirect_stderr
 import io
 import json
 import os
@@ -45,7 +45,7 @@ class TestTrackerMatrix(unittest.TestCase):
      case = cls()
      stack.callback(case.doCleanups)
      case.prepare_fixture()
-     stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=active))
+     stack.enter_context(nullcontext())
      self.assertIs(activation.d5_active(), active)
      stack.enter_context(mock.patch.object(subprocess, 'run', side_effect=receipt_child))
      if route == 'new':
@@ -111,7 +111,7 @@ class TestTrackerMatrix(unittest.TestCase):
      }[route] + common
      before, output = case.tree(), io.StringIO()
      with ExitStack() as stack:
-      stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=active))
+      stack.enter_context(nullcontext())
       stack.enter_context(mock.patch.object(sys, 'argv', ['swarm.py'] + argv))
       stack.enter_context(mock.patch.dict(os.environ, {'PATH': str(case.tools)}))
       stack.enter_context(mock.patch.object(S.CP, 'resolve_paths', return_value=(
@@ -147,7 +147,7 @@ class TestTrackerMatrix(unittest.TestCase):
     with self.subTest(active=active, route=route), tempfile.TemporaryDirectory() as tmp:
      case = outbox.OutboxFixture(tmp)
      before = case.tree()
-     with mock.patch.object(activation, 'd5_active', return_value=active):
+     with nullcontext():
       if active:
        with self.assertRaisesRegex(outbox.SO.OutboxError, 'D5 active:'):
         case.call(route)

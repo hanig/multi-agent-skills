@@ -1,5 +1,5 @@
 """Test-only fresh process and explicit boundary; never sends a real effect."""
-from contextlib import ExitStack, contextmanager
+from contextlib import nullcontext, ExitStack, contextmanager
 import json
 import os
 from pathlib import Path
@@ -77,8 +77,7 @@ def effect(data, inherited, mode):
     with ExitStack() as stack:
         stack.enter_context(mock.patch.object(t.registry.CP, '_external_base',
                                               return_value=Path(data['external'])))
-        active = stack.enter_context(mock.patch.object(t.registry, 'd5_active',
-                                                     return_value=mode != 'inactive'))
+        active = stack.enter_context(nullcontext())
         stack.enter_context(mock.patch.object(t.host, 'session_anchor',
                                               return_value=('native', t.ANCHOR)))
         stack.enter_context(mock.patch.object(t.admission.time, 'time', return_value=150))

@@ -1,5 +1,5 @@
 """R6 consumer tests: real registration/admission/ledger, ordered lock probes."""
-from contextlib import contextmanager, ExitStack
+from contextlib import nullcontext, contextmanager, ExitStack
 from dataclasses import FrozenInstanceError
 import ast
 import fcntl
@@ -73,7 +73,7 @@ class TestSubmission(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.object(registry.CP, "_external_base",
                                                    return_value=self.root / "external"))
-        self.active = self.stack.enter_context(mock.patch.object(registry, "d5_active", return_value=True))
+        self.active = self.stack.enter_context(nullcontext())
         self.stack.enter_context(mock.patch.object(host, "session_anchor", return_value=("native", ANCHOR)))
         self.clock = self.stack.enter_context(mock.patch.object(admission.time, "time", return_value=150))
         self.args = self.repo, "p", self.state_dir

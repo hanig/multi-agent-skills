@@ -1,5 +1,5 @@
 """R5 through a locked consumer, real registry/store, and explicit fixture boundary."""
-from contextlib import ExitStack
+from contextlib import nullcontext, ExitStack
 import copy
 import fcntl
 import json
@@ -47,7 +47,7 @@ class TestAdmission(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.object(registry.CP, "_external_base",
                                                    return_value=self.root / "external"))
-        self.active = self.stack.enter_context(mock.patch.object(registry, "d5_active", return_value=True))
+        self.active = self.stack.enter_context(nullcontext())
         self.anchor = self.stack.enter_context(mock.patch.object(host, "session_anchor",
                                              return_value=("native", ANCHOR)))
         self.clock = self.stack.enter_context(mock.patch.object(admission.time, "time", return_value=150))

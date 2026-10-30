@@ -1,5 +1,5 @@
 """Issuance barriers through public entries; D5 remains inactive in production."""
-from contextlib import contextmanager, ExitStack
+from contextlib import nullcontext, contextmanager, ExitStack
 import builtins
 import io
 import json
@@ -104,7 +104,7 @@ class TestIssuance(unittest.TestCase):
     def test_readiness_before_registry_lookup_and_zero_effects(self):
         # Detects readiness-after-registry-lookup, even if lookup catches a
         # launch exception. Exercise both a cold and staged installation.
-        with mock.patch.object(registry, "d5_active", return_value=True):
+        with nullcontext():
             for staged in (False, True):
                 if staged:
                     ready(self, *self.args, promote=False)
@@ -121,7 +121,7 @@ class TestIssuance(unittest.TestCase):
     def test_grant_without_lease_and_lease_before_readiness(self):
         ready(self, *self.args)
         state.release_lease(self.state)
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(readiness, "_read", side_effect=AssertionError("readiness read")) as read:
             for module, name, kwargs in self.operations():
                 with self.subTest(entry=name):
@@ -130,7 +130,7 @@ class TestIssuance(unittest.TestCase):
 
     def test_register_checks_lease_before_invalid_plan(self):
         self.args = self.fixture.repo, "../bad-plan", self.state
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(readiness, "_read") as read, \
                 mock.patch.object(registry, "lookup") as lookup:
             self.refused(registry, "register", {}, "caller-held coordinator lease required")
@@ -146,25 +146,25 @@ class TestIssuance(unittest.TestCase):
                 self.marker.unlink()
             else:
                 self.marker.write_bytes(bad)
-            with self.subTest(marker=bad), mock.patch.object(registry, "d5_active", return_value=True):
+            with self.subTest(marker=bad), nullcontext():
                 self.refused(custody, "claim", dict(now=101, mandate_bytes=MANDATE), "D5 readiness:")
         self.marker.write_bytes(raw)
         installation.write_bytes(b"{}")
-        with mock.patch.object(registry, "d5_active", return_value=True):
+        with nullcontext():
             for module, name, kwargs in self.operations():
                 with self.subTest(entry=name):
                     self.refused(module, name, kwargs, "invalid installation fields")
 
     def test_register_cannot_provision_readiness(self):
         ready(self, *self.args, promote=False)
-        with mock.patch.object(registry, "d5_active", return_value=True):
+        with nullcontext():
             self.refused(registry, "register", {}, "missing or malformed installation state")
         self.assertFalse(self.marker.exists())
 
     def test_invalid_state_locators_refuse_with_authority_error_before_effects(self):
         for locator in (None, "~missing-d5-user/state"):
             with self.subTest(locator=locator), ExitStack() as patches:
-                patches.enter_context(mock.patch.object(registry, "d5_active", return_value=True))
+                patches.enter_context(nullcontext())
                 if locator is not None:
                     patches.enter_context(mock.patch.object(Path, "expanduser",
                         side_effect=RuntimeError("Could not determine home directory.")))
@@ -268,7 +268,7 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
         mandate.parent.mkdir()
         mandate.write_bytes(MANDATE)
         anchor = host.ProcessIdentity(42, 9000001)
-        with mock.patch.object(registry, "d5_active", return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(host, "session_anchor", return_value=("native", anchor)), \
                 mock.patch.object(install.time, "time", return_value=101), \
                 mock.patch.object(state, "holds_lease", wraps=state.holds_lease) as held:
@@ -289,7 +289,7 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
         entry = ready(self, *self.args, promote=False)
         state.release_lease(self.state)
         store.create(entry["record_dir"], grant())
-        with mock.patch.object(registry, "d5_active", return_value=True):
+        with nullcontext():
             result = control.revoke(*self.args, 120, "stop")
         self.assertEqual(result["invalidation"], dict(at=120, kind="revoked", reason="stop"))
         self.assertFalse(self.marker.exists())

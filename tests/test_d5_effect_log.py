@@ -1,6 +1,6 @@
 """U3c consumer and mutation tests; barriers/hooks provide ordering."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import nullcontext, ExitStack
 from dataclasses import FrozenInstanceError, replace
 import copy
 import errno
@@ -35,7 +35,7 @@ class TestEffectLog(unittest.TestCase):
         self.reg = {"registration_id": "a" * 32, "record_dir": str(self.d)}
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.stack.enter_context(mock.patch.object(E.registry, "d5_active", return_value=True))
+        self.stack.enter_context(nullcontext())
         self.lookup = self.stack.enter_context(mock.patch.object(
             E.registry, "lookup", return_value=self.reg))
         self.args = ("checkout", "plan", "state")
@@ -66,7 +66,7 @@ class TestEffectLog(unittest.TestCase):
             call(*args, **kwargs)
 
     def test_A0_inactive_no_io(self):
-        with mock.patch.object(E.registry, "d5_active", return_value=False), ExitStack() as stack:
+        with nullcontext(), ExitStack() as stack:
             for target, name in ((E.registry, "lookup"), (E.locks, "pin"),
                                  (os, "open"), (os, "mkdir"), (os, "lstat"),
                                  (E.registry.subprocess, "Popen")):

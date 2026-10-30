@@ -8,7 +8,7 @@ import d5_protocol_locks as protocol
 import swarm_state as state
 
 
-def ready_installation(tmp, entry=None):
+def ready_installation(tmp, entry=None, state_dir=None, record_dir=None):
     """Publish under the real installer lease and DRAIN/START protocol.
 
     A standalone fixture needs only filesystem bindings, not grant authority.
@@ -16,7 +16,8 @@ def ready_installation(tmp, entry=None):
     """
     tmp = Path(tmp).resolve()
     if entry is None:
-        directory, record = tmp / 'state', tmp / 'record'
+        directory = Path(state_dir).resolve() if state_dir is not None else tmp / 'state'
+        record = Path(record_dir).resolve() if record_dir is not None else tmp / 'record'
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         record.mkdir(mode=0o700, parents=True, exist_ok=True)
         key = lambda p: [p.stat().st_dev, p.stat().st_ino]

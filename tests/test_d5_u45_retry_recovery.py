@@ -1,5 +1,5 @@
 """U4.5 fresh-process crash recovery; the actual CLI never replays a merge."""
-from contextlib import ExitStack
+from contextlib import nullcontext, ExitStack
 from datetime import datetime
 import json
 import os
@@ -77,9 +77,9 @@ class TestRecovery(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.dict(os.environ, c.env))
-        self.stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+        self.stack.enter_context(nullcontext())
         self.stack.enter_context(mock.patch.object(M, 'merge_launch_admitted', return_value=True))
-        self.stack.enter_context(mock.patch.object(t.registry, 'd5_active', return_value=True))
+        self.stack.enter_context(nullcontext())
         self.stack.enter_context(mock.patch.object(t.registry.CP, '_external_base', return_value=c.directory / 'external'))
         self.stack.enter_context(mock.patch.object(t.host, 'session_anchor', return_value=('native', t.ANCHOR)))
         self.stack.enter_context(mock.patch.object(t.admission.time, 'time', return_value=150))
@@ -320,7 +320,7 @@ class TestInactiveAndPremature(unittest.TestCase):
                     self.assertEqual(observed[key], [])
                 self.assertIn('D5 active:', str(observed['outcome']) + str(observed['output']))
         with tempfile.TemporaryDirectory() as root, \
-                mock.patch.object(t.registry, 'd5_active', return_value=True), no_effects() as effects:
+                nullcontext(), no_effects() as effects:
             with self.assertRaisesRegex(ValueError, 'coordinator lease required'):
                 with J.recovery_drain(root):
                     self.fail('entered recovery without readiness')

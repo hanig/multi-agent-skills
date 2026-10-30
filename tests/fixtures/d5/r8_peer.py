@@ -1,5 +1,5 @@
 """R8 setup, ancestor, worker and installer fixtures."""
-from contextlib import ExitStack
+from contextlib import nullcontext, ExitStack
 import json
 import os
 from pathlib import Path
@@ -30,7 +30,7 @@ def setup(root):
     with ExitStack() as stack:
         stack.enter_context(mock.patch.object(t.registry.CP, '_external_base',
                                               return_value=root / 'external'))
-        stack.enter_context(mock.patch.object(t.registry, 'd5_active', return_value=True))
+        stack.enter_context(nullcontext())
         stack.enter_context(mock.patch.object(t.host, 'session_anchor',
                                               return_value=('native', t.ANCHOR)))
         case = t.unittest.TestCase()
@@ -193,7 +193,7 @@ def installer(raw):
         assert rows == [], rows  # Child submission is deferred with R8b.
         return replace(*args)
 
-    with mock.patch.object(t.registry, 'd5_active', return_value=True), \
+    with nullcontext(), \
             mock.patch.object(t.host, 'session_anchor', return_value=('native', t.ANCHOR)), \
             mock.patch.object(t.protocol.locks.fcntl, 'flock', side_effect=observed), \
             mock.patch.object(t.store, 'replace', side_effect=replacing):

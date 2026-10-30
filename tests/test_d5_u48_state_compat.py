@@ -1,6 +1,6 @@
 """U4.8: prepared state, unchanged legacy keys, and no active migration."""
 import argparse
-from contextlib import ExitStack
+from contextlib import nullcontext, ExitStack
 import copy
 import hashlib
 import json
@@ -34,7 +34,7 @@ def migration_capture():
         tools = directory / 'tools'
         tools.mkdir()
         stack.enter_context(mock.patch.dict(os.environ, {'PATH': str(tools)}))
-        stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=False))
+        stack.enter_context(nullcontext())
         stack.enter_context(mock.patch.object(S.CP, '_external_base', return_value=directory / 'external'))
         previous = os.getcwd()
         os.chdir(directory)
@@ -75,7 +75,7 @@ def installation_capture(module=R):
     try:
         with ExitStack() as stack:
             stack.enter_context(mock.patch.dict(os.environ, c.env))
-            stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=False))
+            stack.enter_context(nullcontext())
             stack.enter_context(mock.patch.object(R.registry.CP, '_external_base',
                                                  return_value=c.directory / 'external'))
             entry = ready(c, c.repo, c.plan['name'], c.state_dir, promote=False)
@@ -143,7 +143,7 @@ class TestPreparedState(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(R.registry.CP, '_external_base',
                                                  return_value=self.c.directory / 'external'))
         self.entry = ready(self, self.c.repo, self.c.plan['name'], self.c.state_dir)
-        self.stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+        self.stack.enter_context(nullcontext())
         self.stack.enter_context(mock.patch.object(M, 'merge_launch_admitted', return_value=True))
         self.args = argparse.Namespace(state_dir=str(self.c.state_dir), root=str(self.c.root),
             unit='u', pr=7, verify_integration=False, abandon_intent=None,

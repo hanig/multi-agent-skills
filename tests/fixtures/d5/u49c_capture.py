@@ -4,7 +4,7 @@ The real entry bodies run until the first intercepted preparation operation.
 This measures entry routing, not successful dispatch or merge execution.
 """
 import argparse
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import nullcontext, ExitStack, redirect_stderr, redirect_stdout
 import io
 import sys
 from unittest import mock
@@ -30,7 +30,7 @@ def inactive_captures(swarm, merge):
             return call
 
         with ExitStack() as stack:
-            stack.enter_context(mock.patch.object(swarm.D5, 'd5_active', return_value=False))
+            stack.enter_context(nullcontext())
             stack.enter_context(mock.patch.object(swarm.SR, 'apply_agent_resolution',
                 side_effect=stop('apply_agent_resolution')))
             stack.enter_context(mock.patch.object(merge, 'read_object', side_effect=stop('read_object')))

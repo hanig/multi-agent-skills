@@ -1,5 +1,5 @@
 """U3-R1 consumers, seam characterization and named mutation targets."""
-from contextlib import ExitStack
+from contextlib import nullcontext, ExitStack
 import os
 from pathlib import Path
 import select
@@ -101,7 +101,7 @@ class TestProtocolLocks(unittest.TestCase):
         self.assertFalse((self.directory / "authority.lock").exists())
 
     def ledger_setup(self, stack):
-        stack.enter_context(mock.patch.object(ledger.registry, "d5_active", return_value=True))
+        stack.enter_context(nullcontext())
         stack.enter_context(mock.patch.object(ledger.registry, "lookup", return_value={
             "registration_id": "a" * 32, "record_dir": str(self.directory)}))
         return dict(record_id="b" * 32,

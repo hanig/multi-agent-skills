@@ -1,5 +1,5 @@
 """U4.2 authority seams, restart refusals and unit-local M6 observations."""
-from contextlib import ExitStack
+from contextlib import nullcontext, ExitStack
 from dataclasses import FrozenInstanceError, asdict, replace
 import json
 import hashlib
@@ -95,7 +95,7 @@ def restart():
         bytes.fromhex(data["binding"]), bytes.fromhex(data["secret"]))
     attempt = E.Attempt(receipt.effect_id, receipt._directory, receipt._binding, receipt._secret)
     results = []
-    with mock.patch.object(E.registry, "d5_active", return_value=True):
+    with nullcontext():
         for call in (lambda: E.complete(receipt, dict(status="succeeded", detail="fixture response")),
                      lambda: E._classify(attempt, "unknown"),
                      lambda: C._Completion(receipt).uncertain(),
@@ -188,8 +188,8 @@ class TestRequestAuthority(unittest.TestCase):
         c.probe("drain")
         before = tree_bytes(c.root)
         with ExitStack() as stack:
-            stack.enter_context(mock.patch.object(t.registry, "d5_active", DEFAULT_ACTIVE))
-            stack.enter_context(mock.patch.object(t.registry.d5_activation, "d5_active", return_value=True))
+            stack.enter_context(nullcontext())
+            stack.enter_context(nullcontext())
             probes = [stack.enter_context(mock.patch.object(target, name, wraps=getattr(target, name)))
                 for target, name in ((t.protocol._Protocol, "start"), (t.protocol, "pin"),
                     (E, "_write"), (subprocess, "Popen"), (socket, "create_connection"))]

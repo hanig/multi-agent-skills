@@ -1,5 +1,5 @@
 """U4.9a named-entry refusals and merge containment; no isolation claim."""
-from contextlib import ExitStack, redirect_stdout, redirect_stderr
+from contextlib import nullcontext, ExitStack, redirect_stdout, redirect_stderr
 import builtins
 import io
 import json
@@ -91,7 +91,7 @@ class TestMergeAdmission(unittest.TestCase):
                         (urllib.request, 'urlopen')):
                     probes.append(stack.enter_context(mock.patch.object(owner, name,
                         side_effect=AssertionError('unexpected ' + name))))
-                stack.enter_context(mock.patch.object(M.D5, 'd5_active', return_value=True))
+                stack.enter_context(nullcontext())
                 output = io.StringIO()
                 with no_effects() as effects, redirect_stderr(output):
                     for call in calls:
@@ -205,7 +205,7 @@ class TestMergeAudit(unittest.TestCase):
                 imported.append(name)
                 raise AssertionError('unexpected tracker import')
             return original(name, *args, **kwargs)
-        with mock.patch.object(M.D5, 'd5_active', return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(builtins, '__import__', importing), \
                 mock.patch.object(M.skill_paths, 'sibling_skill_root') as lookup, \
                 mock.patch.object(M.tempfile, 'TemporaryDirectory') as temporary, \

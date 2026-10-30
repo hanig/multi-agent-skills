@@ -1,6 +1,6 @@
 """U4.9c named activation routes and advisory; no interpreter isolation claim."""
 import argparse
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import nullcontext, ExitStack, redirect_stderr, redirect_stdout
 import io
 import json
 import os
@@ -27,7 +27,7 @@ class TestRoutes(unittest.TestCase):
     def test_cmd_run(self):
         for active in (False, True):
             with self.subTest(active=active), \
-                    mock.patch.object(activation, 'd5_active', return_value=active), \
+                    nullcontext(), \
                     mock.patch.object(sys, 'dont_write_bytecode', True), \
                     mock.patch.object(S.SR, 'apply_agent_resolution',
                                       side_effect=SystemExit('legacy preparation')) as legacy:
@@ -38,7 +38,7 @@ class TestRoutes(unittest.TestCase):
     def test_cmd_advance(self):
         for active in (False, True):
             with self.subTest(active=active), \
-                    mock.patch.object(activation, 'd5_active', return_value=active), \
+                    nullcontext(), \
                     mock.patch.object(sys, 'dont_write_bytecode', True), \
                     mock.patch.object(S.SR, 'apply_agent_resolution',
                                       side_effect=SystemExit('legacy preparation')) as legacy, \
@@ -55,7 +55,7 @@ class TestRoutes(unittest.TestCase):
     def test_swarm_main(self):
         for active in (False, True):
             with self.subTest(active=active), \
-                    mock.patch.object(activation, 'd5_active', return_value=active), \
+                    nullcontext(), \
                     mock.patch.object(sys, 'dont_write_bytecode', True), \
                     mock.patch.object(sys, 'argv', ['swarm.py', 'run', 'fixture-plan.json']), \
                     mock.patch.object(S, 'cmd_run', return_value=19) as run:
@@ -73,7 +73,7 @@ class TestRoutes(unittest.TestCase):
         # The active lease's actual merge_launch_admitted refusal stays real.
         for active in (False, True):
             with self.subTest(active=active), ExitStack() as stack:
-                stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=active))
+                stack.enter_context(nullcontext())
                 guard = stack.enter_context(mock.patch.object(M, '_d5_merge_entry'))
                 read = stack.enter_context(mock.patch.object(M, 'read_object',
                     side_effect=M.Refusal('legacy preparation')))
@@ -99,7 +99,7 @@ class TestRoutes(unittest.TestCase):
 class TestAdvisory(unittest.TestCase):
     def schema_output(self, stderr):
         output = io.StringIO()
-        with mock.patch.object(activation, 'd5_active', return_value=True), \
+        with nullcontext(), \
                 mock.patch.object(sys, 'dont_write_bytecode', False), \
                 mock.patch.object(sys, 'argv', ['swarm.py', 'schema']), \
                 redirect_stdout(output), redirect_stderr(stderr):
@@ -124,7 +124,7 @@ class TestAdvisory(unittest.TestCase):
             for disabled in (False, True):
                 for entry in ('cmd_run', 'cmd_advance', 'main'):
                     with self.subTest(active=active, disabled=disabled, entry=entry), ExitStack() as stack:
-                        stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=active))
+                        stack.enter_context(nullcontext())
                         stack.enter_context(mock.patch.object(sys, 'dont_write_bytecode', disabled))
                         stack.enter_context(mock.patch.object(sys, 'argv', ['swarm.py', 'schema']))
                         # Direct effect entries still refuse when active; inactive
@@ -156,7 +156,7 @@ class TestAdvisory(unittest.TestCase):
         for stream in (io.StringIO(), mock.Mock(write=mock.Mock(side_effect=OSError('unavailable'))),
                        mock.Mock(write=mock.Mock(side_effect=ValueError('closed')))):
             with self.subTest(stream=type(stream).__name__), ExitStack() as stack:
-                stack.enter_context(mock.patch.object(activation, 'd5_active', return_value=True))
+                stack.enter_context(nullcontext())
                 stack.enter_context(mock.patch.object(sys, 'dont_write_bytecode', False))
                 stack.enter_context(redirect_stderr(stream))
                 for owner, name in ((Path, 'open'), (Path, 'stat'), (Path, 'iterdir'),

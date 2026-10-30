@@ -1,5 +1,5 @@
 """Named CLI consumer probe with disposable state and intercepted effects."""
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import nullcontext, ExitStack, redirect_stderr, redirect_stdout
 import importlib
 import io
 import json
@@ -36,7 +36,7 @@ def capture(source, tool, command, active=False, installed=False):
         stack.callback(os.chdir, old)
         # None observes production wiring without an activation mock.
         if active is not None:
-            stack.enter_context(mock.patch.object(d5_activation, 'd5_active', return_value=active))
+            stack.enter_context(nullcontext())
         stack.enter_context(mock.patch.object(unit, 'now_iso', return_value='fixture-time'))
         state, runs = tmp / 'state', tmp / 'runs'
         state.mkdir()
@@ -47,7 +47,7 @@ def capture(source, tool, command, active=False, installed=False):
                 case = TestD5Registry()
                 case.setUp()
                 stack.callback(case.doCleanups)
-                with mock.patch.object(d5_activation, 'd5_active', return_value=True):
+                with nullcontext():
                     ready(case, case.repo, 'p', case.state)
             state = case.state
         (state / 'swarm-state.json').write_text('{"units":{}}')

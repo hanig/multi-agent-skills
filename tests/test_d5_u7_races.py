@@ -5,7 +5,7 @@ START/DRAIN, authority records, submission, merge journal and receipt readback
 remain real. Temporary storage holds logical records across simulated death;
 no oracle depends on source text, path spelling or filesystem layout.
 """
-from contextlib import ExitStack
+from contextlib import nullcontext, ExitStack
 import copy
 import hashlib
 import json
@@ -96,7 +96,7 @@ class World:
         store.create(self.directory, record)
         self.claim('A', self.anchor)
         # Park a real legacy outbox item; compare its exact contents at teardown.
-        with mock.patch.object(activation, 'd5_active', return_value=False):
+        with nullcontext():
             outbox.emit_intent(self.state, 'p', 'u', 'SUBMITTED',
                                dict(attempt_dir='/fixture/attempt', job_id='1'))
         self.outbox_before = (self.state / outbox.OUTBOX).read_bytes()
