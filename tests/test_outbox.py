@@ -2890,7 +2890,7 @@ class TestACodeUnitIsNotDoneUntilMerged(unittest.TestCase):
         ok, _ = m.acquire_lease(str(st))
         self.assertTrue(ok)
         self.addCleanup(m.release_lease, str(st))
-        def forced_check(unit_dir, facts=None, artifact_basis=None):
+        def forced_check(unit_dir, facts=None, artifact_basis=None, *, state_dir):
             if verdict != 0:
                 return verdict, "forced", ""
             receipt = json.dumps({"task_id": "c", "attempt_id": "a1",

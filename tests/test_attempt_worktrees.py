@@ -955,7 +955,8 @@ class TestPerAttemptWorktrees(unittest.TestCase):
 
         bind_calls = []
 
-        def bind(unit_dir, job_id):
+        def bind(unit_dir, job_id, operated_state):
+            self.assertEqual(Path(operated_state), state_dir)
             bind_calls.append((unit_dir, job_id))
             durable = S.load_state(str(state_dir))["units"]["u"]
             self.assertEqual(durable["job_id"], job_id)
@@ -1456,7 +1457,7 @@ class TestPerAttemptWorktrees(unittest.TestCase):
         state_dir = self.tmp / "reuse-state"
         S.save_state(str(state_dir), state)
         real_bind = S.SD._bind
-        S.SD._bind = lambda unit_dir, job_id: None
+        S.SD._bind = lambda unit_dir, job_id, state_dir: None
         self.addCleanup(setattr, S.SD, "_bind", real_bind)
 
         report, _dispatched, _halted = S.advance(
