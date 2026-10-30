@@ -161,22 +161,65 @@ class TestD5Activation(unittest.TestCase):
                     self.assertEqual(p.stdout.strip(), str(activation.d5_active(directory)))
 
     def test_implicit_lookup_matches_operated_state(self):
-        """PD2 / implicit-lookup-differs: early lookup must name the operated state."""
+        """PD2 / implicit-lookup-differs: all supported default path sources."""
         import coordinator_paths as paths
         repo, other = self.root / 'repo', self.root / 'other'
         for directory in (repo, other):
             subprocess.run(['git', 'init', str(directory)], check=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        subprocess.run(['git', '-C', str(other), '-c', 'user.name=Test', '-c',
+                        'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'base'],
+                       check=True, capture_output=True, timeout=30)
+        linked = self.root / 'linked'
+        subprocess.run(['git', '-C', str(other), 'worktree', 'add', '-b', 'linked', str(linked)],
+                       check=True, capture_output=True, timeout=30)
         nested = repo / 'nested'
         nested.mkdir()
-        for cwd in (repo, nested):
-            for xdg in (self.root / 'xdg', repo, other):
-                with self.subTest(cwd=cwd.name, xdg=xdg.name), \
-                        mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(xdg)}), \
-                        mock.patch.object(Path, 'home', return_value=self.root / 'home'):
-                    plan = {'units': [{'repo': str(other)}]}
-                    operated = paths.resolve_paths(plan=plan, cwd=cwd)[0]
-                    self.assertEqual(paths.pre_git_default_state(cwd, plan=plan), operated)
+        for cwd in (repo, nested, linked, self.empty):
+            for xdg in ('', 'relative', str(self.root / 'xdg'), str(repo), str(other), str(linked)):
+                for source in ('repo', 'execution_workspace', 'workspace_policy', 'extra_repos'):
+                    unit = ({source: str(other / 'future')} if source != 'workspace_policy'
+                            else {source: {'path': str(other / 'future')}})
+                    plan = {'units': [unit]} if source != 'extra_repos' else None
+                    extra = [other] if source == 'extra_repos' else ()
+                    with self.subTest(cwd=cwd.name, xdg=xdg, source=source), \
+                            mock.patch.dict(os.environ, {'XDG_STATE_HOME': xdg}), \
+                            mock.patch.object(Path, 'home', return_value=self.root / 'home'):
+                        operated = paths.resolve_paths(plan=plan, cwd=cwd, extra_repos=extra)[0]
+                        with mock.patch.object(paths, '_git', side_effect=AssertionError('early Git')):
+                            early = paths.pre_git_default_state(cwd, plan=plan, extra_repos=extra)
+                        self.assertEqual(early, operated)
+        # Both preferred bases inside operated checkouts force the temp fallback.
+        with mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(repo)}), \
+                mock.patch.object(Path, 'home', return_value=other):
+            plan = {'units': [{'repo': str(other)}]}
+            self.assertEqual(paths.pre_git_default_state(repo, plan=plan),
+                             paths.resolve_paths(plan=plan, cwd=repo)[0])
+
+    def test_implicit_callers_classify_operated_plan_before_git(self):
+        import argparse
+        import swarm
+        repo, other = self.root / 'repo', self.root / 'other'
+        for directory in (repo, other):
+            subprocess.run(['git', 'init', str(directory)], check=True,
+                           capture_output=True, timeout=30)
+        plan = {'name': 'p', 'units': [{'repo': str(other)}]}
+        plan_path = self.root / 'plan.json'
+        plan_path.write_text(json.dumps(plan))
+        old = Path.cwd()
+        os.chdir(repo)
+        self.addCleanup(os.chdir, old)
+        with mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(other)}), \
+                mock.patch.object(Path, 'home', return_value=self.root / 'home'):
+            state = swarm.CP.resolve_paths(plan=plan)[0]
+            ready_installation(self.root, state_dir=state)
+            args = argparse.Namespace(plan=str(plan_path), state_dir=None, fn=swarm.cmd_run, command='run')
+            for call in (lambda: swarm._d5_dispatch(args), lambda: swarm.cmd_run(args),
+                         lambda: swarm._prepare_command_paths(args, plan=plan)):
+                with self.subTest(call=call), mock.patch.object(subprocess, 'run',
+                        side_effect=AssertionError('Git before D5 refusal')):
+                    with self.assertRaisesRegex(SystemExit, 'D5 active:'):
+                        call()
 
     def test_no_tracked_readiness(self):
         names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).split(b'\0')
