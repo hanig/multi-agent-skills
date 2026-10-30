@@ -9,6 +9,8 @@ ARTIFACTS = ('d5-readiness.json', 'd5-installed.json', 'installation.json')
 # Only corruption tests may overwrite a real publisher's artifacts.
 CORRUPTION = {
     ('test_d5_activation.py', 'test_broken_is_active_and_refuses'),
+    ('test_d5_u45_retry_recovery.py', 'test_recovery_requires_live_lease_and_does_not_borrow_or_reorder'),
+    ('test_d5_u4_0b2_submit.py', 'test_submit_validates_marker_installation_and_registration_binding'),
     ('test_d5_u4_0_readiness.py', 'test_reader_refuses_missing_malformed_and_mismatched_without_processes'),
     ('test_d5_u4_0b1_issuance.py', 'test_claim_without_readiness_and_invalid_bindings'),
 }
@@ -25,10 +27,13 @@ def fixture_problems(source, filename):
         return problems
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     activation_modules = {'d5_activation'}
+    readers = {'readiness', 'installation_state', 'classifier'}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             activation_modules.update(alias.asname or alias.name for alias in node.names
                                       if alias.name == 'd5_activation')
+            readers.update(alias.asname or alias.name for alias in node.names
+                           if alias.name in ('d5_readiness', 'd5_installation'))
     def attribute(node):
         return isinstance(node, ast.Attribute) and (
             node.attr == 'd5_active' or
@@ -45,18 +50,19 @@ def fixture_problems(source, filename):
         return ast.dump(node, include_attributes=False)
     def artifact(node):
         return any((isinstance(n, ast.Constant) and isinstance(n.value, str) and
-                    any(name in n.value for name in ARTIFACTS)) or
-                   (isinstance(n, ast.Attribute) and n.attr in ('MARKER', 'INSTALLATION', 'SENTINEL')) or
-                   key(n) in tainted for n in ast.walk(node))
+                    any(n.value == name or n.value.endswith("/" + name) for name in ARTIFACTS)) or
+                   (isinstance(n, ast.Attribute) and n.attr in ('MARKER', 'INSTALLATION', 'SENTINEL')
+                    and isinstance(n.value, ast.Name) and n.value.id in readers) or
+                   (function(node), key(n)) in tainted for n in ast.walk(node))
     for _ in range(5):
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign) and artifact(node.value):
                 for target in node.targets:
                     # Store contexts differ from later Load contexts.
                     if isinstance(target, ast.Name):
-                        tainted.add(key(ast.Name(id=target.id, ctx=ast.Load())))
+                        tainted.add((function(node), key(ast.Name(id=target.id, ctx=ast.Load()))))
                     elif isinstance(target, ast.Attribute):
-                        tainted.add(key(ast.Attribute(value=target.value, attr=target.attr, ctx=ast.Load())))
+                        tainted.add((function(node), key(ast.Attribute(value=target.value, attr=target.attr, ctx=ast.Load()))))
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -96,7 +102,7 @@ def command_sites(source):
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and '\n' in node.value:
             if 'remote_verify.py' in node.value:
                 try:
-                    sites.extend(command_sites(node.value))
+                    sites.extend(command_sites(node.value.replace("%r", "()")))
                 except SyntaxError:
                     pass  # Shell wrapper; its Python argv expression is scanned above.
     return sites
