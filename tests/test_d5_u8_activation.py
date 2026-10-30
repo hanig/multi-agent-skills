@@ -15,7 +15,7 @@ from unittest import mock
 from tests.test_d5_u4_1_active_surface import SurfaceFixture, S_ENTRIES, M_ENTRIES
 from tests.test_d5_u4_0b1_issuance import no_effects
 from tests import test_d5_lease as lease_fixture
-from tests.fixtures.d5.ready import ready
+from tests.fixtures.d5.ready import ready, ready_installation
 import d5_activation as activation
 import d5_authority as authority
 import d5_authority_store as store
@@ -93,19 +93,20 @@ class TestU8Wiring(unittest.TestCase):
   fixture.setUp()
   # Real activation; synthetic clock, identity and submission.
   with nullcontext():
-   self.assertIs(registry.d5_active(), True)
+   self.assertIs(registry.d5_active(fixture.state_dir), True)
    result = fixture.submit()
   self.assertEqual(result.outcome, t.OK)
   self.assertEqual([call[0] for call in fixture.boundary.calls], ['start', 'finish'])
 
  def test_M1_M6_default_production_guards_refuse_before_effects(self):
-  self.assertIs(activation.d5_active(), True)
-  self.assertIs(registry.d5_active(), True)
   self.assertIs(merge_unit.merge_launch_admitted(), False)
   for tool, names in (('swarm', S_ENTRIES), ('operator', M_ENTRIES)):
    for name in names:
     with self.subTest(tool=tool, entry=name), tempfile.TemporaryDirectory() as directory:
      fixture = SurfaceFixture(directory)
+     ready_installation(directory, state_dir=fixture.state_dir)
+     self.assertIs(activation.d5_active(fixture.state_dir), True)
+     self.assertIs(registry.d5_active(fixture.state_dir), True)
      with ExitStack() as stack:
       call = fixture.case(stack, tool, name)
       out = stack.enter_context(redirect_stdout(io.StringIO()))
@@ -137,15 +138,17 @@ class TestU8Wiring(unittest.TestCase):
   for route in t.ENTRIES:
    with self.subTest(route=route), tempfile.TemporaryDirectory() as tmp:
     case = t.OutboxFixture(tmp)
+    ready_installation(tmp, state_dir=case.state_dir)
     before = case.tree()
     with no_effects() as effects:
      with self.assertRaisesRegex(t.SO.OutboxError, 'D5 active:'):
       case.call(route)
      self.assertEqual(effects, ([], []))
     self.assertEqual(case.tree(), before)
-  with no_effects() as effects:
-   with self.assertRaisesRegex(t.SO.OutboxError, 'D5 active:'):
-    swarm_evidence.admit_merge('unused', 'u', 'a' * 40)
+  with tempfile.TemporaryDirectory() as tmp:
+   state_dir = ready_installation(tmp)['state_dir']
+   with no_effects() as effects, self.assertRaisesRegex(t.SO.OutboxError, 'D5 active:'):
+    swarm_evidence.admit_merge(state_dir, 'u', 'a' * 40)
    self.assertEqual(effects, ([], []))
 
 

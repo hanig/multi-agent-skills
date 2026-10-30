@@ -22,6 +22,7 @@ import d5_lease as lease
 import d5_locks as locks
 import d5_registry as registry
 from tests import test_d5_custody as fixtures
+from tests.fixtures.d5.ready import missing_installation, classification_only
 
 
 class TestD5Routing(unittest.TestCase):
@@ -29,11 +30,10 @@ class TestD5Routing(unittest.TestCase):
         self.fixture = fixtures.TestCustodyAPI()
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.setUp()
-        self.fixture.promote = self._testMethodName not in (
-            "test_revoke_delegates_to_control", "test_relinquish_delegates_to_control")
         self.entry = self.fixture.register(record=False)
         self.directory = Path(self.entry["record_dir"])
         self.path = self.directory / store.RECORD_NAME
+        self.drain_before = (self.directory / "authority.drain.lock").stat(), (self.directory / "authority.drain.lock").read_bytes()
         self.mandate = self.fixture.repo / "docs/orchestrator-mandate.md"
         self.args = self.fixture.repo, "p", self.fixture.state
 
@@ -106,7 +106,7 @@ class TestD5Routing(unittest.TestCase):
         route.assert_called_once_with(*self.args, 120, "owner stopped")
         self.assertEqual(self.read(), result)
         self.assertEqual(result["invalidation"], {"at": 120, "kind": "revoked", "reason": "owner stopped"})
-        self.assertFalse((self.directory / "authority.drain.lock").exists())
+        self.assertEqual(((self.directory / "authority.drain.lock").stat(), (self.directory / "authority.drain.lock").read_bytes()), self.drain_before)
 
     def test_claim_delegates_to_install_with_fresh_registered_source(self):
         # R9-DIRECT-STORE-CLAIM; caller bytes/time must not substitute for R3's.
@@ -176,16 +176,16 @@ class TestD5Routing(unittest.TestCase):
         self.assertEqual(self.read(), result)
         self.assertEqual(result["custody"]["relinquished_at"], 120)
         self.fixture.anchor.assert_called_once_with()
-        self.assertFalse((self.directory / "authority.drain.lock").exists())
+        self.assertEqual(((self.directory / "authority.drain.lock").stat(), (self.directory / "authority.drain.lock").read_bytes()), self.drain_before)
 
     def test_inactive_delegates_are_not_called(self):
         # R9-BYPASS-INACTIVE: unrelated environment/CLI input cannot activate.
         before = self.fixture.tree()
-        with ExitStack() as stack:
+        with missing_installation(self.entry), classification_only(self.fixture.state), ExitStack() as stack:
             stack.enter_context(mock.patch.dict(os.environ, {
                 "D5_ACTIVE": "1", "HANIG_D5_ACTIVE": "1", "SWARM_AUTOPILOT": "1"}))
             stack.enter_context(mock.patch.object(sys, "argv", ["fixture", "--d5-active", "swarm autopilot"]))
-            self.assertFalse(registry.d5_active())
+            self.assertFalse(registry.d5_active(self.fixture.state))
             for target, names in ((install, ("install_initial", "replace_authority", "claim_custody")),
                     (control, ("revoke", "relinquish", "record_mandate_invalidation")),
                     (registry, ("lookup",)), (host, ("session_anchor",))):
@@ -210,7 +210,7 @@ class TestD5Routing(unittest.TestCase):
                 for name in names:
                     stack.enter_context(mock.patch.object(target, name, side_effect=AssertionError(name)))
             for active in (False, True):
-                with self.subTest(active=active), nullcontext():
+                with self.subTest(active=active), (nullcontext() if active else missing_installation(self.entry)):
                     self.assertEqual(lease.status(*self.args, now=120,
                         mandate_bytes=b"changed")["record_state"], "mandate_changed")
                     self.assertIsNone(custody.status(*self.args, now=120)["custody"])
