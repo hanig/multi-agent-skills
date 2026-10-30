@@ -863,6 +863,10 @@ author's provider/model ID with `--author`.
 
 #### Model families
 
+At the 2026-10-30 snapshot above, Terra's note in [`models.json`](models.json)
+still says `max`. Gate effort comes from the `effort` field in `reviewers.json`,
+which sets Terra to `xhigh`; the registry's prose is not a gate setting.
+
 A seat that declares a `family` in `reviewers.json` (or the code-agent
 `default` in `hanig-swarm/agents.json`) can move to a newer point release per
 project, without anyone editing a model name:
