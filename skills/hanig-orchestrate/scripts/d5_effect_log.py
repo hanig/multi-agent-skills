@@ -61,7 +61,10 @@ def _active(state_dir):
 
 def _handle_active(handle):
     _check_handle(handle)
-    _active(readiness.installation(handle._directory)["state_dir"])
+    # The handle locator permits the inactive check before any record IO.
+    # It is never authority: active use rechecks the verified installation.
+    _active(handle._state_dir)
+    _require(readiness.installation(handle._directory)["state_dir"] == handle._state_dir)
 
 
 def _hex(value, width):
@@ -259,6 +262,7 @@ class Attempt:
     _directory: str = field(repr=False)
     _binding: bytes = field(repr=False)
     _secret: bytes = field(repr=False)
+    _state_dir: str = field(default=None, repr=False)
 
     @property
     def recording_authority(self):
@@ -295,13 +299,14 @@ def prepare(checkout, plan_id, state_dir, *, record_id, custody, kind, scope, co
                      receipt_verifier=_verifier(effect_id, raw, secret),
                      state="attempting", outcome=None)
         _write(fd, effect_id + ".json", entry, create=True)
-    return Attempt(effect_id, directory, raw, secret)
+    return Attempt(effect_id, directory, raw, secret, readiness.installation(directory)["state_dir"])
 
 
 def _check_handle(handle):
     _require(type(handle) in (Attempt, Receipt) and _hex(handle.effect_id, 32) and
              type(handle._directory) is str and type(handle._binding) is bytes and
-             type(handle._secret) is bytes and len(handle._secret) == 32)
+             type(handle._secret) is bytes and len(handle._secret) == 32 and
+             type(handle._state_dir) is str)
     _binding(_decode(handle._binding))
 
 
@@ -334,7 +339,7 @@ def _classify(attempt, state):
         else:
             _confirm(fd, name)
     if state == "submitted":
-        return Receipt(attempt.effect_id, attempt._directory, attempt._binding, attempt._secret)
+        return Receipt(attempt.effect_id, attempt._directory, attempt._binding, attempt._secret, attempt._state_dir)
     return None
 
 

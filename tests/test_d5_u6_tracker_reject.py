@@ -1,4 +1,5 @@
 """U6 row-75 helper refusal and row-76 observation at the consumer boundary."""
+from contextlib import nullcontext
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import copy
 import io
@@ -40,7 +41,7 @@ class OutboxFixture:
         self.tools = self.root / "tools"
         self.tools.mkdir()
         self.us = {"attempt_dir": "/fixture-runs/u/a1", "job_id": "123"}
-        with mock.patch.object(activation, "d5_active", return_value=False), \
+        with nullcontext(), \
                 mock.patch.object(SO.time, "strftime", return_value=CLOCK):
             self.key = SO.emit_intent(self.state_dir, "fixture", "u", "SUBMITTED", self.us)
             self.receipt = SO.record_receipt(self.state_dir, self.key, "ref", by="Operator")
@@ -77,7 +78,7 @@ class OutboxFixture:
         with ExitStack() as stack:
             # No executables are needed. Never inherit the host's schedulers.
             stack.enter_context(mock.patch.dict(os.environ, {"PATH": str(self.tools)}))
-            stack.enter_context(mock.patch.object(activation, "d5_active", return_value=False))
+            stack.enter_context(nullcontext())
             stack.enter_context(mock.patch.object(SO.time, "strftime", return_value=CLOCK))
             stack.enter_context(redirect_stdout(output))
             stack.enter_context(redirect_stderr(output))
@@ -105,7 +106,7 @@ class TestTrackerRefusal(unittest.TestCase):
     def assert_refused(self, fixture, name):
         before = fixture.tree()
         with mock.patch.dict(os.environ, {"PATH": str(fixture.tools)}), \
-                mock.patch.object(activation, "d5_active", return_value=True), \
+                nullcontext(), \
                 no_effects() as effects:
             with self.assertRaisesRegex(SO.OutboxError, "D5 active: tracker " + name + " "):
                 fixture.call(name)
@@ -122,7 +123,7 @@ class TestTrackerRefusal(unittest.TestCase):
         self.addCleanup(host.doCleanups)
         host.setUp()
         fixture = OutboxFixture(host.d, host.state)
-        with mock.patch.object(activation, "d5_active", return_value=True):
+        with nullcontext():
             ready(self, host.repo, "p", host.state)
             for name in ENTRIES:
                 with self.subTest(entry=name):
@@ -187,7 +188,7 @@ class TestAuditObservation(audit_fixture.AuditCase):
         host = registry_fixture.TestD5Registry()
         self.addCleanup(host.doCleanups)
         host.setUp()
-        with mock.patch.object(activation, "d5_active", return_value=True):
+        with nullcontext():
             ready(self, host.repo, "p", host.state)
         binding = self.root / ".hanig/linear-binding.json"
         binding.parent.mkdir()
@@ -212,7 +213,7 @@ class TestAuditObservation(audit_fixture.AuditCase):
         tracker_before = copy.deepcopy(self.fake.issues)
         for active in (False, True):
             with self.subTest(active=active), mock.patch.dict(os.environ, {"PATH": str(tools)}), \
-                    mock.patch.object(activation, "d5_active", return_value=active), \
+                    nullcontext(), \
                     mock.patch.object(M.subprocess, "run", side_effect=child), \
                     redirect_stdout(io.StringIO()) as output:
                 commands.clear()

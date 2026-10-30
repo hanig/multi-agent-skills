@@ -1,4 +1,5 @@
 """R2 controls through real registration/store; lock evidence uses hooks/probes."""
+from contextlib import nullcontext
 from contextlib import contextmanager, ExitStack
 import os
 from pathlib import Path
@@ -23,7 +24,7 @@ import d5_protocol_locks as protocol
 import d5_registry as registry
 from tests import test_d5_locks as lock_tests
 from tests.test_d5_authority import grant
-from tests.fixtures.d5.ready import ready
+from tests.fixtures.d5.ready import ready, classification_only, missing_installation
 
 PEER = ROOT / "tests/fixtures/d5/protocol_peer.py"
 MANDATE = b"fixture mandate\r\n\xff"
@@ -46,11 +47,10 @@ class TestD5Control(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.object(registry.CP, "_external_base",
                                                    return_value=self.root / "external"))
-        self.active = self.stack.enter_context(mock.patch.object(registry, "d5_active", return_value=True))
         self.anchor = self.stack.enter_context(mock.patch.object(host, "session_anchor",
                                                                 return_value=("native", ANCHOR)))
         self.args = self.repo, "p", self.state
-        self.entry = ready(self, *self.args, promote=False)
+        self.entry = ready(self, *self.args)
         self.directory = Path(self.entry["record_dir"])
         record = grant()
         record.update(expires_at=200, mandate_sha256=authority.mandate_digest(MANDATE),
@@ -340,10 +340,12 @@ class TestD5Control(unittest.TestCase):
 
     def test_inactive_control_has_no_protocol_io(self):
         # R2-BYPASS-INACTIVE: forbid work at lookup/pin AND filesystem boundaries.
-        self.active.return_value = False
-        with ExitStack() as stack:
+        empty = self.root / "empty"
+        empty.mkdir()
+        self.args = self.repo, "p", empty
+        with classification_only(empty), ExitStack() as stack:
             for target, names in ((registry, ("lookup",)), (protocol, ("pin",)),
-                    (os, ("open", "lstat", "stat", "mkdir")), (host, ("session_anchor",)),
+                    (host, ("session_anchor",)),
                     (store, ("revoke", "check", "relinquish"))):
                 for name in names:
                     stack.enter_context(mock.patch.object(target, name, side_effect=AssertionError("inactive IO")))

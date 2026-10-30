@@ -1,4 +1,5 @@
 """R3 consumers: real stores/flocks; events and failed NB probes order waits."""
+from contextlib import nullcontext
 from contextlib import contextmanager, ExitStack
 import json
 import os
@@ -37,8 +38,7 @@ class TestInstall(unittest.TestCase):
         self.mandate.write_bytes(MANDATE)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.active = self.stack.enter_context(mock.patch.object(
-            install.registry, "d5_active", return_value=True))
+        self.active = self.stack.enter_context(nullcontext())
         self.anchor = self.stack.enter_context(mock.patch.object(
             host, "session_anchor", return_value=("native", ANCHOR)))
         self.live = self.stack.enter_context(mock.patch.object(

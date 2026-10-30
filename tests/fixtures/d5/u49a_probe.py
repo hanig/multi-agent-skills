@@ -1,4 +1,5 @@
 """Named CLI consumer probe with disposable state and intercepted effects."""
+from contextlib import nullcontext
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import importlib
 import io
@@ -20,7 +21,7 @@ def capture(source, tool, command, active=False, installed=False):
     sys.path.insert(0, str(source))
     from tests.test_d5_u4_0b1_issuance import no_effects
     from tests.test_d5_registry import TestD5Registry
-    from tests.fixtures.d5.ready import ready
+    from tests.fixtures.d5.ready import ready, ready_installation
     import d5_activation
     import unit
     import remote_verify
@@ -36,7 +37,7 @@ def capture(source, tool, command, active=False, installed=False):
         stack.callback(os.chdir, old)
         # None observes production wiring without an activation mock.
         if active is not None:
-            stack.enter_context(mock.patch.object(d5_activation, 'd5_active', return_value=active))
+            stack.enter_context(nullcontext())
         stack.enter_context(mock.patch.object(unit, 'now_iso', return_value='fixture-time'))
         state, runs = tmp / 'state', tmp / 'runs'
         state.mkdir()
@@ -47,9 +48,12 @@ def capture(source, tool, command, active=False, installed=False):
                 case = TestD5Registry()
                 case.setUp()
                 stack.callback(case.doCleanups)
-                with mock.patch.object(d5_activation, 'd5_active', return_value=True):
+                with nullcontext():
                     ready(case, case.repo, 'p', case.state)
             state = case.state
+        if active is not False and not installed:
+            ready_installation(tmp, state_dir=state)
+            (state / 'd5-readiness.json').unlink()  # broken installation case
         (state / 'swarm-state.json').write_text('{"units":{}}')
         (runs / 'unit.json').write_text(json.dumps(dict(kind='pipeline', task_id='u',
             attempt_id='a', declared_outputs=['result'], created_at_epoch=0, job_id=None)))
@@ -70,7 +74,10 @@ def capture(source, tool, command, active=False, installed=False):
             'remote_verify': {name: ['--' + name, str(runs)] for name in ('worker', 'supervise')},
             'merge_unit': {'audit': []},
         }
-        stack.enter_context(mock.patch.object(sys, 'argv', [tool + '.py'] + entries[tool][command]))
+        argv = entries[tool][command]
+        if active is not False and tool != 'merge_unit':
+            argv += ['--state-dir', str(state)]
+        stack.enter_context(mock.patch.object(sys, 'argv', [tool + '.py'] + argv))
         transports = []
         def transport(*args, **kwargs):
             transports.append('wire')
