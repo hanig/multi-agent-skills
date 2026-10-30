@@ -8,7 +8,6 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
-from tests.d5_test_support import inactive
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/hanig-orchestrate/scripts"))
@@ -72,7 +71,6 @@ class TestD5Lease(unittest.TestCase):
                  p.read_bytes() if p.is_file() else None)
                 for p in self.directory.rglob("*")}
 
-    @inactive(registry)
     def test_inactive_refuses_before_filesystem_access(self):
         self.base.mkdir()
         before = self.tree()
@@ -231,7 +229,6 @@ class TestD5Lease(unittest.TestCase):
         self.assertIsInstance(caught.exception.__cause__, FileNotFoundError)
         self.assertFalse((Path(entry["record_dir"]) / store.RECORD_NAME).exists())
 
-    @inactive(registry)
     def test_status_absent_creates_nothing(self):
         for base_exists in (False, True):
             with self.subTest(base_exists=base_exists):
@@ -243,7 +240,6 @@ class TestD5Lease(unittest.TestCase):
                 self.assertEqual(self.tree(), before)
                 self.assertEqual(self.base.exists(), base_exists)
 
-    @inactive(registry)
     def test_status_registered_without_record_creates_nothing(self):
         entry = self.register()
         (self.base / "hanig-authority/v1/registry.lock").unlink()

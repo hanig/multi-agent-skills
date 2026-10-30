@@ -240,9 +240,5 @@ class ValidateSeedsTests(unittest.TestCase):
                                      worktrees)
 
 
-from tests.d5_test_support import inactive_class
-inactive_class(ValidateSeedsTests)
-
-
 if __name__ == "__main__":
     unittest.main()

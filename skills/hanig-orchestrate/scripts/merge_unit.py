@@ -48,9 +48,9 @@ class Refusal(ValueError):
     pass
 
 
-def _d5_refuse(route):
-    if D5.d5_active():
-        raise Refusal("D5 active: {} is outside the supported merge profile".format(route))
+def _d5_refuse(route, state_dir):
+    if D5.d5_active(state_dir):
+        raise Refusal("D5 active: {} is outside the supported merge profile; inspect d5_install readiness".format(route))
 
 
 def merge_launch_admitted():
@@ -58,10 +58,10 @@ def merge_launch_admitted():
     return False
 
 
-def _d5_merge_launch_entry():
-    if D5.d5_active() and not merge_launch_admitted():
+def _d5_merge_launch_entry(state_dir):
+    if D5.d5_active(state_dir) and not merge_launch_admitted():
         raise Refusal("D5 active: merge launch is not admitted; executable binding "
-                      "and integrity remain undelivered at U8 cutover")
+                      "and integrity remain undelivered at U8 cutover; inspect d5_install readiness")
 
 
 def _d5_merge_entry(args):
@@ -71,8 +71,8 @@ def _d5_merge_entry(args):
     must separately admit merge launch after executable binding review.
     There is deliberately no legacy fallback or runtime opt-out.
     """
-    _d5_merge_launch_entry()
-    if D5.d5_active():
+    _d5_merge_launch_entry(args.state_dir)
+    if D5.d5_active(args.state_dir):
         if (args.verify_integration or args.abandon_intent
                 or args.retrieve_remote_evidence or args.remote_recovery_attestation):
             raise Refusal("D5 active: verification and abandonment are outside "
@@ -132,8 +132,8 @@ def durable_write(path, value):
             os.unlink(temporary)
 
 
-def run(command, allowed=(0,)):
-    _d5_refuse('run')
+def run(command, allowed=(0,), *, state_dir):
+    _d5_refuse('run', state_dir)
     print("+ " + shlex.join(command), flush=True)
     result = subprocess.run(command, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -171,7 +171,7 @@ def forge_route(remote):
 
 
 def authority(args, plan):
-    if D5.d5_active():
+    if D5.d5_active(args.state_dir):
         import d5_readiness as DR
         DR.require(args.state_dir)
         DR.prepared_state(args.state_dir)
@@ -252,9 +252,9 @@ def commands(args, root, binding, host, repo_path):
     }
 
 
-def observed_target(command, target):
+def observed_target(command, target, state_dir):
     """Read the anchored branch ref; PR base metadata can remain stale."""
-    ref = json.loads(run(command).stdout)
+    ref = json.loads(run(command, state_dir=state_dir).stdout)
     if not isinstance(ref, dict) or ref.get("ref") != "refs/heads/" + target:
         raise Refusal("forge returned a different or invalid target branch ref")
     obj = ref.get("object")
@@ -445,9 +445,9 @@ def current_intent(state_dir, binding, root, repair=True):
     intent unmarked, finish that local update before permitting a successor.
     No worker file or filesystem timestamp selects the current operation.
     """
-    if D5.d5_active():
+    if D5.d5_active(state_dir):
         if repair:
-            _d5_refuse('current_intent')
+            _d5_refuse('current_intent', state_dir)
         import d5_readiness as DR
         DR.lease_required(state_dir)
     operation_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
@@ -529,7 +529,7 @@ def current_intent(state_dir, binding, root, repair=True):
 
 
 def abandon(args, intent_path, intent, pr, operation_id):
-    _d5_refuse('abandon')
+    _d5_refuse('abandon', args.state_dir)
     record_path = intent_path.with_name(
         "merge-abandonment-" + operation_id + ".json")
     record = {"schema_version": 1, "operation_id": operation_id,
@@ -553,7 +553,7 @@ def cancel_before_request(intent_path, intent, observed, reason):
     # Active submissions use R6's authoritative no-effect classification.
     # This legacy cancellation marker cannot resolve a D5 request or release
     # its lifetime holder, even when the local merge process has exited.
-    _d5_refuse('cancel_before_request')
+    _d5_refuse('cancel_before_request', Path(intent_path).parent)
     rollback_path = intent_path.with_suffix(".cancellation-pending")
     durable_write(rollback_path, intent)
     resolved = dict(intent, phase="cancelled_before_request", cancellation={
@@ -638,7 +638,7 @@ def _d5_result_receipt(state_dir, binding, root, operation_id, outcome, repo):
 
 def reconcile(args, plan):
     _d5_merge_entry(args)
-    if D5.d5_active():
+    if D5.d5_active(args.state_dir):
         import d5_authority_store as store
         import d5_host as host_api
         import d5_merge_journal as J
@@ -766,7 +766,7 @@ def reconcile(args, plan):
 
     # Identity is mandatory even for a named scope-policy exception or
     # already-merged reconciliation. Check it before the first forge read.
-    scope = run(cmd["scope"], allowed=(0, 1, 2))
+    scope = run(cmd["scope"], allowed=(0, 1, 2), state_dir=args.state_dir)
     try:
         scope_report = json.loads(scope.stdout)
     except ValueError:
@@ -775,14 +775,14 @@ def reconcile(args, plan):
 
     # Refuse an unreadable receipt journal before any merge request.
     receipts, _ = S.load_merge_receipts(state_dir)
-    pr = json.loads(run(cmd["view"]).stdout)
+    pr = json.loads(run(cmd["view"], state_dir=args.state_dir).stdout)
     check_pr(pr, binding)
     url = observed_pr_url(pr, host, repo_path, args.pr)
     if args.verify_integration:
         if pr["state"] != "OPEN" or intent:
             raise Refusal("verification requires an OPEN PR with no unresolved merge intent")
         S.load_verifications(state_dir)
-        target = observed_target(cmd["target"], binding["target"])
+        target = observed_target(cmd["target"], binding["target"], args.state_dir)
         execution_policy, execution_digest = declared_execution(state_dir, repo)
         unit_digest, coordinator_digest = verification_state_digests(state_dir, args.unit)
         # Return only coordinator/forge inputs captured under the lease. The
@@ -810,15 +810,15 @@ def reconcile(args, plan):
                 scope.returncode == 2 and scope_report["status"] == "unchecked"
                 and args.allow_unchecked_scope):
             raise Refusal("scope-check exited {}: {}".format(scope.returncode, scope.stdout))
-        checks = json.loads(run(cmd["checks"]).stdout)
+        checks = json.loads(run(cmd["checks"], state_dir=args.state_dir).stdout)
         if not isinstance(checks, list) or not checks or any(
                 not isinstance(c, dict) or c.get("state") != "SUCCESS" for c in checks):
             raise Refusal("at least one CI check is required and every check must be SUCCESS")
-        target = observed_target(cmd["target"], binding["target"])
+        target = observed_target(cmd["target"], binding["target"], args.state_dir)
         evidence, error = integration_evidence(state_dir, binding, repo, target)
         if error:
             raise Refusal("integration-tests precondition: " + error + ". " + verification_hint(args))
-        latest = json.loads(run(cmd["view"]).stdout)
+        latest = json.loads(run(cmd["view"], state_dir=args.state_dir).stdout)
         check_pr(latest, binding)
         if latest["state"] != "OPEN":
             raise Refusal("PR or target moved during preflight; rerun against the current target. "
@@ -837,7 +837,7 @@ def reconcile(args, plan):
                   "binding": binding, "root": root, "phase": "merge_requested",
                   "preconditions": observation, "target_before_request": target}
         # Avoid publishing an intent for a move already visible in preflight.
-        if observed_target(cmd["target"], binding["target"]) != target:
+        if observed_target(cmd["target"], binding["target"], args.state_dir) != target:
             raise Refusal("target moved during preflight; rerun against the current target. "
                           + verification_hint(args))
         durable_write(intent_path, intent)
@@ -845,7 +845,7 @@ def reconcile(args, plan):
         try:
             # This is the final external observation before transmission. In
             # particular, no intent fsync belongs between this read and merge.
-            observed = observed_target(cmd["target"], binding["target"])
+            observed = observed_target(cmd["target"], binding["target"], args.state_dir)
             if observed != target:
                 raise Refusal("target moved after intent publication")
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -855,14 +855,14 @@ def reconcile(args, plan):
             cancel_before_request(intent_path, intent, observed, reason)
             raise Refusal("cancelled before merge request: " + reason + ". "
                           + verification_hint(args))
-        run(cmd["merge"])
-        pr = json.loads(run(cmd["view"]).stdout)
+        run(cmd["merge"], state_dir=args.state_dir)
+        pr = json.loads(run(cmd["view"], state_dir=args.state_dir).stdout)
         check_pr(pr, binding)
         url = observed_pr_url(pr, host, repo_path, args.pr)
         if pr["state"] != "MERGED":
             raise Refusal("merge not observed (possibly queued); rerun to reconcile, never re-merge")
     merged = oid((pr.get("mergeCommit") or {}).get("oid"))
-    commit = json.loads(run(parent_command(host, repo_path, merged)).stdout)
+    commit = json.loads(run(parent_command(host, repo_path, merged), state_dir=args.state_dir).stdout)
     parents = commit.get("parents")
     if commit.get("sha") != merged or not isinstance(parents, list) or len(parents) != 1:
         raise Refusal("squash reconciliation requires the observed single-parent merge commit")
@@ -900,7 +900,7 @@ def reconcile(args, plan):
                 "merged_as": merged, "method": "squash", "target_commit": target,
                 "merged": True, "attested": True, "integration_status": integration_status}
     if not any(all(r.get(k) == v for k, v in expected.items()) for r in receipts):
-        run(receipt_command(args, binding, url, merged, target, integration_status))
+        run(receipt_command(args, binding, url, merged, target, integration_status), state_dir=args.state_dir)
     receipts, _ = S.load_merge_receipts(state_dir)
     if not any(all(r.get(k) == v for k, v in expected.items()) for r in receipts):
         raise Refusal("swarm merge did not persist the expected receipt")
@@ -1099,7 +1099,7 @@ class _MergeBoundary:
 @contextmanager
 def _active_entry_lease(args):
     """Read-only installation preflight before acquiring the existing lease."""
-    _d5_merge_launch_entry()
+    _d5_merge_launch_entry(args.state_dir)
     if (args.verify_integration or args.abandon_intent or args.retrieve_remote_evidence
             or args.remote_recovery_attestation):
         _d5_merge_entry(args)
@@ -1125,7 +1125,7 @@ def verify_integration(args, repo, snapshot):
     Like integration_evidence, this helper receives the local repository as an
     explicit argument; it introduces no repository-key reader of its own.
     """
-    _d5_refuse('verify_integration')
+    _d5_refuse('verify_integration', args.state_dir)
     binding, target = snapshot["binding"], snapshot["target"]
     evidences, error = V.run_merge_preconditions(
         S.U.run, repo, binding["head"], target,
@@ -1178,12 +1178,12 @@ def verify_integration(args, repo, snapshot):
             S.load_merge_receipts(state_dir)
             S.load_verifications(state_dir)
             cmd = commands(args, root, fresh, host, repo_path)
-            pr = json.loads(run(cmd["view"]).stdout)
+            pr = json.loads(run(cmd["view"], state_dir=args.state_dir).stdout)
             check_pr(pr, fresh)
             observed_pr_url(pr, host, repo_path, args.pr)
             if pr["state"] != "OPEN":
                 raise Refusal("PR is no longer OPEN after verification")
-            if observed_target(cmd["target"], fresh["target"]) != target:
+            if observed_target(cmd["target"], fresh["target"], args.state_dir) != target:
                 raise Refusal("target moved during verification")
         except (OSError, ValueError, TypeError, KeyError, AttributeError,
                 subprocess.SubprocessError, S.PlanError, S.OutboxError,
@@ -1272,7 +1272,7 @@ def print_pending_close(args, plan):
 
 def print_tracker_drain(args):
     """Best-effort operator mutation after advance; never a merge prerequisite."""
-    _d5_refuse('print_tracker_drain')
+    _d5_refuse('print_tracker_drain', args.state_dir)
     key = None
     try:
         project_dir = skill_paths.sibling_skill_root(
@@ -1305,7 +1305,7 @@ def print_tracker_audit(args):
     """Best-effort operator read after advance; never affects merge outcome."""
     key = None
     try:
-        if D5.d5_active():
+        if D5.d5_active(args.state_dir):
             print('Tracker: UNAVAILABLE (D5 active: audit is not admitted)')
             return
         project_dir = skill_paths.sibling_skill_root(
@@ -1385,7 +1385,7 @@ def main(argv=None):
     if args.reason and not args.abandon_intent:
         parser.error("--reason requires --abandon-intent")
     try:
-        if D5.d5_active():
+        if D5.d5_active(args.state_dir):
             with _active_entry_lease(args):
                 plan = read_object(args.plan)
                 reconcile(args, plan)
@@ -1410,7 +1410,7 @@ def main(argv=None):
         if advance is None:
             return 0
         # advance owns the same lease itself; never hold it across this child.
-        result = run(advance)
+        result = run(advance, state_dir=args.state_dir)
         print(result.stdout, end="")
         print("Merge receipt recorded and advance ran.")
         print_pending_close(args, plan)

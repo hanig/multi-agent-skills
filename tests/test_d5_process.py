@@ -53,7 +53,6 @@ class TestProcess(unittest.TestCase):
     eq = unittest.TestCase.assertEqual
 
     def setUp(self):
-        from tests.d5_test_support import for_case
         for_case(self)
         isolate_pool(self)
         temporary = tempfile.TemporaryDirectory()

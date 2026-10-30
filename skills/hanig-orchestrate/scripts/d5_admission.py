@@ -29,6 +29,7 @@ from d5_control import _mandate_bytes
 import d5_host as host
 import d5_locks as locks
 import d5_registry as registry
+import d5_readiness as readiness
 
 
 # Closed trusted classification. The existing synthetic adapters are ledger
@@ -85,7 +86,8 @@ def _validate_locked(pinned, checkout, plan_id, state_dir, *, grant_id,
     R1's private pinned record/ownership view is reused to check directory inode
     and this thread's START. STATE is never pre-acquired here; the store owns it.
     """
-    if not registry.d5_active():
+    readiness.refuse_broken(state_dir)
+    if not registry.d5_active(state_dir):
         raise authority.AuthorityError("D5 is inactive")
     record = pinned._record
     if record.fd is None or not any(key == record.key and rank == 1

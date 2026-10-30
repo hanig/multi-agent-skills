@@ -1632,11 +1632,5 @@ class TrackerSyncHookProvenance(unittest.TestCase):
                 proc.communicate(timeout=15)
 
 
-from tests.d5_test_support import inactive_classes
-inactive_classes(
-    TrackerSyncHookDelivery, TrackerSyncHookOutboxReporting, TrackerSyncHookInputContract,
-    TrackerSyncHookProvenance)
-
-
 if __name__ == "__main__":
     unittest.main()

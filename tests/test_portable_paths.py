@@ -244,9 +244,5 @@ class InstalledSnapshot(unittest.TestCase):
                             self.assertIn("usage:", result.stdout)
 
 
-from tests.d5_test_support import inactive_class
-inactive_class(InstalledSnapshot)
-
-
 if __name__ == "__main__":
     unittest.main()
