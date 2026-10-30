@@ -280,7 +280,9 @@ class TestU8Wiring(unittest.TestCase):
       self.assertIs(swarm.D5, activation)
       self.assertIs(swarm.D5.d5_active(), False)
       importlib.reload(activation)
-      importlib.reload(swarm_evidence)
+      with mock.patch.dict(vars(swarm_evidence)):
+       importlib.reload(swarm_evidence)
+       self.assertIs(swarm_evidence.D5.d5_active(), False)
       self.assertIs(swarm.D5.d5_active(), False)
       consumer.bound = activation.d5_active
       del consumer.bound
@@ -302,6 +304,8 @@ class TestU8Wiring(unittest.TestCase):
     with self.assertRaisesRegex(AssertionError, 'did not take effect'):
      with support.inactive():
       self.fail('no-op pin admitted')
+  from tests.test_swarm_evidence import TestEvidenceExtraction
+  TestEvidenceExtraction().test_every_moved_definition_is_reexported_identically()
 
  def test_preloaded_child_and_original_hook_survive_pin(self):
   import os
