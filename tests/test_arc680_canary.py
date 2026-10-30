@@ -52,7 +52,8 @@ class CanaryTests(unittest.TestCase):
         self.submitted.append(copy.deepcopy(unit))
         return str(100 + len(self.submitted)), None
 
-    def check(self, directory, *args):
+    def check(self, directory, *args, state_dir):
+        self.assertEqual(state_dir, self.state_dir)
         uid = json.loads((Path(directory) / S.U.UNIT).read_text())['task_id']
         self.checked.append(uid)
         rc = self.verdicts.get(uid, S.RUNNING)
