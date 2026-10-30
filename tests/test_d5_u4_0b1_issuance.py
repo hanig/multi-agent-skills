@@ -298,13 +298,70 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
         state.release_lease(self.state)
         store.create(entry["record_dir"], grant())
         paths = [self.marker, Path(entry["record_dir"]) / "authority.drain.lock"]
-        before = [(p.stat(), p.read_bytes()) for p in paths]
+        def preserved(path):
+            info = path.stat()
+            # Classifier reads may update atime. Explicit metadata writes still
+            # change ctime; retain it and mtime at nanosecond precision.
+            metadata = (info.st_mode, info.st_ino, info.st_dev, info.st_nlink,
+                        info.st_uid, info.st_gid, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns)
+            return metadata, path.read_bytes()
+        before = [preserved(p) for p in paths]
         result = control.revoke(*self.args, 120, "stop")
         self.assertEqual(result["invalidation"], dict(at=120, kind="revoked", reason="stop"))
-        self.assertEqual([(p.stat(), p.read_bytes()) for p in paths], before)
+        self.assertEqual([preserved(p) for p in paths], before)
         self.marker.unlink()
         with self.assertRaisesRegex(registry.AuthorityError, "d5_install"):
             control.revoke(*self.args, 121, "must refuse broken installation")
+
+    def test_readiness_preservation_allows_only_read_access_time(self):
+        stat, read = Path.stat, Path.read_bytes
+        access = [1]
+        marker = self.marker
+
+        class AccessStat(tuple):
+            def __new__(cls, original):
+                fields = list(original)
+                fields[7] = access[0]
+                value = tuple.__new__(cls, fields)
+                value.original = original
+                return value
+
+            def __getattr__(self, name):
+                if name == 'st_atime':
+                    return self[7]
+                if name == 'st_atime_ns':
+                    return self[7] * 1000000000
+                return getattr(self.original, name)
+
+        def observed(path, *args, **kwargs):
+            value = stat(path, *args, **kwargs)
+            return AccessStat(value) if path == marker else value
+
+        def accessed(path, *args, **kwargs):
+            value = read(path, *args, **kwargs)
+            if path == marker:
+                access[0] += 1
+            return value
+
+        # Model strictatime only; all write-sensitive metadata and bytes remain
+        # real. This is deterministic on hosts whose mount defers access times.
+        with mock.patch.object(Path, 'stat', observed), \
+                mock.patch.object(Path, 'read_bytes', accessed):
+            self.test_revoke_without_lease_preserves_published_readiness()
+
+    def test_readiness_preservation_still_detects_metadata_writes(self):
+        revoke = control.revoke
+
+        def changed(*args, **kwargs):
+            result = revoke(*args, **kwargs)
+            prior = self.marker.stat()
+            os.utime(self.marker, ns=(prior.st_atime_ns + 1000000000, prior.st_mtime_ns))
+            return result
+
+        with mock.patch.object(control, 'revoke', changed):
+            with self.assertRaises(AssertionError):
+                self.test_revoke_without_lease_preserves_published_readiness()
 
     def test_M6_inactive_capture_without_git_history(self):
         # A depth-one checkout has the sources, but no historical Git objects.

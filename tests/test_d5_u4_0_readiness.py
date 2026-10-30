@@ -12,10 +12,11 @@ import unittest
 from unittest import mock
 
 from tests import test_d5_registry as fixtures
-from tests.fixtures.d5.ready import ready, missing_installation
+from tests.fixtures.d5.ready import ready, ready_installation, missing_installation
 import d5_install as install
 import d5_readiness as R
 import swarm_state as SS
+import d5_effect_log as ledger
 
 
 class TestReadiness(unittest.TestCase):
@@ -40,6 +41,36 @@ class TestReadiness(unittest.TestCase):
         self.entry = ready(self, *self.args)
         self.record = Path(self.entry["record_dir"])
         return R.require(self.state)
+
+    def test_missing_installation_targets_keep_consumer_error_types(self):
+        for missing in ('state', 'record'):
+            with self.subTest(missing=missing):
+                entry = ready_installation(self.fixture.d / ('missing-' + missing))
+                state, record = Path(entry['state_dir']), Path(entry['record_dir'])
+                original = state if missing == 'state' else record
+                moved = original.with_name(original.name + '-moved')
+                original.rename(moved)
+                selected = record if missing == 'state' else moved
+                try:
+                    with mock.patch.object(install, '_anchor', side_effect=AssertionError('anchor')):
+                        with self.assertRaises(R.registry.AuthorityError):
+                            R.installation(selected)
+                        with self.assertRaises(R.registry.AuthorityError):
+                            install.install_initial(selected, None)
+                        with self.assertRaisesRegex(ledger.EffectError, ledger.INVALID):
+                            ledger._installation_state(selected)
+                finally:
+                    moved.rename(original)
+
+    def test_invalid_installation_path_keeps_authority_error(self):
+        entry = ready_installation(self.fixture.d / 'invalid-binding')
+        value = R.installation(entry['record_dir'])
+        first, second = self.fixture.d / 'cycle-a', self.fixture.d / 'cycle-b'
+        first.symlink_to(second)
+        second.symlink_to(first)
+        value['state_dir'] = str(first)
+        with self.assertRaisesRegex(R.registry.AuthorityError, 'd5_install'):
+            R._validated(value)
 
     def test_staging_create_only_without_record_locks_or_authority(self):
         with mock.patch.object(R.protocol, "pin", side_effect=AssertionError("record lock")), \
