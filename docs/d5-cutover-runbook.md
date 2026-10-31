@@ -9,6 +9,13 @@ closes row 75. Only the owner merges U8 and [the amended mandate](orchestrator-m
 Activation happens per state directory at the owner's later `d5_install` publish,
 not at merge. Merging U8 alone leaves never-installed directories inactive. Merge launch remains closed.
 
+For an implicit state path, the coordinator uses `coordinator_paths.resolve_paths`
+for the operated plan. Its read-only Git discovery queries (`rev-parse
+--show-toplevel` and `worktree list --porcelain`) may run before classification.
+READY and BROKEN are classified before any Git operation with effects, including
+fetch, checkout, worktree changes, commit, ref writes, merge and push. No separate
+parser reads Git worktree metadata to guess the state location.
+
 ## Quiescence and human inventory
 
 Quiescent means **no live session holds a lease, no merge is in flight, and

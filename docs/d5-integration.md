@@ -14,6 +14,13 @@ A same-UID operator invoking `unit.py` or `remote_verify.py` directly without
 `--state-dir` is not D5-contained. Coordinator-mediated calls supply that path;
 remote staging checks it on the originating host and carries it as audit data.
 
+For an implicit state path, the coordinator uses `coordinator_paths.resolve_paths`
+for the operated plan. Its read-only Git discovery queries (`rev-parse
+--show-toplevel` and `worktree list --porcelain`) may run before classification.
+READY and BROKEN are classified before any Git operation with effects, including
+fetch, checkout, worktree changes, commit, ref writes, merge and push. No separate
+parser reads Git worktree metadata to guess the state location.
+
 The preparation measurements below remain historical evidence, not a claim
 of complete enforcement.
 
