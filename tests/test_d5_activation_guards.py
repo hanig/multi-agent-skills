@@ -47,8 +47,9 @@ def fixture_problems(source, filename):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 return node.name
         return None
-    # Track installation path expressions and their aliases through assignments.
-    tainted, attributes = set(), set()
+    # Record path provenance at each use, in statement order. Rebinding a local
+    # clears that local; existing aliases and possible branch values survive.
+    snapshots, attributes = {}, {}
     def enclosing_class(node):
         while node in parents:
             node = parents[node]
@@ -56,23 +57,104 @@ def fixture_problems(source, filename):
                 return node.name
         return None
     def key(node):
+        if isinstance(node, ast.Name):
+            node = ast.Name(id=node.id, ctx=ast.Load())
+        elif isinstance(node, ast.Attribute):
+            node = ast.Attribute(value=node.value, attr=node.attr, ctx=ast.Load())
         return ast.dump(node, include_attributes=False)
-    def artifact(node):
-        return any((isinstance(n, ast.Constant) and isinstance(n.value, str) and
-                    any(n.value == name or n.value.endswith("/" + name) for name in ARTIFACTS)) or
-                   (isinstance(n, ast.Attribute) and n.attr in ('MARKER', 'INSTALLATION', 'SENTINEL')
-                    and isinstance(n.value, ast.Name) and n.value.id in readers) or
-                   ((function(node), key(n)) in tainted or
-                    (enclosing_class(node), key(n)) in attributes) for n in ast.walk(node))
-    for _ in range(5):
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and artifact(node.value):
-                for target in node.targets:
-                    # Store contexts differ from later Load contexts.
-                    if isinstance(target, ast.Name):
-                        tainted.add((function(node), key(ast.Name(id=target.id, ctx=ast.Load()))))
-                    elif isinstance(target, ast.Attribute):
-                        attributes.add((enclosing_class(node), key(ast.Attribute(value=target.value, attr=target.attr, ctx=ast.Load()))))
+    def artifact(node, env=None):
+        if env is None:
+            env = snapshots.get(id(node), {})
+        if isinstance(node, (ast.Name, ast.Attribute)) and key(node) in env:
+            return env[key(node)]
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return any(node.value == name or node.value.endswith('/' + name) for name in ARTIFACTS)
+        if (isinstance(node, ast.Attribute) and node.attr in ('MARKER', 'INSTALLATION', 'SENTINEL')
+                and isinstance(node.value, ast.Name) and node.value.id in readers):
+            return True
+        return any(artifact(child, env) for child in ast.iter_child_nodes(node))
+    def remember(node, env):
+        for child in ast.walk(node):
+            snapshots[id(child)] = dict(env)
+    def bind(target, value, env):
+        if isinstance(target, (ast.Name, ast.Attribute)):
+            env[key(target)] = value
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for child in target.elts:
+                bind(child, value, env)
+    def joined(*branches):
+        return {name: any(branch.get(name, False) for branch in branches)
+                for name in set().union(*(set(branch) for branch in branches))}
+    assigned_attributes = {}
+    for assignment in ast.walk(tree):
+        if isinstance(assignment, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            owner = assignment
+            while owner in parents and not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = parents[owner]
+            targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+            assigned_attributes.setdefault(owner, []).extend(
+                child for target in targets for child in ast.walk(target)
+                if isinstance(child, ast.Attribute))
+    def block(statements, incoming):
+        env = dict(incoming)
+        for node in statements:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                local = dict(env)
+                local.update(attributes.get(enclosing_class(node), {}))
+                after = block(node.body, local)
+                for target in assigned_attributes.get(node, ()):
+                    cls = enclosing_class(target)
+                    if cls:
+                        values = collected.setdefault(cls, {})
+                        values[key(target)] = values.get(key(target), False) or after.get(key(target), False)
+            elif isinstance(node, ast.ClassDef):
+                block(node.body, env)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                if node.value is not None:
+                    remember(node.value, env)
+                    value = artifact(node.value, env)
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        bind(target, value or (isinstance(node, ast.AugAssign) and artifact(target, env)), env)
+            elif isinstance(node, ast.If):
+                remember(node.test, env)
+                env = joined(block(node.body, env), block(node.orelse, env))
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    remember(item.context_expr, env)
+                    if item.optional_vars is not None:
+                        bind(item.optional_vars, artifact(item.context_expr, env), env)
+                env = block(node.body, env)
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                expression = node.test if isinstance(node, ast.While) else node.iter
+                remember(expression, env)
+                body = dict(env)
+                if not isinstance(node, ast.While):
+                    bind(node.target, artifact(node.iter, env), body)
+                while True:
+                    after = joined(env, block(node.body, body))
+                    expanded = joined(body, after)
+                    if expanded == body:
+                        break
+                    body = expanded
+                env = block(node.orelse, after)
+            elif isinstance(node, ast.Try):
+                body = block(node.body, env)
+                handlers = [block(handler.body, joined(env, body)) for handler in node.handlers]
+                env = block(node.finalbody, joined(block(node.orelse, body), *handlers))
+            else:
+                remember(node, env)
+        return env
+    # Fixture attributes are shared across setUp and test methods. Iterate to
+    # a finite attribute fixed point; locals remain independent per method.
+    while True:
+        previous = {name: dict(values) for name, values in attributes.items()}
+        snapshots.clear()
+        collected = {}
+        block(tree.body, {})
+        attributes = collected
+        if attributes == previous:
+            break
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -213,6 +295,48 @@ with tempfile.TemporaryDirectory() as tmp:
                 'mock.patch.object(d5_activation, "anything", return_value=False)'):
             with self.subTest(source=source):
                 self.assertIn('activation patch', fixture_problems(source, 'synthetic.py'))
+
+    def test_checker_forgets_reassigned_paths_without_forgetting_aliases(self):
+        prefix = "path = root / 'd5-readiness.json'\npath.read_text()\n"
+        for source in (
+                prefix + "path = root / 'unrelated.json'\npath.write_text('{}')\n",
+                prefix + "path = root / 'unrelated.json'\ncopy = path\ncopy.write_text('{}')\n",
+                "class Rebound:\n def setUp(self):\n  self.path = root / 'd5-readiness.json'\n"
+                "  self.path.read_text()\n  self.path = root / 'unrelated.json'\n"
+                " def test_safe(self):\n  self.path.write_text('{}')\n",
+                "class Fixture:\n def setUp(self):\n  self.path = root / 'd5-readiness.json'\n"
+                " def test_safe(self):\n  self.path.read_text()\n  self.path = root / 'unrelated.json'\n  self.path.write_text('{}')\n"):
+            with self.subTest(safe=source):
+                self.assertEqual(fixture_problems(source, 'synthetic.py'), [])
+        for source in (
+                prefix + "path.write_text('{}')\npath = root / 'unrelated.json'\n",
+                prefix + "copy = path\npath = root / 'unrelated.json'\ncopy.write_text('{}')\n",
+                prefix + "if flag:\n path = root / 'unrelated.json'\npath.write_text('{}')\n",
+                "path = root / 'unrelated.json'\nif flag:\n path = root / 'd5-readiness.json'\npath.write_text('{}')\n"):
+            with self.subTest(unsafe=source):
+                self.assertTrue(fixture_problems(source, 'synthetic.py'))
+
+    def test_checker_accepts_real_publisher_read_then_unrelated_write(self):
+        source = '''import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from tests.fixtures.d5.ready import ready_installation
+class TestReaderWriter(unittest.TestCase):
+ def test_read_then_write(self):
+  with TemporaryDirectory() as tmp:
+   entry = ready_installation(tmp)
+   path = Path(entry['state_dir']) / 'd5-readiness.json'
+   self.assertTrue(path.read_text())
+   path = Path(tmp) / 'unrelated-output.json'
+   path.write_text('{}')
+   self.assertEqual(path.read_text(), '{}')
+'''
+        namespace = {'__name__': 'test_reader_writer'}
+        exec(source, namespace)
+        result = unittest.TestResult()
+        namespace['TestReaderWriter']('test_read_then_write').run(result)
+        self.assertTrue(result.wasSuccessful(), (result.errors, result.failures))
+        self.assertEqual(fixture_problems(source, 'test_reader_writer.py'), [])
 
     def test_coordinator_passes_state_dir(self):
         inventory = {}

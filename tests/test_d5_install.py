@@ -20,7 +20,7 @@ import d5_host as host
 import d5_locks as locks
 import d5_protocol_locks as protocol
 from tests.test_d5_authority import grant, MANDATE
-from tests.fixtures.d5.ready import ready, ready_installation, InstallationWitnesses
+from tests.fixtures.d5.ready import ready, ready_installation, InstallationWitnesses, missing_installation
 from tests.test_d5_locks import isolate_pool
 
 ANCHOR = host.ProcessIdentity(42, 9000001)
@@ -125,6 +125,17 @@ class TestInstall(unittest.TestCase):
                 if worker is not None:
                     worker.join(10)
                     self.assertFalse(worker.is_alive(), "installer watchdog")
+
+    def test_inactive_installers_refuse_before_coordinator_lease(self):
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                directory = self.directory('no-lease-' + kind, kind)
+                entry = install.readiness.installation(directory)
+                with missing_installation(entry), \
+                        mock.patch.object(install.readiness, 'installer_lease', side_effect=AssertionError('lease before inactive refusal')), \
+                        mock.patch.object(protocol, 'pin', side_effect=AssertionError('protocol before inactive refusal')):
+                    with self.assertRaisesRegex(store.AuthorityError, '^D5 is inactive$'):
+                        self.call(kind, directory)
 
     def test_installation_waits_for_shared_holders(self):
         # R3-OMIT-EXCLUSIVE: the consumer must see EX DRAIN, START, then STATE.
