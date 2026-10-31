@@ -77,6 +77,29 @@ class TestMergeProvider(unittest.TestCase):
             'github.com', 'example/project', self.cmd, self.intent)
         self.c.boundary = self.boundary
 
+    def test_journal_callers_resolve_relative_state_before_classifying(self):
+        from tests.fixtures.d5.ready import missing_installation
+        entry = readiness.require(self.c.state_dir)
+        previous = Path.cwd()
+        try:
+            os.chdir(self.c.state_dir.parent)
+            relative = Path(self.c.state_dir.name)
+            for locator in (relative, self.c.state_dir):
+                with self.subTest(locator=locator):
+                    with J.protocol.pin(entry['record_dir']) as record:
+                        with record.drain():
+                            self.assertEqual(J._held(locator), entry)
+                    with J.recovery_drain(locator):
+                        pass
+                    with missing_installation(entry):
+                        with self.assertRaisesRegex(J.AuthorityError, '^D5 merge journal: inactive$'):
+                            J._held(locator)
+                        with self.assertRaisesRegex(J.AuthorityError, '^D5 merge journal: inactive$'):
+                            with J.recovery_drain(locator):
+                                pass
+        finally:
+            os.chdir(previous)
+
     def save_forge(self):
         self.forge_path.write_text(json.dumps(self.forge))
 

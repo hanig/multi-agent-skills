@@ -54,6 +54,7 @@ import builtins
 import io
 import os
 import tempfile
+import threading
 from unittest import mock
 import d5_installation as classifier
 
@@ -89,12 +90,25 @@ def missing_installation(entry):
                 os.utime(directory, ns=(original.st_atime_ns, original.st_mtime_ns))
 
 
+# Audit events reach cached constructors such as ``from io import FileIO``.
+# This is test observation only; an empty per-thread stack has no effect.
+_io_audits = threading.local()
+_io_audit_installed = False
+
+
+def _classification_audit(event, args):
+    for guard in getattr(_io_audits, 'guards', ()):
+        guard(event, args)
+
+
 @contextmanager
 def classification_only(state_dir):
     """OD-U8R-8: only the pure classifier's named read-only filesystem calls."""
+    global _io_audit_installed
     directory = Path(state_dir).absolute()
     allowed = {str(p) for p in (directory,) + tuple(directory.parents)}
     allowed.update(str(directory / name) for name in (readiness.MARKER, readiness.SENTINEL))
+    checked = []
     def check(path):
         frame = sys._getframe(2)
         while frame and frame.f_code.co_filename != classifier.__file__:
@@ -104,7 +118,11 @@ def classification_only(state_dir):
     def reader(real):
         def call(path, *args, **kwargs):
             check(path)
-            return real(path, *args, **kwargs)
+            checked.append(real)
+            try:
+                return real(path, *args, **kwargs)
+            finally:
+                checked.pop()
         return call
     def opened(real, flags=False):
         def call(path, mode='r', *args, **kwargs):
@@ -115,19 +133,13 @@ def classification_only(state_dir):
                     raise AssertionError('inactive write')
             elif selected not in ('r', 'rb', 'rt'):
                 raise AssertionError('inactive write')
-            return real(path, mode, *args, **kwargs)
+            checked.append(real)
+            try:
+                return real(path, mode, *args, **kwargs)
+            finally:
+                checked.pop()
         return call
-    with ExitStack() as stack:
-        for owner in (os, Path):
-            for name in ('lstat', 'stat', 'readlink'):
-                if hasattr(owner, name):
-                    stack.enter_context(mock.patch.object(owner, name, reader(getattr(owner, name))))
-        stack.enter_context(mock.patch.object(os, 'open', opened(os.open, flags=True)))
-        for target in (builtins, io, Path):
-            stack.enter_context(mock.patch.object(target, 'open', opened(target.open)))
-        # Pathlib 3.9 caches OS functions in its accessor. Guard its public
-        # filesystem methods as well as the OS entry points on every floor.
-        forbidden = {
+    forbidden = {
             os: ('access', 'listdir', 'scandir', 'getcwd', 'getcwdb', 'chdir', 'fchdir',
                  'mkdir', 'makedirs', 'unlink', 'remove', 'rename', 'replace', 'rmdir',
                  'removedirs', 'renames', 'link', 'symlink', 'chmod', 'fchmod', 'lchmod',
@@ -142,12 +154,64 @@ def classification_only(state_dir):
                    'chmod', 'lchmod'),
             io: ('FileIO', 'open_code'),
         }
+    # Audit events cover cached constructors; profiling covers cached C calls
+    # such as os.stat and methods on a file opened before this observation.
+    reads = {getattr(os, name) for name in ('stat', 'lstat', 'readlink', 'open')}
+    reads.update((builtins.open, io.open))
+    filesystem_calls = set(reads)
+    for owner, names in forbidden.items():
+        filesystem_calls.update(getattr(owner, name) for name in names if hasattr(owner, name))
+    def audit(event, args):
+        if event == 'open':
+            path, _mode, flags = args
+            check(path)
+            if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+                raise AssertionError('inactive write')
+    def profile(frame, event, call):
+        if event == 'c_call':
+            if call in filesystem_calls and not (checked and call in reads):
+                raise AssertionError('inactive cached filesystem operation')
+            handle = getattr(call, '__self__', None)
+            # In-memory streams and these descriptor/state queries do no
+            # filesystem IO (argparse queries stdout's descriptor for width).
+            if (isinstance(handle, io.IOBase)
+                    and not isinstance(handle, (io.StringIO, io.BytesIO))
+                    and getattr(call, '__name__', '') not in ('fileno', 'readable', 'writable', '__enter__')):
+                check(handle.name)
+                if handle.writable() or getattr(call, '__name__', '') not in (
+                        'read', 'read1', 'readall', 'readinto', 'readinto1',
+                        'readline', 'readlines', 'close', '__enter__', '__exit__'):
+                    raise AssertionError('inactive file operation')
+        if previous_profile is not None:
+            previous_profile(frame, event, call)
+    with ExitStack() as stack:
+        for owner in (os, Path):
+            for name in ('lstat', 'stat', 'readlink'):
+                if hasattr(owner, name):
+                    stack.enter_context(mock.patch.object(owner, name, reader(getattr(owner, name))))
+        stack.enter_context(mock.patch.object(os, 'open', opened(os.open, flags=True)))
+        for target in (builtins, io, Path):
+            stack.enter_context(mock.patch.object(target, 'open', opened(target.open)))
         for owner, names in forbidden.items():
             for name in names:
                 if hasattr(owner, name):
                     stack.enter_context(mock.patch.object(owner, name,
                         side_effect=AssertionError('inactive filesystem operation: ' + name)))
-        yield
+        if not _io_audit_installed:
+            sys.addaudithook(_classification_audit)
+            _io_audit_installed = True
+        guards = getattr(_io_audits, 'guards', None)
+        if guards is None:
+            guards = _io_audits.guards = []
+        previous_profile = sys.getprofile()
+        guards.append(audit)
+        try:
+            sys.setprofile(profile)
+            yield
+        finally:
+            sys.setprofile(previous_profile)
+            guards.pop()
+
 
 
 class InstallationWitnesses:
