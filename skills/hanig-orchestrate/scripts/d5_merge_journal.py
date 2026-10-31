@@ -41,6 +41,7 @@ def _require(condition, message):
 
 
 def _held(state_dir):
+    state_dir = readiness.activation_directory(state_dir)
     _require(registry.d5_active(state_dir), "inactive")
     ready = readiness.require(state_dir)
     _require(any(key == tuple(ready["record_key"]) and rank == 0
@@ -205,6 +206,7 @@ def recovery_drain(state_dir):
     coordinator lease precedes this independent acquisition. No new lock or
     release protocol, and no readiness/installation substitution.
     """
+    state_dir = readiness.activation_directory(state_dir)
     _require(registry.d5_active(state_dir), "inactive")
     ready = readiness.require(state_dir)
     locks = protocol.locks

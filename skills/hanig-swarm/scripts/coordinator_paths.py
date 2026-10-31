@@ -175,11 +175,11 @@ def _pre_git_layout(path):
         if marker.is_dir():
             return candidate, marker
         if marker.is_file():
-            raw = marker.read_text().rstrip("\n")
+            raw = os.fsdecode(marker.read_bytes()).rstrip("\n")
             if raw.startswith("gitdir: "):
                 gitdir = _resolved(candidate / raw[len("gitdir: "):])
                 commondir = gitdir / "commondir"
-                common = (_resolved(gitdir / commondir.read_text().rstrip("\n"))
+                common = (_resolved(gitdir / os.fsdecode(commondir.read_bytes()).rstrip("\n"))
                           if commondir.is_file() else gitdir)
                 return candidate, common
     return None, None
@@ -205,7 +205,7 @@ def pre_git_default_state(cwd=None, plan=None, extra_repos=()):
             for child in linked.iterdir():
                 pointer = child / "gitdir"
                 if pointer.is_file():
-                    worktrees.add(_resolved(pointer.read_text().rstrip("\n")).parent)
+                    worktrees.add(_resolved(child / os.fsdecode(pointer.read_bytes()).rstrip("\n")).parent)
     digest = hashlib.sha256(os.fsencode(context)).hexdigest()[:12]
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", context.name).strip("-.") or "project"
     return (_external_base(worktrees) / "hanig-swarm" / "projects" /

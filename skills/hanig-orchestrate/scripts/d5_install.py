@@ -80,6 +80,7 @@ def replace_authority(directory, record):
     if ".." in directory.split(os.sep):
         raise store.AuthorityError("D5 locator contains ..")
     directory = _bound(directory, os.getcwdb() if not os.path.isabs(directory) else b"")
+    _active(directory)
     # Resolve the state binding by local IO before any record lock acquisition.
     installed = readiness.installation(directory)
     with readiness.installer_lease(installed["state_dir"]) as state_dir:

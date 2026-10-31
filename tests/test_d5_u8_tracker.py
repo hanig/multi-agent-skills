@@ -95,6 +95,28 @@ class TestTrackerMatrix(unittest.TestCase):
        self.assertIn('D5 active:', case.stdout + case.stderr)
   print('U8 tracker transport matrix: ' + json.dumps(rows, sort_keys=True))
 
+ def test_tracker_probe_requires_cli_exit_for_each_route(self):
+  S = outbox.S
+  original = S.main
+  for route in ('outbox', 'seq-floor', 'receipt', 'backfill'):
+   def returning():
+    try:
+     original()
+    except SystemExit:
+     args = sys.argv
+     selected = ('receipt' if '--record-receipt' in args else
+                 'backfill' if 'advance' in args else args[1])
+     if selected == route and not activation.d5_active(Path(args[args.index('--state-dir') + 1])):
+      return
+     raise
+   result = unittest.TestResult()
+   case = TestTrackerMatrix('test_swarm_cli_tracker_routes')
+   with self.subTest(route=route), mock.patch.object(S, 'main', side_effect=returning), redirect_stdout(io.StringIO()):
+    case.run(result)
+    self.assertFalse(result.wasSuccessful())
+    self.assertTrue(result.failures, result.errors)
+    self.assertIn('main returned without a CLI exit', result.failures[0][1])
+
  def test_swarm_cli_tracker_routes(self):
   rows = []
   S, SO = outbox.S, outbox.SO
@@ -135,6 +157,8 @@ class TestTrackerMatrix(unittest.TestCase):
        result = exc.code
       except S.PlanError as exc:
        result = str(exc)
+      else:
+       self.fail("main returned without a CLI exit")
      if active:
       self.assertIn('D5 active:', str(result))
       self.assertEqual(case.tree(), before)

@@ -130,6 +130,149 @@ class TestD5Activation(unittest.TestCase):
                     operation()
         self.assertEqual(source.read_bytes(), b'preserved')
 
+    def test_git_metadata_preserves_filesystem_path_bytes(self):
+        import swarm
+        paths = swarm.CP
+        for witness in ('gitfile', 'commondir', 'backlink'):
+            with self.subTest(witness=witness), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = Path(tmp).resolve()
+                main, linked = root / 'main', root / 'linked'
+                common = main / '.git'
+                admin = common / 'worktrees' / 'linked'
+                admin.mkdir(parents=True)
+                linked.mkdir()
+                (linked / '.git').write_bytes(b'gitdir: ' + os.fsencode(admin) + b'\n')
+                (admin / 'commondir').write_bytes(b'../..\n')
+                (admin / 'gitdir').write_bytes(os.fsencode(linked / '.git') + b'\n')
+                raw = os.fsencode(root) + b'/metadata-\xff'
+                if witness == 'gitfile':
+                    (linked / '.git').write_bytes(b'gitdir: ' + raw + b'\n')
+                elif witness == 'commondir':
+                    (admin / 'commondir').write_bytes(raw + b'\n')
+                else:
+                    (admin / 'gitdir').write_bytes(raw + b'/.git\n')
+                # Model POSIX path existence on hosts that reject byte 0xff.
+                # Metadata reads and decoding, lookup and the CLI remain real.
+                original_dir, original_file = Path.is_dir, Path.is_file
+                def exists(method):
+                    def check(path):
+                        if '\udcff' in str(path):
+                            return False
+                        return method(path)
+                    return check
+                previous = Path.cwd()
+                try:
+                    os.chdir(linked)
+                    with mock.patch.object(Path, 'is_dir', exists(original_dir)), \
+                            mock.patch.object(Path, 'is_file', exists(original_file)), \
+                            mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(root / 'xdg')}), \
+                            mock.patch.object(sys, 'argv', ['swarm.py', 'schema', '--json']):
+                        top, discovered = paths._pre_git_layout(linked)
+                        self.assertEqual(top, linked)
+                        expected = Path(os.fsdecode(raw)) if witness != 'backlink' else common
+                        self.assertEqual(discovered, expected)
+                        output = io.StringIO()
+                        with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                            swarm.main()
+                        self.assertEqual(stopped.exception.code, 0)
+                        self.assertTrue(json.loads(output.getvalue())['fields'])
+                finally:
+                    os.chdir(previous)
+
+    def test_relative_git_backlinks_match_operated_state_before_git(self):
+        import itertools
+        import swarm
+        root = self.root / 'relative-layout'
+        main, linked, home = root / 'main', root / 'linked', root / 'home'
+        home.mkdir(parents=True)
+        def git(*args):
+            return subprocess.run(['git'] + list(map(str, args)), check=True,
+                                  capture_output=True, timeout=30)
+        git('init', main)
+        git('-C', main, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            'commit', '--allow-empty', '-m', 'fixture')
+        git('-C', main, 'worktree', 'add', '-b', 'linked', linked)
+        admin = main / '.git' / 'worktrees' / 'linked'
+        pointers = ((linked / '.git', admin, 'gitdir: '),
+                    (admin / 'commondir', main / '.git', ''),
+                    (admin / 'gitdir', linked / '.git', ''))
+        previous = Path.cwd()
+        try:
+            with mock.patch.object(Path, 'home', return_value=home), \
+                    mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(linked / 'xdg')}):
+                for modes in itertools.product((False, True), repeat=3):
+                    for (pointer, target, prefix), relative in zip(pointers, modes):
+                        value = os.path.relpath(target, pointer.parent) if relative else str(target)
+                        pointer.write_text(prefix + value + '\n')
+                    for cwd in (main, linked):
+                        with self.subTest(relative=modes, cwd=cwd.name):
+                            os.chdir(cwd)
+                            normal = swarm.CP.resolve_paths()[0]
+                            self.assertEqual(swarm.CP.pre_git_default_state(), normal)
+                            ready_installation(root, state_dir=normal)
+                            with mock.patch.object(subprocess, 'run', side_effect=AssertionError('Git before refusal')):
+                                with self.assertRaisesRegex(SystemExit, 'D5 active:'):
+                                    swarm._d5_refuse('run', None, plan={})
+        finally:
+            os.chdir(previous)
+
+    def test_inactive_guard_rejects_cached_filesystem_calls(self):
+        import builtins
+        from io import FileIO
+        cached_open, cached_io_open, cached_os_open = builtins.open, io.open, os.open
+        cached_stat, cached_lstat, cached_listdir = os.stat, os.lstat, os.listdir
+        cached_write = os.write
+        source = self.root / 'cached-source'
+        source.write_bytes(b'preserved')
+        previous_profile = sys.getprofile()
+        with source.open('r+b') as handle:
+            fd = handle.fileno()
+            operations = (
+                ('FileIO', lambda: FileIO(source, 'wb')),
+                ('builtin-open', lambda: cached_open(source, 'wb')),
+                ('io-open', lambda: cached_io_open(source, 'wb')),
+                ('os-open', lambda: cached_os_open(source, os.O_WRONLY | os.O_TRUNC)),
+                ('stat', lambda: cached_stat(source)),
+                ('lstat', lambda: cached_lstat(source)),
+                ('listdir', lambda: cached_listdir(self.root)),
+                ('descriptor-write', lambda: cached_write(fd, b'changed')),
+                ('handle-write', lambda: handle.write(b'changed')),
+            )
+            for name, operation in operations:
+                with self.subTest(operation=name), classification_only(self.empty):
+                    self.assertFalse(activation.d5_active(self.empty))
+                    with self.assertRaises(AssertionError):
+                        value = operation()
+                        if hasattr(value, 'close'):
+                            value.close()
+                self.assertIs(sys.getprofile(), previous_profile)
+        self.assertEqual(source.read_bytes(), b'preserved')
+        source.write_bytes(b'guard finished')
+        self.assertEqual(source.read_bytes(), b'guard finished')
+        state = self.publish()
+        with readiness.installer_lease(state):
+            readiness.withdraw(state)
+        with classification_only(state):
+            self.assertTrue(activation.d5_active(state))
+
+    def test_inactive_guard_allows_memory_io_and_descriptor_queries(self):
+        source = self.root / 'metadata-query'
+        source.write_bytes(b'preserved')
+        with source.open('r+b') as handle:
+            descriptor = handle.fileno()
+            with classification_only(self.empty):
+                text, binary = io.StringIO(), io.BytesIO()
+                text.write('memory')
+                binary.write(b'memory')
+                self.assertEqual(text.getvalue(), 'memory')
+                self.assertEqual(binary.getvalue(), b'memory')
+                self.assertEqual(handle.fileno(), descriptor)
+                self.assertTrue(handle.readable())
+                self.assertTrue(handle.writable())
+                with self.assertRaises(AssertionError):
+                    handle.write(b'changed')
+        self.assertEqual(source.read_bytes(), b'preserved')
+
     def test_no_cache(self):
         state = self.root / 'installed' / 'state'
         self.assertFalse(activation.d5_active(state))
