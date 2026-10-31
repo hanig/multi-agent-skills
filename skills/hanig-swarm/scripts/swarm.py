@@ -31,7 +31,6 @@ Python 3.8+, stdlib only, login-node safe.
 
 import argparse
 import d5_activation as D5
-import d5_installation as DI
 import datetime as dt
 import errno
 import fcntl
@@ -343,7 +342,7 @@ def _d5_bytecode_advisory(state_dir, plan=None):
 def _d5_refuse(route, state_dir, plan=None, extra_repos=()):
     """U4.1: legacy effect routes have no authority in the first active profile."""
     if D5.d5_active(_d5_state(state_dir, plan, extra_repos)):
-        raise SystemExit(DI.refusal_message("D5 active: swarm {} is outside the supported merge profile".format(route)))
+        raise SystemExit(D5.refusal_message("D5 active: swarm {} is outside the supported merge profile".format(route)))
 
 
 def _d5_dispatch(args):

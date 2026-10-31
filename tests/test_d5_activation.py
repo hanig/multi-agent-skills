@@ -457,7 +457,8 @@ class TestD5Activation(unittest.TestCase):
                         self.assertIsInstance(value.func, ast.Attribute)
                         self.assertEqual(value.func.attr, 'refusal_message')
                         self.assertIsInstance(value.func.value, ast.Name)
-                        self.assertEqual(value.func.value.id, 'DI')
+                        expected = 'D5' if path.name == 'swarm.py' else 'DI'
+                        self.assertEqual(value.func.value.id, expected)
                     inventory[path.name] = inventory.get(path.name, 0) + 1
         self.assertEqual(inventory, {'swarm_outbox.py': 7, 'swarm_evidence.py': 1,
             'swarm.py': 1, 'unit.py': 1, 'remote_verify.py': 2, 'merge_unit.py': 7})
