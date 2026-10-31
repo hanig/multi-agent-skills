@@ -95,6 +95,35 @@ class TestD5Activation(unittest.TestCase):
         self.assertEqual(len(set(locators)), 3)
         self.assertEqual(len(set(outputs)), 1)
 
+    def test_inactive_guard_rejects_cached_child_thread_io(self):
+        from threading import Thread
+        target = self.root / 'unrelated-thread-output'
+        target.write_text('before')
+        cached_open = open
+        errors = []
+
+        def writer():
+            try:
+                with cached_open(target, 'w') as stream:
+                    stream.write('after')
+            except AssertionError as exc:
+                errors.append(exc)
+
+        worker = Thread(target=writer)
+        try:
+            with classification_only(self.empty):
+                self.assertFalse(activation.d5_active(self.empty))
+                worker.start()
+                worker.join(10)
+        except AssertionError as exc:
+            errors.append(exc)
+        finally:
+            if worker.ident is not None:
+                worker.join(10)
+                self.assertFalse(worker.is_alive(), 'child IO watchdog')
+        self.assertEqual(target.read_text(), 'before')
+        self.assertTrue(errors, 'the guard must reject child-thread filesystem IO')
+
     def test_inactive_guard_rejects_filesystem_operation_siblings(self):
         source = self.root / 'source'
         source.write_bytes(b'preserved')
@@ -176,6 +205,22 @@ class TestD5Activation(unittest.TestCase):
                         self.assertTrue(json.loads(output.getvalue())['fields'])
                 finally:
                     os.chdir(previous)
+
+    def test_linked_worktree_fixtures_accept_configured_default_branch(self):
+        config = self.root / 'git-config'
+        config.write_text('[init]\n\tdefaultBranch = linked\n')
+        names = [
+            'tests.test_d5_activation.TestD5Activation.test_relative_git_backlinks_match_operated_state_before_effects',
+            'tests.test_d5_activation.TestD5Activation.test_implicit_lookup_matches_operated_state',
+            'tests.test_d5_routing.TestD5Routing.test_claim_from_linked_checkout_uses_registered_checkout',
+            'tests.test_d5_admission.TestAdmission.test_registered_source_from_linked_caller',
+            'tests.test_d5_control.TestD5Control.test_registered_checkout_is_source',
+        ]
+        result = subprocess.run([sys.executable, '-B', '-m', 'unittest', '-v'] + names,
+            cwd=Path(__file__).resolve().parents[1],
+            env=dict(os.environ, GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_NOSYSTEM='1'),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_relative_git_backlinks_match_operated_state_before_effects(self):
         import itertools
@@ -283,6 +328,8 @@ class TestD5Activation(unittest.TestCase):
         self.assertEqual(readiness.state(state), readiness.READY)
 
     def test_broken_is_active_and_refuses(self):
+        import swarm_outbox as outbox
+        import swarm_evidence as evidence
         for corruption in ('deleted', 'truncated', 'schema', 'binding', 'symlink', 'mid-publish', 'sentinel-removed'):
             with self.subTest(corruption=corruption):
                 state = self.publish()
@@ -306,6 +353,27 @@ class TestD5Activation(unittest.TestCase):
                     with self.assertRaisesRegex(registry.AuthorityError, 'd5_install'):
                         registry.register(self.root, 'p', state)
                     git.assert_not_called()
+                # Final-round counterexample: every broken refusal names repair.
+                calls = [
+                    (outbox._write_sequence, ({},)),
+                    (outbox._allocate_sequence, ([],)),
+                    (outbox.set_sequence_floor, (1, 'owner', 'probe')),
+                    (outbox.emit_intent, ('p', 'u', 'DONE', {})),
+                    (outbox.backfill_tracker_intents, ('p', {})),
+                    (outbox._append_receipt_atomic, ({},)),
+                    (outbox.record_receipt, ('key', 'ref')),
+                    (evidence.admit_merge, ('u', '1' * 40)),
+                ]
+                before = {p.name: p.read_bytes() for p in state.iterdir() if p.is_file()}
+                for operation, arguments in calls:
+                    with self.subTest(operation=operation.__name__):
+                        try:
+                            with self.assertRaisesRegex(outbox.OutboxError, 'd5_install'):
+                                operation(state, *arguments)
+                        finally:
+                            self.assertEqual(
+                                {p.name: p.read_bytes() for p in state.iterdir() if p.is_file()},
+                                before)
                 # Real publication repairs every corruption, including symlinks.
                 ready_installation(self.root / 'installed', self.entry)
 

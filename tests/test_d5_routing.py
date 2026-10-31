@@ -110,6 +110,33 @@ class TestD5Routing(unittest.TestCase):
         self.assertEqual(result["invalidation"], {"at": 120, "kind": "revoked", "reason": "owner stopped"})
         self.assertEqual(((self.directory / "authority.drain.lock").stat(), (self.directory / "authority.drain.lock").read_bytes()), self.drain_before)
 
+    def test_routing_guards_detect_extra_drain_acquisition(self):
+        for operation in ('revoke', 'relinquish'):
+            with self.subTest(operation=operation):
+                method = 'test_' + operation + '_delegates_to_control'
+                case = TestD5Routing(method)
+                attempted = []
+                try:
+                    case.setUp()
+                    original = getattr(control, operation)
+
+                    def extra_drain(*args, **kwargs):
+                        attempted.append(True)
+                        fd = os.open(case.directory / 'authority.drain.lock', os.O_RDWR)
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            fcntl.flock(fd, fcntl.LOCK_UN)
+                        finally:
+                            os.close(fd)
+                        return original(*args, **kwargs)
+
+                    with mock.patch.object(control, operation, side_effect=extra_drain):
+                        with self.assertRaises(AssertionError):
+                            getattr(case, method)()
+                finally:
+                    case.doCleanups()
+                self.assertTrue(attempted)
+
     def test_drain_snapshot_distinguishes_fixture_reads_from_operation_reads(self):
         stat, read = Path.stat, Path.read_bytes
         access = {}

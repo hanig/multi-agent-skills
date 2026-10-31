@@ -381,6 +381,42 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
             with self.assertRaises(AssertionError):
                 self.test_revoke_without_lease_preserves_published_readiness()
 
+    def test_readiness_preservation_detects_atime_write_with_coarse_ctime(self):
+        original_stat, original_revoke = Path.stat, control.revoke
+        marker = self.marker
+        writes = []
+
+        class CoarseStat:
+            def __init__(self, value):
+                self.value = value
+            def __getattr__(self, name):
+                if name == 'st_ctime_ns':
+                    return 1000000000
+                if name == 'st_ctime':
+                    return 1
+                return getattr(self.value, name)
+
+        def coarse(path, *args, **kwargs):
+            value = original_stat(path, *args, **kwargs)
+            return CoarseStat(value) if path == marker else value
+
+        def changed(*args, **kwargs):
+            value = original_revoke(*args, **kwargs)
+            prior = original_stat(marker)
+            os.utime(marker, ns=(prior.st_atime_ns + 1000000000, prior.st_mtime_ns))
+            after = original_stat(marker)
+            writes.append(after.st_atime_ns != prior.st_atime_ns)
+            self.assertEqual(after.st_mtime_ns, prior.st_mtime_ns)
+            return value
+
+        # Actual atime mutation, with only ctime precision modeled. Do not
+        # fabricate a ctime transition that the filesystem may not expose.
+        with mock.patch.object(Path, 'stat', coarse), \
+                mock.patch.object(control, 'revoke', changed):
+            with self.assertRaises(AssertionError):
+                self.test_revoke_without_lease_preserves_published_readiness()
+        self.assertEqual(writes, [True])
+
     def test_metadata_write_probe_handles_coarse_timestamps(self):
         original = Path.stat
         class CoarseStat:

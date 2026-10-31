@@ -338,6 +338,59 @@ class TestReaderWriter(unittest.TestCase):
         self.assertTrue(result.wasSuccessful(), (result.errors, result.failures))
         self.assertEqual(fixture_problems(source, 'test_reader_writer.py'), [])
 
+    def assert_honest_observation_accepted(self, body):
+        source = """import tempfile, unittest
+from pathlib import Path
+from types import SimpleNamespace
+from tests.fixtures.d5.ready import ready_installation
+import d5_activation
+class TestObservation(unittest.TestCase):
+ def test_observe(self):
+  with tempfile.TemporaryDirectory() as root:
+   entry = ready_installation(root)
+""" + body
+        namespace = {'__name__': 'test_observation'}
+        exec(source, namespace)
+        result = unittest.TestResult()
+        namespace['TestObservation']('test_observe').run(result)
+        self.assertTrue(result.wasSuccessful(), (result.errors, result.failures))
+        self.assertEqual(fixture_problems(source, 'test_observation.py'), [])
+
+    def test_checker_accepts_activation_observations_in_unrelated_attributes(self):
+        query = "d5_activation.d5_active(entry['state_dir'])"
+        for assignment in ('report.d5_active = ' + query,
+                           'report.d5_active: bool = ' + query,
+                           'report.d5_active |= ' + query):
+            with self.subTest(assignment=assignment):
+                self.assert_honest_observation_accepted(
+                    '   report = SimpleNamespace(d5_active=False)\n'
+                    '   ' + assignment + '\n'
+                    '   self.assertTrue(report.d5_active)\n')
+
+    def test_checker_accepts_read_only_queries_in_assignment_targets(self):
+        target = "results[d5_activation.d5_active(entry['state_dir'])]"
+        for assignment in (target + " = 'ready'", target + ": str = 'ready'",
+                           target + " += 'ready'"):
+            with self.subTest(assignment=assignment):
+                self.assert_honest_observation_accepted(
+                    "   results = {True: ''}\n   " + assignment + '\n'
+                    "   self.assertEqual(results, {True: 'ready'})\n")
+
+    def test_checker_accepts_unrelated_outputs_derived_from_marker_paths(self):
+        for output in ("marker.parent / 'unrelated-output.json'",
+                       "marker.parent.parent / 'unrelated-output.json'",
+                       "marker.with_name('unrelated-output.json')"):
+            with self.subTest(output=output):
+                self.assert_honest_observation_accepted(
+                    "   marker = Path(entry['state_dir']) / 'd5-readiness.json'\n"
+                    '   original = marker.read_bytes()\n'
+                    '   output = ' + output + '\n'
+                    "   output.write_text('ok')\n"
+                    '   self.assertNotEqual(output, marker)\n'
+                    "   self.assertEqual(output.read_text(), 'ok')\n"
+                    '   self.assertEqual(marker.read_bytes(), original)\n'
+                    "   self.assertTrue(d5_activation.d5_active(entry['state_dir']))\n")
+
     def test_coordinator_passes_state_dir(self):
         inventory = {}
         for skill in ('hanig-swarm', 'hanig-orchestrate'):

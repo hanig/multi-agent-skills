@@ -287,6 +287,21 @@ class TestRecovery(unittest.TestCase):
 
 
 class TestInactiveAndPremature(unittest.TestCase):
+    def test_inactive_capture_normalizes_interpreter_substrings_in_temp_roots(self):
+        with tempfile.TemporaryDirectory() as temp:
+            private = Path(temp).resolve()
+            nested = Path(str(private) + sys.executable + '-captures')
+            nested.mkdir(parents=True)
+            names = [
+                'tests.test_d5_u45_retry_recovery.TestInactiveAndPremature.test_inactive_actual_script_matches_recorded_base',
+                'tests.test_d5_u48_state_compat.TestInactive.test_inactive_operator_authority_and_reconciliation',
+            ]
+            result = subprocess.run([sys.executable, '-B', '-m', 'unittest', '-v'] + names,
+                cwd=Path(__file__).resolve().parents[1],
+                env=dict(os.environ, TMPDIR=str(nested), XDG_STATE_HOME=str(private / 'xdg')),
+                capture_output=True, text=True, timeout=180)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_inactive_actual_script_matches_recorded_base(self):
         data = json.loads((FIXTURES / 'u45-inactive-base.json').read_text())
         self.assertEqual(data['base'], BASE)
