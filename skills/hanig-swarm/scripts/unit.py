@@ -81,6 +81,7 @@ import isolation as ISO
 import coordinator_paths as CP
 import child_environment as CE
 import d5_activation as D5
+import d5_installation as DI
 import signal
 import stat
 import subprocess
@@ -1625,7 +1626,7 @@ def main():
     for command_parser in sub.choices.values():
         command_parser.add_argument("--state-dir", default=None)
     args = ap.parse_args()
-    sys.exit(f"D5 active: unit {args.cmd} is refused before first effect; inspect d5_install readiness"
+    sys.exit(DI.refusal_message(f"D5 active: unit {args.cmd} is refused before first effect")
              if args.state_dir is not None and D5.d5_active(Path(args.state_dir).absolute()) else {"allocate": cmd_allocate, "bind": cmd_bind, "check": cmd_check}[args.cmd](args))
 
 

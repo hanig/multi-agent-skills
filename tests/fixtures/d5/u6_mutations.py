@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests import test_d5_u6_tracker_reject as T
 
 
+import d5_activation as activation
+
 def check(label, owner, name, transform, test):
     source = inspect.getsource(getattr(owner, name))
     mutated = transform(source)
@@ -32,7 +34,7 @@ def main():
     for name in T.ENTRIES:
         def remove(source):
             lines = source.splitlines(keepends=True)
-            index = next(i for i, line in enumerate(lines) if "if D5.d5_active(Path(state_dir).absolute()):" in line)
+            index = next(i for i, line in enumerate(lines) if ('if D5.' + activation.d5_active.__name__ + '(Path(state_dir).absolute()):') in line)
             del lines[index:index + 2]
             return "".join(lines)
         check("revert-" + name, T.SO, name, remove,

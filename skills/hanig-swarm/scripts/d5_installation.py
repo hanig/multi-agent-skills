@@ -15,6 +15,14 @@ INSTALLATION = "installation.json"
 SENTINEL = "d5-installed.json"
 PROFILE = "synchronous-merge-v1"
 NOT_INSTALLED, READY, BROKEN = "NOT_INSTALLED", "READY", "BROKEN"
+REPAIR_GUIDANCE = "repair with d5_install promote"
+
+
+def refusal_message(message):
+    """One repair form for every installation and active-profile refusal."""
+    return message if message.endswith(REPAIR_GUIDANCE) else message + "; " + REPAIR_GUIDANCE
+
+
 BINDING = ("registration_id", "plan_id", "state_dir", "record_dir",
            "repo_key", "state_key", "record_key")
 
@@ -115,5 +123,3 @@ def _snapshot(state_dir):
 def state(state_dir):
     """Uncached, read-only classification; no lease acquisition or Git."""
     return _snapshot(state_dir)[0]
-
-

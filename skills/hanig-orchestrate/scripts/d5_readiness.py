@@ -109,20 +109,20 @@ def _validated(value):
     try:
         return installation_state._validated(value)
     except ValueError as exc:
-        raise registry.AuthorityError(str(exc)) from exc
+        raise registry.AuthorityError(installation_state.refusal_message(str(exc))) from exc
     except (OSError, RuntimeError) as exc:
         raise registry.AuthorityError(
-            "D5 readiness: installation binding unavailable; repair with d5_install") from exc
+            installation_state.refusal_message("D5 readiness: installation binding unavailable")) from exc
 
 
 def installation(directory):
     try:
         return installation_state.installation(directory)
     except ValueError as exc:
-        raise registry.AuthorityError(str(exc)) from exc
+        raise registry.AuthorityError(installation_state.refusal_message(str(exc))) from exc
     except (OSError, RuntimeError) as exc:
         raise registry.AuthorityError(
-            "D5 readiness: installation binding unavailable; repair with d5_install") from exc
+            installation_state.refusal_message("D5 readiness: installation binding unavailable")) from exc
 
 
 def state(state_dir):
@@ -145,10 +145,7 @@ def refuse_broken(state_dir):
         try:
             require(directory)
         except registry.AuthorityError as exc:
-            message = str(exc)
-            if "d5_install" not in message:
-                message += "; repair with d5_install promote"
-            raise registry.AuthorityError(message) from exc
+            raise registry.AuthorityError(installation_state.refusal_message(str(exc))) from exc
     return directory
 
 
@@ -158,7 +155,7 @@ def require(state_dir):
     classification, value = installation_state._snapshot(directory)
     if classification != READY:
         reason = value or "D5 readiness: missing or malformed installation state"
-        raise registry.AuthorityError(reason + "; repair with d5_install promote")
+        raise registry.AuthorityError(installation_state.refusal_message(reason))
     return value
 
 

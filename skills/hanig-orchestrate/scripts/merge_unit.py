@@ -36,6 +36,7 @@ import child_environment as CE
 import coordinator_paths as CP
 import swarm as S
 import d5_activation as D5
+import d5_installation as DI
 import verify as V
 import remote_verify as RV
 
@@ -50,7 +51,7 @@ class Refusal(ValueError):
 
 def _d5_refuse(route, state_dir):
     if D5.d5_active(Path(state_dir).absolute()):
-        raise Refusal("D5 active: {} is outside the supported merge profile; inspect d5_install readiness".format(route))
+        raise Refusal(DI.refusal_message("D5 active: {} is outside the supported merge profile".format(route)))
 
 
 def merge_launch_admitted():
@@ -60,8 +61,8 @@ def merge_launch_admitted():
 
 def _d5_merge_launch_entry(state_dir):
     if D5.d5_active(Path(state_dir).absolute()) and not merge_launch_admitted():
-        raise Refusal("D5 active: merge launch is not admitted; executable binding "
-                      "and integrity remain undelivered at U8 cutover; inspect d5_install readiness")
+        raise Refusal(DI.refusal_message("D5 active: merge launch is not admitted; executable binding "
+                      "and integrity remain undelivered at U8 cutover"))
 
 
 def _d5_merge_entry(args):
@@ -75,14 +76,14 @@ def _d5_merge_entry(args):
     if D5.d5_active(Path(args.state_dir).absolute()):
         if (args.verify_integration or args.abandon_intent
                 or args.retrieve_remote_evidence or args.remote_recovery_attestation):
-            raise Refusal("D5 active: verification and abandonment are outside "
-                          "the supported merge profile")
+            raise Refusal(DI.refusal_message("D5 active: verification and abandonment are outside "
+                          "the supported merge profile"))
         try:
             import d5_readiness as DR
             DR.require(args.state_dir)
             DR.prepared_state(args.state_dir)
         except ValueError as exc:
-            raise Refusal("D5 active: " + str(exc)) from exc
+            raise Refusal(DI.refusal_message("D5 active: " + str(exc))) from exc
 
 
 def nonempty(value):
@@ -579,10 +580,10 @@ def _d5_journal_binding(intent, ready, repo):
     import d5_readiness as DR
     metadata = intent.get("d5")
     if not isinstance(metadata, dict) or metadata.get("state") not in ("Bound", "Attempted", "Recorded"):
-        raise Refusal("D5 active: historical merge intent has no admission")
+        raise Refusal(DI.refusal_message("D5 active: historical merge intent has no admission"))
     phase = "receipt_recorded" if metadata["state"] == "Recorded" else "merge_requested"
     if intent.get("phase") != phase:
-        raise Refusal("D5 active: incompatible admitted intent phase")
+        raise Refusal(DI.refusal_message("D5 active: incompatible admitted intent phase"))
     bound = intent["d5"]["binding"]
     A._keys(bound, {"record_id", "custody", "kind", "scope", "correlation", "installation"}, "merge binding")
     A._require(type(bound["record_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", bound["record_id"]),
@@ -1116,7 +1117,7 @@ def _active_entry_lease(args):
             _d5_merge_entry(args)
             yield
     except ValueError as exc:
-        raise Refusal("D5 active: " + str(exc)) from exc
+        raise Refusal(DI.refusal_message("D5 active: " + str(exc))) from exc
 
 
 def verify_integration(args, repo, snapshot):

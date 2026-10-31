@@ -11,6 +11,8 @@ sys.path.insert(0, str(ROOT))
 from tests import test_d5_u49_entrypoints as tests
 
 
+import d5_activation as activation
+
 def replacement(module, name, old, new):
     source = Path(module.__file__).read_text()
     node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -29,11 +31,11 @@ CASES = {
     'entrypoint-unwired-swarm-main': ('TestRoutes.test_swarm_main', tests.S, 'main',
         '_d5_dispatch(args)', 'pass'),
     'entrypoint-unwired-merge-main': ('TestRoutes.test_merge_main', tests.M, 'main',
-        'if D5.d5_active(Path(args.state_dir).absolute()):', 'if False:'),
+        ('if D5.' + activation.d5_active.__name__ + '(Path(args.state_dir).absolute()):'), 'if False:'),
     'advisory-blocks': ('TestAdvisory.test_warning_truth_table_at_swarm_entries', tests.S,
         '_d5_bytecode_advisory', '        try:', "        raise SystemExit('advisory refusal')\n        try:"),
     'advisory-silent-when-active': ('TestAdvisory.test_warning_truth_table_at_swarm_entries', tests.S,
-        '_d5_bytecode_advisory', 'if D5.d5_active(_d5_state(state_dir, plan)) and not sys.dont_write_bytecode:', 'if False:'),
+        '_d5_bytecode_advisory', ('if D5.' + activation.d5_active.__name__ + '(_d5_state(state_dir, plan)) and not sys.dont_write_bytecode:'), 'if False:'),
     'advisory-unwired-cmd_run': ('TestAdvisory.test_warning_truth_table_at_swarm_entries', tests.S,
         'cmd_run', '_d5_bytecode_advisory(getattr(args, "state_dir", None), plan=getattr(args, "plan", None))', 'pass'),
     'advisory-unwired-main': ('TestAdvisory.test_warning_truth_table_at_swarm_entries', tests.S,

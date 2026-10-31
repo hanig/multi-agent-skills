@@ -33,9 +33,6 @@ class TestD5Routing(unittest.TestCase):
         self.entry = self.fixture.register(record=False)
         self.directory = Path(self.entry["record_dir"])
         self.path = self.directory / store.RECORD_NAME
-        drain = self.directory / "authority.drain.lock"
-        drain_bytes = drain.read_bytes()
-        self.drain_before = drain.stat(), drain_bytes
         self.mandate = self.fixture.repo / "docs/orchestrator-mandate.md"
         self.args = self.fixture.repo, "p", self.fixture.state
 
@@ -76,6 +73,69 @@ class TestD5Routing(unittest.TestCase):
             yield observed
             observed.assert_called_once()
 
+    @contextmanager
+    def control_locks(self):
+        """Call through the production START lookup; forbid every DRAIN call."""
+        protocol = control.protocol
+        start, drain, write = protocol._Protocol.start, protocol._Protocol.drain, store._write
+        events = []
+
+        @contextmanager
+        def started(pinned):
+            with start(pinned):
+                self.assertEqual([(rank, shared) for _, rank, shared, _ in locks._held()], [(1, False)])
+                events.append('start')
+                try:
+                    yield
+                finally:
+                    events.append('leaving')
+            events.append('released')
+
+        def writing(*args, **kwargs):
+            self.assertEqual(events, ['start'], 'first mutation must follow exclusive START')
+            events.append('write')
+            return write(*args, **kwargs)
+
+        with mock.patch.object(protocol._Protocol, 'start', started), \
+                mock.patch.object(protocol._Protocol, 'drain', autospec=True, side_effect=drain) as drains, \
+                mock.patch.object(store, '_write', side_effect=writing):
+            yield
+        drains.assert_not_called()
+        self.assertEqual(events, ['start', 'write', 'leaving', 'released'])
+        self.assertEqual(locks._held(), [])
+        fd = os.open(self.directory / 'authority.start.lock', os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+    def test_invalidation_acquires_start_without_drain(self):
+        store.create(self.directory, fixtures.grant())
+        self.mandate.write_bytes(b'changed policy')
+        with self.control_locks(), self.store_boundary('check', [(1, False)]):
+            self.assertEqual(control.record_mandate_invalidation(*self.args, now=120), 'mandate_changed')
+
+    def test_routing_guards_detect_extra_drain_acquisition(self):
+        for operation in ('revoke', 'relinquish'):
+            with self.subTest(operation=operation):
+                method = 'test_' + operation + '_delegates_to_control'
+                case = TestD5Routing(method)
+                attempted = []
+                try:
+                    case.setUp()
+                    original = getattr(control, operation)
+                    def extra_drain(*args, **kwargs):
+                        with control.protocol.pin(case.directory) as pinned:
+                            with pinned.drain(shared=False):
+                                attempted.append(True)
+                        return original(*args, **kwargs)
+                    with mock.patch.object(control, operation, side_effect=extra_drain):
+                        with self.assertRaisesRegex(AssertionError, "drain.*called"):
+                            getattr(case, method)()
+                finally:
+                    case.doCleanups()
+                self.assertEqual(attempted, [True])
+
     def test_initial_delegates_to_install_initial(self):
         with nullcontext(), \
                 mock.patch.object(install, "install_initial", wraps=install.install_initial) as route, \
@@ -103,69 +163,11 @@ class TestD5Routing(unittest.TestCase):
         store.create(self.directory, fixtures.grant())
         with nullcontext(), \
                 mock.patch.object(control, "revoke", wraps=control.revoke) as route, \
-                self.store_boundary("revoke", [(1, False)]):
+                self.control_locks(), self.store_boundary("revoke", [(1, False)]):
             result = lease.revoke(*self.args, 120, "owner stopped")
         route.assert_called_once_with(*self.args, 120, "owner stopped")
         self.assertEqual(self.read(), result)
         self.assertEqual(result["invalidation"], {"at": 120, "kind": "revoked", "reason": "owner stopped"})
-        self.assertEqual(((self.directory / "authority.drain.lock").stat(), (self.directory / "authority.drain.lock").read_bytes()), self.drain_before)
-
-    def test_drain_snapshot_distinguishes_fixture_reads_from_operation_reads(self):
-        stat, read = Path.stat, Path.read_bytes
-        access = {}
-
-        class AccessStat(tuple):
-            def __new__(cls, original, atime):
-                fields = list(original)
-                fields[7] = atime
-                value = tuple.__new__(cls, fields)
-                value.original = original
-                return value
-
-            def __getattr__(self, name):
-                if name == 'st_atime':
-                    return self[7]
-                if name == 'st_atime_ns':
-                    return self[7] * 1000000000
-                return getattr(self.original, name)
-
-        def observed(path, *args, **kwargs):
-            value = stat(path, *args, **kwargs)
-            return (AccessStat(value, access.get(path, 1))
-                    if path.name == 'authority.drain.lock' else value)
-
-        def accessed(path, *args, **kwargs):
-            value = read(path, *args, **kwargs)
-            if path.name == 'authority.drain.lock':
-                access[path] = access.get(path, 1) + 1
-            return value
-
-        # Only read atime is simulated. Each original routing assertion keeps
-        # all stat fields and bytes, and must still reject an operation's read.
-        for operation in ('revoke', 'relinquish'):
-            for unexpected_read in (False, True):
-                with self.subTest(operation=operation, unexpected_read=unexpected_read):
-                    method = 'test_' + operation + '_delegates_to_control'
-                    case = TestD5Routing(method)
-                    try:
-                        with mock.patch.object(Path, 'stat', observed), \
-                                mock.patch.object(Path, 'read_bytes', accessed):
-                            case.setUp()
-                            original = getattr(control, operation)
-
-                            def extra_read(*args, **kwargs):
-                                result = original(*args, **kwargs)
-                                (case.directory / 'authority.drain.lock').read_bytes()
-                                return result
-
-                            patch = (mock.patch.object(control, operation, side_effect=extra_read)
-                                     if unexpected_read else nullcontext())
-                            expected = (self.assertRaisesRegex(AssertionError, 'Tuples differ')
-                                        if unexpected_read else nullcontext())
-                            with patch, expected:
-                                getattr(case, method)()
-                    finally:
-                        case.doCleanups()
 
     def test_claim_delegates_to_install_with_fresh_registered_source(self):
         # R9-DIRECT-STORE-CLAIM; caller bytes/time must not substitute for R3's.
@@ -195,6 +197,7 @@ class TestD5Routing(unittest.TestCase):
         def git(*args):
             subprocess.run(["git", "-C", str(self.fixture.repo), *args], check=True,
                            capture_output=True, timeout=30)
+        git("symbolic-ref", "HEAD", "refs/heads/fixture-base")
         git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
             "commit", "--allow-empty", "-m", "fixture")
         linked = self.fixture.directory / "linked"
@@ -229,13 +232,12 @@ class TestD5Routing(unittest.TestCase):
         store.claim(self.directory, 101, fixtures.MANDATE, "native", fixtures.ANCHOR, host.liveness)
         with nullcontext(), \
                 mock.patch.object(control, "relinquish", wraps=control.relinquish) as route, \
-                self.store_boundary("relinquish", [(1, False)]):
+                self.control_locks(), self.store_boundary("relinquish", [(1, False)]):
             result = custody.relinquish(*self.args, now=120)
         route.assert_called_once_with(*self.args, now=120)
         self.assertEqual(self.read(), result)
         self.assertEqual(result["custody"]["relinquished_at"], 120)
         self.fixture.anchor.assert_called_once_with()
-        self.assertEqual(((self.directory / "authority.drain.lock").stat(), (self.directory / "authority.drain.lock").read_bytes()), self.drain_before)
 
     def test_inactive_delegates_are_not_called(self):
         # R9-BYPASS-INACTIVE: unrelated environment/CLI input cannot activate.

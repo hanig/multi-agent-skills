@@ -6,6 +6,7 @@ never candidate-selected programs. Same-UID writers and hostile tests are not
 an OS isolation boundary. No forge writes or credential provisioning occur.
 """
 import argparse
+import d5_installation as DI
 import base64
 from contextlib import contextmanager
 import fcntl
@@ -1435,8 +1436,7 @@ def run_remote(runner, tree, basis, checks, remote, timeout, repo, state_dir, un
         raise ValueError("remote verification requires coordinator evidence storage")
     import d5_activation
     if d5_activation.d5_active(Path(state_dir).absolute()):
-        raise ValueError("D5 active: remote verification is refused before staging; "
-                         "inspect d5_install readiness")
+        raise ValueError(DI.refusal_message("D5 active: remote verification is refused before staging"))
     if journal_entries is None:
         raise ValueError("remote verification requires coordinator journal entries")
     with binding_lock(state_dir, unit, basis) as path:
@@ -1767,7 +1767,7 @@ def main():
     finally:
         sys.dont_write_bytecode = previous_bytecode_setting
     if active:
-        sys.exit("D5 active: remote verification is refused before first effect; inspect d5_install readiness")
+        sys.exit(DI.refusal_message("D5 active: remote verification is refused before first effect"))
     return _execute_entry(args)
 
 

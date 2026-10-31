@@ -109,6 +109,23 @@ The U4.x test names were checked at base `7a7559bdff5ef60d00e064a51d5ba892622ff6
 (`test_d5_u4*.py` and `test_d5_containment.py`): none names compaction. U7 drops
 context-compaction testing. 
 
+## Test guard scope
+
+The activation fixture check is an exact Python syntax check under `tests/`:
+the two retired helper files and imports of them are forbidden, as are string
+literals containing `d5_active` and attribute stores with that name. The three
+exact installation filenames are allowed only in the named corruption and
+fixture files in `test_d5_activation_guards.py`. It performs no dataflow or
+provenance analysis. Indirect pins are review-enforced.
+
+Inactive I/O observation covers the calling thread. During its guard window,
+`threading.Thread.start` and `_thread.start_new_thread` are forbidden; subprocess
+spawns remain observed at consumer call boundaries. Cached or indirect thread
+launches and arbitrary syscalls are review-enforced. START/no-DRAIN control tests
+call through the real lock and observe it before mutation and after release;
+file metadata does not establish lock acquisition. Refusal-route completeness
+beyond the mechanical sweep is review-enforced.
+
 ## Non-claims
 
 - Process isolation and same-UID isolation; neither the stubs nor descriptor

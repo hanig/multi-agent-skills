@@ -15,6 +15,7 @@ from pathlib import Path
 
 import coordinator_paths as CP
 import d5_activation as D5
+import d5_installation as DI
 import swarm_journal as SJ
 import swarm_state as SS
 import unit as U
@@ -746,7 +747,7 @@ def admit_merge(state_dir, unit, produced, expect_repo=None, repo=None,
     neither a legacy attestation nor a D5 receipt enables DONE here.
     """
     if D5.d5_active(Path(state_dir).absolute()):
-        raise OutboxError("D5 active: merge receipt consumption is outside the supported merge profile")
+        raise OutboxError(DI.refusal_message("D5 active: merge receipt consumption is outside the supported merge profile"))
     if not produced:
         return None, ("this attempt has no produced commit, so there is "
                       "nothing a merge could be bound to. A unit reaches "

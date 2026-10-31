@@ -55,6 +55,7 @@ import io
 import os
 import tempfile
 import threading
+import _thread
 from unittest import mock
 import d5_installation as classifier
 
@@ -103,7 +104,11 @@ def _classification_audit(event, args):
 
 @contextmanager
 def classification_only(state_dir):
-    """OD-U8R-8: only the pure classifier's named read-only filesystem calls."""
+    """Own-thread IO only, with both thread-start APIs forbidden in this window.
+
+    Cached/indirect thread launch and arbitrary syscalls remain review-enforced.
+    Subprocess calls are observed at the individual consumer boundary.
+    """
     global _io_audit_installed
     directory = Path(state_dir).absolute()
     allowed = {str(p) for p in (directory,) + tuple(directory.parents)}
@@ -185,6 +190,9 @@ def classification_only(state_dir):
         if previous_profile is not None:
             previous_profile(frame, event, call)
     with ExitStack() as stack:
+        for owner, name in ((threading.Thread, "start"), (_thread, "start_new_thread")):
+            stack.enter_context(mock.patch.object(owner, name,
+                side_effect=AssertionError("inactive thread start")))
         for owner in (os, Path):
             for name in ('lstat', 'stat', 'readlink'):
                 if hasattr(owner, name):

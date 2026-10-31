@@ -12,6 +12,8 @@ sys.path.insert(0, str(ROOT))
 from tests import test_d5_u44_result_consumption as tests
 
 
+import d5_activation as activation
+
 def replacement(module, name, old, new):
     tree = ast.parse(Path(module.__file__).read_text())
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -30,7 +32,7 @@ def patches(name):
             '            return None\n        if intent is not None:\n            if pr["state"] != "MERGED":')]
     if name == 'legacy-receipt-completes':
         return [replacement(tests.SE, 'admit_merge',
-            'if D5.d5_active(Path(state_dir).absolute()):', 'if False:')]
+            ('if D5.' + activation.d5_active.__name__ + '(Path(state_dir).absolute()):'), 'if False:')]
     if name == 'report-before-readback':
         return [replacement(tests.M, '_d5_result_receipt',
             'J._readback(handle, expected)', 'return expected')]

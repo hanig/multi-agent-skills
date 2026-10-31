@@ -39,6 +39,7 @@ class TestD5Control(unittest.TestCase):
         self.root = Path(temp.name).resolve()
         self.repo, self.state = self.root / "repo", self.root / "state"
         self.git("init", str(self.repo))
+        self.git("-C", str(self.repo), "symbolic-ref", "HEAD", "refs/heads/fixture-base")
         self.state.mkdir(mode=0o700)
         (self.repo / "docs").mkdir()
         self.mandate = self.repo / "docs/orchestrator-mandate.md"

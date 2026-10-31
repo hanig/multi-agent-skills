@@ -95,6 +95,59 @@ class TestD5Activation(unittest.TestCase):
         self.assertEqual(len(set(locators)), 3)
         self.assertEqual(len(set(outputs)), 1)
 
+    def test_inactive_guard_rejects_cached_child_thread_io(self):
+        from threading import Thread
+        target = self.root / 'unrelated-thread-output'
+        target.write_text('before')
+        cached_open = open
+        errors = []
+
+        def writer():
+            try:
+                with cached_open(target, 'w') as stream:
+                    stream.write('after')
+            except AssertionError as exc:
+                errors.append(exc)
+
+        worker = Thread(target=writer)
+        try:
+            with classification_only(self.empty):
+                self.assertFalse(activation.d5_active(self.empty))
+                worker.start()
+                worker.join(10)
+        except AssertionError as exc:
+            errors.append(exc)
+        finally:
+            if worker.ident is not None:
+                worker.join(10)
+                self.assertFalse(worker.is_alive(), 'child IO watchdog')
+        self.assertEqual(target.read_text(), 'before')
+        self.assertTrue(errors, 'the guard must reject child-thread filesystem IO')
+
+    def test_inactive_guard_rejects_low_level_thread_start(self):
+        import _thread
+        import threading
+        target = self.root / 'low-level-thread-output'
+        target.write_text('before')
+        completed = threading.Event()
+        cached_open = open
+        def writer():
+            try:
+                with cached_open(target, 'w') as stream:
+                    stream.write('after')
+            finally:
+                completed.set()
+        launched = False
+        try:
+            with self.assertRaisesRegex(AssertionError, 'inactive thread start'):
+                with classification_only(self.empty):
+                    _thread.start_new_thread(writer, ())
+                    launched = True
+        finally:
+            if launched:
+                self.assertTrue(completed.wait(10), 'thread watchdog')
+        self.assertEqual(target.read_text(), 'before')
+
     def test_inactive_guard_rejects_filesystem_operation_siblings(self):
         source = self.root / 'source'
         source.write_bytes(b'preserved')
@@ -177,6 +230,22 @@ class TestD5Activation(unittest.TestCase):
                 finally:
                     os.chdir(previous)
 
+    def test_linked_worktree_fixtures_accept_configured_default_branch(self):
+        config = self.root / 'git-config'
+        config.write_text('[init]\n\tdefaultBranch = linked\n')
+        names = [
+            'tests.test_d5_activation.TestD5Activation.test_relative_git_backlinks_match_operated_state_before_effects',
+            'tests.test_d5_activation.TestD5Activation.test_implicit_lookup_matches_operated_state',
+            'tests.test_d5_routing.TestD5Routing.test_claim_from_linked_checkout_uses_registered_checkout',
+            'tests.test_d5_admission.TestAdmission.test_registered_source_from_linked_caller',
+            'tests.test_d5_control.TestD5Control.test_registered_checkout_is_source',
+        ]
+        result = subprocess.run([sys.executable, '-B', '-m', 'unittest', '-v'] + names,
+            cwd=Path(__file__).resolve().parents[1],
+            env=dict(os.environ, GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_NOSYSTEM='1'),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_relative_git_backlinks_match_operated_state_before_effects(self):
         import itertools
         import swarm
@@ -187,6 +256,7 @@ class TestD5Activation(unittest.TestCase):
             return subprocess.run(['git'] + list(map(str, args)), check=True,
                                   capture_output=True, timeout=30)
         git('init', main)
+        git('-C', main, 'symbolic-ref', 'HEAD', 'refs/heads/fixture-base')
         git('-C', main, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
             'commit', '--allow-empty', '-m', 'fixture')
         git('-C', main, 'worktree', 'add', '-b', 'linked', linked)
@@ -283,6 +353,8 @@ class TestD5Activation(unittest.TestCase):
         self.assertEqual(readiness.state(state), readiness.READY)
 
     def test_broken_is_active_and_refuses(self):
+        import swarm_outbox as outbox
+        import swarm_evidence as evidence
         for corruption in ('deleted', 'truncated', 'schema', 'binding', 'symlink', 'mid-publish', 'sentinel-removed'):
             with self.subTest(corruption=corruption):
                 state = self.publish()
@@ -306,8 +378,91 @@ class TestD5Activation(unittest.TestCase):
                     with self.assertRaisesRegex(registry.AuthorityError, 'd5_install'):
                         registry.register(self.root, 'p', state)
                     git.assert_not_called()
+                # Final-round counterexample: every broken refusal names repair.
+                calls = [
+                    (outbox._write_sequence, ({},)),
+                    (outbox._allocate_sequence, ([],)),
+                    (outbox.set_sequence_floor, (1, 'owner', 'probe')),
+                    (outbox.emit_intent, ('p', 'u', 'DONE', {})),
+                    (outbox.backfill_tracker_intents, ('p', {})),
+                    (outbox._append_receipt_atomic, ({},)),
+                    (outbox.record_receipt, ('key', 'ref')),
+                    (evidence.admit_merge, ('u', '1' * 40)),
+                ]
+                before = {p.name: p.read_bytes() for p in state.iterdir() if p.is_file()}
+                for operation, arguments in calls:
+                    with self.subTest(operation=operation.__name__):
+                        try:
+                            with self.assertRaises(outbox.OutboxError) as refused:
+                                operation(state, *arguments)
+                            self.assertIn(readiness.installation_state.REPAIR_GUIDANCE, str(refused.exception))
+                        finally:
+                            self.assertEqual(
+                                {p.name: p.read_bytes() for p in state.iterdir() if p.is_file()},
+                                before)
                 # Real publication repairs every corruption, including symlinks.
                 ready_installation(self.root / 'installed', self.entry)
+
+    def test_refusal_route_sweep_uses_one_repair_constructor(self):
+        """Finite source sweep; completeness beyond these routes is review-enforced."""
+        import d5_installation as classifier
+        self.assertIn('d5_install', classifier.REPAIR_GUIDANCE)
+        self.assertIn('promote', classifier.REPAIR_GUIDANCE)
+        inventory = {}
+        for bundle in ('hanig-swarm', 'hanig-orchestrate'):
+            for path in sorted((ROOT / 'skills' / bundle / 'scripts').glob('*.py')):
+                tree = ast.parse(path.read_text())
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call) or not node.args:
+                        continue
+                    name = getattr(node.func, 'id', getattr(node.func, 'attr', ''))
+                    if name not in ('OutboxError', 'Refusal', 'SystemExit', 'ValueError', 'exit'):
+                        continue
+                    value = node.args[0]
+                    value = value.body if isinstance(value, ast.IfExp) else value
+                    if not any(isinstance(n, ast.Constant) and isinstance(n.value, str)
+                               and 'D5 active:' in n.value for n in ast.walk(value)):
+                        continue
+                    with self.subTest(path=path.name, line=node.lineno):
+                        self.assertIsInstance(value, ast.Call)
+                        self.assertIsInstance(value.func, ast.Attribute)
+                        self.assertEqual(value.func.attr, 'refusal_message')
+                        self.assertIsInstance(value.func.value, ast.Name)
+                        self.assertEqual(value.func.value.id, 'DI')
+                    inventory[path.name] = inventory.get(path.name, 0) + 1
+        self.assertEqual(inventory, {'swarm_outbox.py': 7, 'swarm_evidence.py': 1,
+            'swarm.py': 1, 'unit.py': 1, 'remote_verify.py': 2, 'merge_unit.py': 7})
+
+    def test_broken_sibling_routes_carry_shared_repair_form(self):
+        import argparse
+        import swarm
+        import merge_unit
+        import remote_verify
+        state = self.publish()
+        with readiness.installer_lease(state):
+            readiness.withdraw(state)
+        calls = [
+            lambda: swarm._d5_refuse('run', state),
+            lambda: merge_unit._d5_refuse('fixture', state),
+            lambda: merge_unit._d5_merge_launch_entry(state),
+            lambda: merge_unit._d5_merge_entry(argparse.Namespace(state_dir=state)),
+            lambda: remote_verify.run_remote(None, None, None, None, None, None, None, state, None, None),
+            lambda: readiness.refuse_broken(state),
+            lambda: readiness.require(state),
+        ]
+        for index, call in enumerate(calls):
+            with self.subTest(route=index), readiness.installer_lease(state), mock.patch.object(subprocess, 'run',
+                    side_effect=AssertionError('process before broken refusal')):
+                with self.assertRaises((ValueError, SystemExit)) as refused:
+                    call()
+                self.assertIn(readiness.installation_state.REPAIR_GUIDANCE, str(refused.exception))
+        for script, args in ((SCRIPTS / 'unit.py', ['allocate', '--root', str(self.root / 'runs'),
+                '--task', 'fixture', '--kind', 'pipeline', '--output', 'out']),
+                (SCRIPTS / 'remote_verify.py', ['--worker', str(self.root / 'missing')])):
+            result = subprocess.run([sys.executable, '-B', str(script)] + args + ['--state-dir', str(state)],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(readiness.installation_state.REPAIR_GUIDANCE, result.stdout + result.stderr)
 
     def test_registry_requires_readiness(self):
         state = self.publish()
@@ -356,17 +511,17 @@ class TestD5Activation(unittest.TestCase):
             if isinstance(node, ast.Attribute):
                 self.assertNotIn(node.attr, ('environ', 'getenv', 'argv', 'getcwd'))
         tree = ast.parse(Path(registry.__file__).read_text())
-        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'd5_active')
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == activation.d5_active.__name__)
         calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
         self.assertEqual(len(calls), 1)
-        self.assertEqual(ast.dump(calls[0]), ast.dump(ast.parse('d5_activation.d5_active(state_dir)').body[0].value))
+        self.assertEqual(ast.dump(calls[0]), ast.dump(ast.parse('d5_activation.' + activation.d5_active.__name__ + '(state_dir)').body[0].value))
 
     def test_fresh_process_agreement(self):
         state = self.publish()
         code = ('from __future__ import annotations\n'
                 'import sys\nsys.path.insert(0, ' + repr(str(SCRIPTS)) + ')\n'
                 'import d5_activation\n'
-                'print(d5_activation.d5_active(sys.argv[1]))\n')
+                'print(getattr(d5_activation, ' + repr(activation.d5_active.__name__) + ')(sys.argv[1]))\n')
         script = self.root / 'probe.py'
         script.write_text(code)
         linked = self.root / 'linked.py'
@@ -398,6 +553,8 @@ class TestD5Activation(unittest.TestCase):
         for directory in (repo, other):
             subprocess.run(['git', 'init', str(directory)], check=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            subprocess.run(['git', '-C', str(directory), 'symbolic-ref', 'HEAD',
+                            'refs/heads/fixture-base'], check=True, capture_output=True, timeout=30)
         subprocess.run(['git', '-C', str(other), '-c', 'user.name=Test', '-c',
                         'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'base'],
                        check=True, capture_output=True, timeout=30)
@@ -437,6 +594,8 @@ class TestD5Activation(unittest.TestCase):
         for directory in (repo, other):
             subprocess.run(['git', 'init', str(directory)], check=True,
                            capture_output=True, timeout=30)
+            subprocess.run(['git', '-C', str(directory), 'symbolic-ref', 'HEAD',
+                            'refs/heads/fixture-base'], check=True, capture_output=True, timeout=30)
         plan = {'name': 'p', 'units': [{'repo': str(other)}]}
         plan_path = self.root / 'plan.json'
         plan_path.write_text(json.dumps(plan))
