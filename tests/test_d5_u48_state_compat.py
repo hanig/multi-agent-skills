@@ -224,10 +224,15 @@ class TestPreparedState(unittest.TestCase):
             self.assertEqual(snapshot, before)
         self.args.state_dir = None
         self.args.root = None
-        implicit, _, _ = S.CP.resolve_paths(None, plan=self.c.plan, cwd=os.getcwd())
-        ready_installation(self.c.directory, state_dir=implicit)
-        self.refused_without_effects(lambda: S._prepare_command_paths(self.args,
-            self.c.plan, need_root=True), 'D5 active')
+        resolved = S.CP.resolve_paths(None, plan=self.c.plan, cwd=os.getcwd())
+        ready_installation(self.c.directory, state_dir=resolved[0])
+        # OD-U8R-11 permits the resolver's read-only Git discovery. Resolve the
+        # real fixture before the strict zero-launch/write migration guard.
+        # The activation module separately spies on the real discovery argv.
+        with mock.patch.object(S.CP, 'resolve_paths', return_value=resolved) as resolve:
+            self.refused_without_effects(lambda: S._prepare_command_paths(self.args,
+                self.c.plan, need_root=True), 'D5 active')
+        resolve.assert_called_once_with(plan=self.c.plan, extra_repos=())
 
     def test_premature_activation_authority_launches_and_writes_nothing(self):
         (self.c.state_dir / R.MARKER).unlink()
