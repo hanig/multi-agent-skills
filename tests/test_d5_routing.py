@@ -33,7 +33,9 @@ class TestD5Routing(unittest.TestCase):
         self.entry = self.fixture.register(record=False)
         self.directory = Path(self.entry["record_dir"])
         self.path = self.directory / store.RECORD_NAME
-        self.drain_before = (self.directory / "authority.drain.lock").stat(), (self.directory / "authority.drain.lock").read_bytes()
+        drain = self.directory / "authority.drain.lock"
+        drain_bytes = drain.read_bytes()
+        self.drain_before = drain.stat(), drain_bytes
         self.mandate = self.fixture.repo / "docs/orchestrator-mandate.md"
         self.args = self.fixture.repo, "p", self.fixture.state
 
@@ -107,6 +109,63 @@ class TestD5Routing(unittest.TestCase):
         self.assertEqual(self.read(), result)
         self.assertEqual(result["invalidation"], {"at": 120, "kind": "revoked", "reason": "owner stopped"})
         self.assertEqual(((self.directory / "authority.drain.lock").stat(), (self.directory / "authority.drain.lock").read_bytes()), self.drain_before)
+
+    def test_drain_snapshot_distinguishes_fixture_reads_from_operation_reads(self):
+        stat, read = Path.stat, Path.read_bytes
+        access = {}
+
+        class AccessStat(tuple):
+            def __new__(cls, original, atime):
+                fields = list(original)
+                fields[7] = atime
+                value = tuple.__new__(cls, fields)
+                value.original = original
+                return value
+
+            def __getattr__(self, name):
+                if name == 'st_atime':
+                    return self[7]
+                if name == 'st_atime_ns':
+                    return self[7] * 1000000000
+                return getattr(self.original, name)
+
+        def observed(path, *args, **kwargs):
+            value = stat(path, *args, **kwargs)
+            return (AccessStat(value, access.get(path, 1))
+                    if path.name == 'authority.drain.lock' else value)
+
+        def accessed(path, *args, **kwargs):
+            value = read(path, *args, **kwargs)
+            if path.name == 'authority.drain.lock':
+                access[path] = access.get(path, 1) + 1
+            return value
+
+        # Only read atime is simulated. Each original routing assertion keeps
+        # all stat fields and bytes, and must still reject an operation's read.
+        for operation in ('revoke', 'relinquish'):
+            for unexpected_read in (False, True):
+                with self.subTest(operation=operation, unexpected_read=unexpected_read):
+                    method = 'test_' + operation + '_delegates_to_control'
+                    case = TestD5Routing(method)
+                    try:
+                        with mock.patch.object(Path, 'stat', observed), \
+                                mock.patch.object(Path, 'read_bytes', accessed):
+                            case.setUp()
+                            original = getattr(control, operation)
+
+                            def extra_read(*args, **kwargs):
+                                result = original(*args, **kwargs)
+                                (case.directory / 'authority.drain.lock').read_bytes()
+                                return result
+
+                            patch = (mock.patch.object(control, operation, side_effect=extra_read)
+                                     if unexpected_read else nullcontext())
+                            expected = (self.assertRaisesRegex(AssertionError, 'Tuples differ')
+                                        if unexpected_read else nullcontext())
+                            with patch, expected:
+                                getattr(case, method)()
+                    finally:
+                        case.doCleanups()
 
     def test_claim_delegates_to_install_with_fresh_registered_source(self):
         # R9-DIRECT-STORE-CLAIM; caller bytes/time must not substitute for R3's.
