@@ -372,9 +372,9 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
         def changed(*args, **kwargs):
             result = revoke(*args, **kwargs)
             prior = self.marker.stat()
-            os.utime(self.marker, ns=(prior.st_atime_ns + 1000000000, prior.st_mtime_ns))
-            # Inject an observable clock transition, independent of mount clock
-            # precision. The real atime write alone may share publication's tick.
+            os.chmod(self.marker, prior.st_mode)
+            # Exercise ctime observation separately from the direct utime spy.
+            # Model an observable tick independent of filesystem precision.
             change[0] += 1000000000
             return result
 

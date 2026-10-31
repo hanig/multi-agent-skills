@@ -124,6 +124,35 @@ class TestD5Activation(unittest.TestCase):
         self.assertEqual(target.read_text(), 'before')
         self.assertTrue(errors, 'the guard must reject child-thread filesystem IO')
 
+    def test_inactive_guard_observes_only_its_calling_thread(self):
+        import threading
+        enter, done = threading.Event(), threading.Event()
+        target = self.root / 'existing-thread-output'
+        errors = []
+        def unrelated():
+            try:
+                if not enter.wait(10):
+                    raise AssertionError('guard entry watchdog')
+                target.write_text('unrelated')
+                target.stat()
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+        worker = threading.Thread(target=unrelated)
+        worker.start()
+        try:
+            with classification_only(self.empty):
+                self.assertFalse(activation.d5_active(self.empty))
+                enter.set()
+                self.assertTrue(done.wait(10), 'other thread watchdog')
+        finally:
+            enter.set()
+            worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(target.read_text(), 'unrelated')
+
     def test_inactive_guard_rejects_low_level_thread_start(self):
         import _thread
         import threading

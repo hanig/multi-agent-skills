@@ -114,6 +114,7 @@ def classification_only(state_dir):
     allowed = {str(p) for p in (directory,) + tuple(directory.parents)}
     allowed.update(str(directory / name) for name in (readiness.MARKER, readiness.SENTINEL))
     checked = []
+    observing_thread = threading.get_ident()
     def check(path):
         frame = sys._getframe(2)
         while frame and frame.f_code.co_filename != classifier.__file__:
@@ -122,6 +123,8 @@ def classification_only(state_dir):
             raise AssertionError('inactive IO outside classifier or named paths: ' + repr(path))
     def reader(real):
         def call(path, *args, **kwargs):
+            if threading.get_ident() != observing_thread:
+                return real(path, *args, **kwargs)
             check(path)
             checked.append(real)
             try:
@@ -131,6 +134,8 @@ def classification_only(state_dir):
         return call
     def opened(real, flags=False):
         def call(path, mode='r', *args, **kwargs):
+            if threading.get_ident() != observing_thread:
+                return real(path, mode, *args, **kwargs)
             check(path)
             selected = kwargs.get('flags' if flags else 'mode', mode)
             if flags:
@@ -189,10 +194,16 @@ def classification_only(state_dir):
                     raise AssertionError('inactive file operation')
         if previous_profile is not None:
             previous_profile(frame, event, call)
+    def forbidden_call(real, message):
+        def call(*args, **kwargs):
+            if threading.get_ident() == observing_thread:
+                raise AssertionError(message)
+            return real(*args, **kwargs)
+        return call
     with ExitStack() as stack:
         for owner, name in ((threading.Thread, "start"), (_thread, "start_new_thread")):
             stack.enter_context(mock.patch.object(owner, name,
-                side_effect=AssertionError("inactive thread start")))
+                forbidden_call(getattr(owner, name), "inactive thread start")))
         for owner in (os, Path):
             for name in ('lstat', 'stat', 'readlink'):
                 if hasattr(owner, name):
@@ -204,7 +215,7 @@ def classification_only(state_dir):
             for name in names:
                 if hasattr(owner, name):
                     stack.enter_context(mock.patch.object(owner, name,
-                        side_effect=AssertionError('inactive filesystem operation: ' + name)))
+                        new=forbidden_call(getattr(owner, name), 'inactive filesystem operation: ' + name)))
         if not _io_audit_installed:
             sys.addaudithook(_classification_audit)
             _io_audit_installed = True
