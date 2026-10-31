@@ -25,3 +25,9 @@ class OutboxError(Exception):
 
 class PlanError(Exception):
     pass
+
+
+def refusal_message(message):
+    """Delegate D5 repair guidance without adding a coordinator D5 import."""
+    import d5_installation
+    return d5_installation.refusal_message(message)
