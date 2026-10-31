@@ -78,11 +78,10 @@ class TestD5Activation(unittest.TestCase):
             with self.subTest(raw=raw), \
                     mock.patch.object(paths.os, 'getcwd', return_value=str(context)), \
                     mock.patch.object(paths, '_resolved', side_effect=Path), \
-                    mock.patch.object(paths, '_pre_git_layout', return_value=(None, None)), \
                     mock.patch.object(paths, '_git', return_value=None), \
                     mock.patch.object(paths, '_external_base', return_value=self.root), \
                     mock.patch.object(sys, 'argv', ['swarm.py', 'schema', '--json']):
-                early = paths.pre_git_default_state()
+                early = swarm._d5_state(None)
                 normal = paths.default_paths()[0]
                 self.assertEqual(early, normal)
                 self.assertTrue(early.parent.name.endswith(hashlib.sha256(raw).hexdigest()[:12]))
@@ -133,6 +132,8 @@ class TestD5Activation(unittest.TestCase):
     def test_git_metadata_preserves_filesystem_path_bytes(self):
         import swarm
         paths = swarm.CP
+        self.assertFalse(hasattr(paths, '_pre_git_layout'))
+        self.assertFalse(hasattr(paths, 'pre_git_default_state'))
         for witness in ('gitfile', 'commondir', 'backlink'):
             with self.subTest(witness=witness), tempfile.TemporaryDirectory(dir=self.root) as tmp:
                 root = Path(tmp).resolve()
@@ -167,10 +168,7 @@ class TestD5Activation(unittest.TestCase):
                             mock.patch.object(Path, 'is_file', exists(original_file)), \
                             mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(root / 'xdg')}), \
                             mock.patch.object(sys, 'argv', ['swarm.py', 'schema', '--json']):
-                        top, discovered = paths._pre_git_layout(linked)
-                        self.assertEqual(top, linked)
-                        expected = Path(os.fsdecode(raw)) if witness != 'backlink' else common
-                        self.assertEqual(discovered, expected)
+                        self.assertEqual(swarm._d5_state(None), paths.resolve_paths()[0])
                         output = io.StringIO()
                         with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
                             swarm.main()
@@ -179,7 +177,7 @@ class TestD5Activation(unittest.TestCase):
                 finally:
                     os.chdir(previous)
 
-    def test_relative_git_backlinks_match_operated_state_before_git(self):
+    def test_relative_git_backlinks_match_operated_state_before_effects(self):
         import itertools
         import swarm
         root = self.root / 'relative-layout'
@@ -208,11 +206,10 @@ class TestD5Activation(unittest.TestCase):
                         with self.subTest(relative=modes, cwd=cwd.name):
                             os.chdir(cwd)
                             normal = swarm.CP.resolve_paths()[0]
-                            self.assertEqual(swarm.CP.pre_git_default_state(), normal)
+                            self.assertEqual(swarm._d5_state(None), normal)
                             ready_installation(root, state_dir=normal)
-                            with mock.patch.object(subprocess, 'run', side_effect=AssertionError('Git before refusal')):
-                                with self.assertRaisesRegex(SystemExit, 'D5 active:'):
-                                    swarm._d5_refuse('run', None, plan={})
+                            with self.assertRaisesRegex(SystemExit, 'D5 active:'):
+                                swarm._d5_refuse('run', None, plan={})
         finally:
             os.chdir(previous)
 
@@ -392,8 +389,11 @@ class TestD5Activation(unittest.TestCase):
                     self.assertEqual(p.stdout.strip(), str(activation.d5_active(directory)))
 
     def test_implicit_lookup_matches_operated_state(self):
-        """PD2 / implicit-lookup-differs: all supported default path sources."""
+        """OD-U8R-11 / implicit-lookup-differs: one operated-path resolver."""
+        import swarm
         import coordinator_paths as paths
+        old = Path.cwd()
+        self.addCleanup(os.chdir, old)
         repo, other = self.root / 'repo', self.root / 'other'
         for directory in (repo, other):
             subprocess.run(['git', 'init', str(directory)], check=True,
@@ -417,17 +417,20 @@ class TestD5Activation(unittest.TestCase):
                             mock.patch.dict(os.environ, {'XDG_STATE_HOME': xdg}), \
                             mock.patch.object(Path, 'home', return_value=self.root / 'home'):
                         operated = paths.resolve_paths(plan=plan, cwd=cwd, extra_repos=extra)[0]
-                        with mock.patch.object(paths, '_git', side_effect=AssertionError('early Git')):
-                            early = paths.pre_git_default_state(cwd, plan=plan, extra_repos=extra)
-                        self.assertEqual(early, operated)
+                        os.chdir(cwd)
+                        with mock.patch.object(paths, 'resolve_paths', wraps=paths.resolve_paths) as resolve:
+                            classified = swarm._d5_state(None, plan=plan, extra_repos=extra)
+                        resolve.assert_called_once_with(plan=plan, extra_repos=extra)
+                        self.assertEqual(classified, operated)
         # Both preferred bases inside operated checkouts force the temp fallback.
         with mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(repo)}), \
                 mock.patch.object(Path, 'home', return_value=other):
             plan = {'units': [{'repo': str(other)}]}
-            self.assertEqual(paths.pre_git_default_state(repo, plan=plan),
+            os.chdir(repo)
+            self.assertEqual(swarm._d5_state(None, plan=plan),
                              paths.resolve_paths(plan=plan, cwd=repo)[0])
 
-    def test_implicit_callers_classify_operated_plan_before_git(self):
+    def test_effectful_git_requires_prior_classification(self):
         import argparse
         import swarm
         repo, other = self.root / 'repo', self.root / 'other'
@@ -444,13 +447,49 @@ class TestD5Activation(unittest.TestCase):
                 mock.patch.object(Path, 'home', return_value=self.root / 'home'):
             state = swarm.CP.resolve_paths(plan=plan)[0]
             ready_installation(self.root, state_dir=state)
-            args = argparse.Namespace(plan=str(plan_path), state_dir=None, fn=swarm.cmd_run, command='run')
-            for call in (lambda: swarm._d5_dispatch(args), lambda: swarm.cmd_run(args),
-                         lambda: swarm._prepare_command_paths(args, plan=plan)):
-                with self.subTest(call=call), mock.patch.object(subprocess, 'run',
-                        side_effect=AssertionError('Git before D5 refusal')):
-                    with self.assertRaisesRegex(SystemExit, 'D5 active:'):
-                        call()
+            # Only these existing resolver queries are allowed before classification.
+            read_only = {('rev-parse', '--show-toplevel'),
+                         ('worktree', 'list', '--porcelain')}
+            import d5_installation
+            run = subprocess.run
+            for installed in (readiness.READY, readiness.BROKEN):
+                if installed == readiness.BROKEN:
+                    with readiness.installer_lease(state):
+                        readiness.withdraw(state)
+                self.assertEqual(readiness.state(state), installed)
+                args = argparse.Namespace(plan=str(plan_path), state_dir=None,
+                                          fn=swarm.cmd_run, command='run')
+                calls = (lambda: swarm._d5_dispatch(args), lambda: swarm.cmd_run(args),
+                         lambda: swarm._prepare_command_paths(args, plan=plan),
+                         lambda: swarm.cmd_validate(argparse.Namespace(
+                             plan=str(plan_path), state_dir=None, check_seeds=True)))
+                for call, classification_count in zip(calls, (1, 2, 1, 1)):
+                    events = []
+                    previous = sys.getprofile()
+                    def profile(frame, event, result):
+                        if event == 'return' and frame.f_code is d5_installation.state.__code__:
+                            events.append(('classified', frame.f_locals['state_dir'], result))
+                        if previous is not None:
+                            previous(frame, event, result)
+                    def git_spy(argv, *positional, **keywords):
+                        if Path(argv[0]).name == 'git':
+                            arguments = tuple(argv[3:]) if argv[1] == '-C' else tuple(argv[1:])
+                            events.append(('git', arguments))
+                            self.assertIn(arguments, read_only,
+                                          'effectful Git before D5 refusal: ' + repr(events))
+                        return run(argv, *positional, **keywords)
+                    with self.subTest(state=installed, call=call), \
+                            mock.patch.object(subprocess, 'run', side_effect=git_spy):
+                        try:
+                            sys.setprofile(profile)
+                            with self.assertRaisesRegex(SystemExit, 'D5 active:'):
+                                call()
+                        finally:
+                            sys.setprofile(previous)
+                    classified = [event for event in events if event[0] == 'classified']
+                    self.assertEqual(classified, [('classified', state, installed)] * classification_count)
+                    self.assertTrue(any(event[0] == 'git' for event in events))
+                    self.assertEqual(events[-1], classified[0])
 
     def test_expanded_explicit_state_matches_operated_state(self):
         import swarm

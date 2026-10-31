@@ -315,7 +315,7 @@ def _d5_state(state_dir, plan=None, extra_repos=()):
         plan, error = U.read_json(plan)
         if error or not isinstance(plan, dict):
             raise SystemExit("D5 cannot resolve operated state: unreadable plan")
-    return CP.pre_git_default_state(plan=plan, extra_repos=extra_repos)
+    return CP.resolve_paths(plan=plan, extra_repos=extra_repos)[0]
 
 
 def _d5_bytecode_advisory(state_dir, plan=None):
