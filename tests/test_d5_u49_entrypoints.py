@@ -37,7 +37,7 @@ class InstallationFixture(unittest.TestCase):
         patch = mock.patch.dict(os.environ, {'XDG_STATE_HOME': str(self.root / 'xdg')})
         patch.start()
         self.addCleanup(patch.stop)
-        self.state = S.CP.pre_git_default_state()
+        self.state = S.CP.resolve_paths()[0]
         self.entry = ready_installation(self.root, state_dir=self.state)
 
     def activation_state(self, active):

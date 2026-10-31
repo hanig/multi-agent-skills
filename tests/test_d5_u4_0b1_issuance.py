@@ -300,8 +300,8 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
         paths = [self.marker, Path(entry["record_dir"]) / "authority.drain.lock"]
         def preserved(path):
             info = path.stat()
-            # Classifier reads may update atime. Explicit metadata writes still
-            # change ctime; retain it and mtime at nanosecond precision.
+            # Classifier reads may update atime. Preserve all observable
+            # write metadata, including the filesystem's ctime precision.
             metadata = (info.st_mode, info.st_ino, info.st_dev, info.st_nlink,
                         info.st_uid, info.st_gid, info.st_size,
                         info.st_mtime_ns, info.st_ctime_ns)
@@ -351,17 +351,53 @@ print(json.dumps(dict(outcome=outcome, writes=writes, launches=launches)))
             self.test_revoke_without_lease_preserves_published_readiness()
 
     def test_readiness_preservation_still_detects_metadata_writes(self):
-        revoke = control.revoke
+        revoke, stat = control.revoke, Path.stat
+        change = [0]
+        marker = self.marker
+
+        class WriteStat:
+            def __init__(self, value):
+                self.value = value
+            def __getattr__(self, name):
+                if name == 'st_ctime_ns':
+                    return self.value.st_ctime_ns + change[0]
+                return getattr(self.value, name)
+
+        def observed(path, *args, **kwargs):
+            value = stat(path, *args, **kwargs)
+            return WriteStat(value) if path == marker else value
 
         def changed(*args, **kwargs):
             result = revoke(*args, **kwargs)
             prior = self.marker.stat()
             os.utime(self.marker, ns=(prior.st_atime_ns + 1000000000, prior.st_mtime_ns))
+            # Inject an observable clock transition, independent of mount clock
+            # precision. The real atime write alone may share publication's tick.
+            change[0] += 1000000000
             return result
 
-        with mock.patch.object(control, 'revoke', changed):
+        with mock.patch.object(control, 'revoke', changed), \
+                mock.patch.object(Path, 'stat', observed):
             with self.assertRaises(AssertionError):
                 self.test_revoke_without_lease_preserves_published_readiness()
+
+    def test_metadata_write_probe_handles_coarse_timestamps(self):
+        original = Path.stat
+        class CoarseStat:
+            def __init__(self, value):
+                self.value = value
+            def __getattr__(self, name):
+                if name == 'st_ctime_ns':
+                    return 1000000000
+                if name == 'st_ctime':
+                    return 1
+                return getattr(self.value, name)
+        def coarse(path, *args, **kwargs):
+            return CoarseStat(original(path, *args, **kwargs))
+        # Safe equivalent of publication and mutation in one coarse clock tick.
+        # No mount, host configuration or production timestamp is changed.
+        with mock.patch.object(Path, 'stat', coarse):
+            self.test_readiness_preservation_still_detects_metadata_writes()
 
     def test_M6_inactive_capture_without_git_history(self):
         # A depth-one checkout has the sources, but no historical Git objects.
