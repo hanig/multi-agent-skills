@@ -31,7 +31,8 @@ import child_environment as CE
 POLICY = "verification-execution.json"
 BUNDLE_REF = "refs/heads/verification-candidate"
 FILES = ("candidate.bundle", "request.json", "remote_verify.py", "verify.py",
-         "child_environment.py", "d5_activation.py", "d5_installation.py")
+         "child_environment.py", "d5_activation.py", "d5_installation.py",
+         "repair_guidance.py")
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
             "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE", "REVOKED"}
 CLEANUP_RETRY_SECONDS = 20

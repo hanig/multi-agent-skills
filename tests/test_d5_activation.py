@@ -435,6 +435,8 @@ class TestD5Activation(unittest.TestCase):
     def test_refusal_route_sweep_uses_one_repair_constructor(self):
         """Finite source sweep; completeness beyond these routes is review-enforced."""
         import d5_installation as classifier
+        import repair_guidance
+        self.assertIs(classifier.refusal_message, repair_guidance.refusal_message)
         self.assertIn('d5_install', classifier.REPAIR_GUIDANCE)
         self.assertIn('promote', classifier.REPAIR_GUIDANCE)
         inventory = {}
@@ -457,8 +459,7 @@ class TestD5Activation(unittest.TestCase):
                         self.assertIsInstance(value.func, ast.Attribute)
                         self.assertEqual(value.func.attr, 'refusal_message')
                         self.assertIsInstance(value.func.value, ast.Name)
-                        expected = 'ST' if path.name == 'swarm.py' else 'DI'
-                        self.assertEqual(value.func.value.id, expected)
+                        self.assertEqual(value.func.value.id, 'DI')
                     inventory[path.name] = inventory.get(path.name, 0) + 1
         self.assertEqual(inventory, {'swarm_outbox.py': 7, 'swarm_evidence.py': 1,
             'swarm.py': 1, 'unit.py': 1, 'remote_verify.py': 2, 'merge_unit.py': 7})

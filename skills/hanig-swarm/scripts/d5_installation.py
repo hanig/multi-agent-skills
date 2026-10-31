@@ -9,18 +9,13 @@ import os
 from pathlib import Path
 import re
 import stat
+from repair_guidance import REPAIR_GUIDANCE, refusal_message
 
 MARKER = "d5-readiness.json"
 INSTALLATION = "installation.json"
 SENTINEL = "d5-installed.json"
 PROFILE = "synchronous-merge-v1"
 NOT_INSTALLED, READY, BROKEN = "NOT_INSTALLED", "READY", "BROKEN"
-REPAIR_GUIDANCE = "repair with d5_install promote"
-
-
-def refusal_message(message):
-    """One repair form for every installation and active-profile refusal."""
-    return message if message.endswith(REPAIR_GUIDANCE) else message + "; " + REPAIR_GUIDANCE
 
 
 BINDING = ("registration_id", "plan_id", "state_dir", "record_dir",
